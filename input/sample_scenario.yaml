@@ -1,0 +1,108 @@
+# 샘플 시나리오
+# - machines: 절단 설비 목록
+# - bays: 후공정 베이 목록
+# - jobs: 절단 대상 작업 목록
+#
+# 현재는 연구계획서 기반 스켈레톤 예시이므로
+# 소수의 설비와 작업만 넣어두었습니다.
+
+machines:
+  # 플라즈마 설비 1
+  - machine_id: plasma_01
+    machine_type: plasma
+    enabled: true
+    eligible_families: [A, B]
+    min_thickness: 6
+    max_thickness: 40
+    table_length_limit: 30
+    cut_speed_factor: 1.00
+    daily_capacity_minutes: 600
+    position: [5, 5]
+
+  # 플라즈마 설비 2
+  - machine_id: plasma_02
+    machine_type: plasma
+    enabled: true
+    eligible_families: [A, C]
+    min_thickness: 8
+    max_thickness: 45
+    table_length_limit: 30
+    cut_speed_factor: 0.95
+    daily_capacity_minutes: 600
+    position: [10, 5]
+
+  # 레이저 설비 1
+  # 예시로 길이 제한이 작고, 속도 계수가 더 빠르도록 넣었습니다.
+  - machine_id: laser_01
+    machine_type: laser
+    enabled: true
+    eligible_families: [A, B]
+    min_thickness: 4
+    max_thickness: 20
+    table_length_limit: 10
+    cut_speed_factor: 0.55
+    daily_capacity_minutes: 600
+    position: [24, 5]
+
+bays:
+  # 우선순위가 높은 후공정 베이
+  - bay_id: bay_A
+    priority_rank: 1
+    capacity_limit: 2
+
+  # 우선순위가 낮은 후공정 베이
+  - bay_id: bay_B
+    priority_rank: 2
+    capacity_limit: 3
+
+jobs:
+  - job_id: job_001
+    family: A
+    thickness: 12
+    plate_length: 9
+    downstream_bay: bay_A
+    priority_weight: 10
+    due_date_minutes: 180
+    preferred_machine_types: [laser, plasma]
+    base_stage_minutes:
+      setup: 8
+      cut: 40
+      finish: 7
+
+  - job_id: job_002
+    family: B
+    thickness: 18
+    plate_length: 13
+    downstream_bay: bay_B
+    priority_weight: 6
+    due_date_minutes: 320
+    preferred_machine_types: [plasma]
+    base_stage_minutes:
+      setup: 10
+      cut: 55
+      finish: 8
+
+  - job_id: job_003
+    family: C
+    thickness: 22
+    plate_length: 11
+    downstream_bay: bay_B
+    priority_weight: 8
+    due_date_minutes: 250
+    base_stage_minutes:
+      setup: 11
+      cut: 60
+      finish: 9
+
+  - job_id: job_004
+    family: A
+    thickness: 8
+    plate_length: 7
+    downstream_bay: bay_A
+    priority_weight: 9
+    due_date_minutes: 140
+    preferred_machine_types: [laser]
+    base_stage_minutes:
+      setup: 7
+      cut: 35
+      finish: 6

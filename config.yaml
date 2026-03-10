@@ -1,0 +1,206 @@
+paths:
+  # 샘플 또는 실제 시나리오 입력 파일
+  scenario_path: input/sample_scenario.yaml
+  # 결과 저장 폴더
+  output_dir: output
+
+# 현재는 cpu 기준으로 동작합니다.
+# GPU가 있는 환경이면 cuda로 바꿀 수 있습니다.
+device: cpu
+
+simulation:
+  # 시작 날짜.
+  # 날짜별 override를 쓰려면 이 값이 기준이 됩니다.
+  start_date: "2026-01-01"
+  # 하루를 몇 분으로 볼지.
+  # 일반적인 운영에서는 1440분(24시간) 기준으로 두는 것이 안전합니다.
+  minutes_per_day: 1440
+  # 시뮬레이션 최대 시간
+  horizon_minutes: 1440
+  # 가능한 액션이 없으면 다음 완료 시점까지 자동 전진
+  auto_advance_time: true
+  # 의사결정 시점마다 한 번씩 액션을 고르는 모드
+  decision_mode: decision_epoch
+  # 실제 현업과 정의 중인 3개 공정 스켈레톤
+  stage_names:
+    - setup
+    - cut
+    - finish
+
+calendar:
+  # 휴무일이 있으면 해당 날짜에는 어떤 설비도 새 작업을 시작하지 않습니다.
+  enable_holidays_off: false
+  holidays_off: []
+
+  # 반일 가동.
+  # half_day_off에 포함된 날짜는 half_day_off_window 시간대에 새 작업 시작 금지입니다.
+  enable_half_day_off: false
+  half_day_off: []
+  half_day_off_window: "12:00-24:00"
+
+  # 점심시간 중지.
+  # lunch_break_dates가 비어 있으면 모든 날짜에 적용합니다.
+  enable_lunch_break: false
+  lunch_break: "12:00-13:00"
+  lunch_break_dates: []
+
+  # 공장 전체 shutdown window.
+  # 예:
+  # global_shutdown_windows:
+  #   "2026-01-02":
+  #     - "08:00-10:00"
+  enable_global_shutdown_windows: false
+  global_shutdown_windows: {}
+
+  # 설비별 운영시간.
+  # default를 두면 모든 날짜 기본 운영시간으로 쓰고,
+  # 특정 날짜 key를 넣으면 그 날짜가 우선합니다.
+  enable_machine_operating_windows: false
+  machine_operating_windows: {}
+
+  # 설비별 계획 정지 시간.
+  # breakdown과 달리 "고장"이 아니라 계획된 정지/미가동입니다.
+  enable_machine_shutdown_windows: false
+  machine_shutdown_windows: {}
+
+  # 설비 고장 / 정지 기능.
+  # 특정 날짜에 특정 설비가 특정 시간 구간 동안 비가동이 됩니다.
+  #
+  # 예:
+  # machine_breakdowns:
+  #   "2026-01-01":
+  #     laser_01:
+  #       - "09:00-12:00"
+  #     plasma_02: full_day
+  enable_machine_breakdowns: false
+  machine_breakdowns: {}
+
+action_space:
+  # 추천 기본값:
+  # - job_machine_pair: 작업-설비 쌍을 직접 선택
+  # 이후 필요하면 machine_then_job 방식도 확장 가능
+  mode: job_machine_pair
+
+agent:
+  # 휴리스틱 기본 규칙
+  default_heuristic: spt
+
+network:
+  # 후보 action graph를 인코딩하는 간단 GNN + MLP 구조입니다.
+  hidden_dim: 128
+  num_gnn_layers: 2
+
+constraints:
+  # category는 "사람이 이해하기 쉬운 큰 분류"입니다.
+  # false로 두면 해당 분류 전체를 꺼버립니다.
+  categories:
+    machine: true
+    capacity: true
+    downstream: true
+    priority: true
+    preference: true
+    layout: true
+    calendar: true
+
+  # 하드 제약:
+  # 액션 마스킹 단계에서 바로 제거되는 제약입니다.
+  # 즉, 이 제약을 위반하는 액션은 아예 선택 후보에 들어오지 않습니다.
+  hard_enabled:
+    # 현재 시각에 공장 전체가 가동 가능한지
+    calendar_open: true
+    # 현재 시각에 특정 설비가 계획된 운영시간 안에 있는지
+    machine_calendar_open: true
+    # 현재 시각에 특정 설비가 고장/정지 상태인지
+    machine_breakdown: true
+    machine_enabled: true
+    family_eligibility: true
+    thickness_range: true
+    table_length_limit: true
+    machine_single_processing: true
+    daily_capacity_limit: true
+    # 날짜별 전체 작업 수 제한.
+    # override가 없으면 자동 통과합니다.
+    daily_job_cap_limit: false
+    downstream_capacity: true
+
+  # 소프트 제약:
+  # 선택은 가능하지만 penalty 또는 우선순위 점수로 반영되는 제약입니다.
+  # 데이터가 들어오면 현업 기준에 맞춰 True/False를 조절하면 됩니다.
+  soft_enabled:
+    downstream_priority: false
+    due_date_urgency: true
+    preferred_machine_type: false
+    downstream_buffer_warning: true
+    load_balance_preference: true
+
+  # 소프트 제약 penalty 크기
+  soft_penalty_weights:
+    downstream_priority: 3.0
+    due_date_urgency: 2.0
+    preferred_machine_type: 1.0
+    downstream_buffer_warning: 1.5
+    load_balance_preference: 0.5
+
+  # override는 "기본 제약값"을 날짜별로 덮어쓰는 기능입니다.
+  # 판넬라인의 daily_*_overrides와 같은 성격입니다.
+  overrides:
+    enable_daily_machine_capacity_overrides: false
+    enable_daily_machine_enable_overrides: false
+    enable_daily_job_cap_overrides: false
+
+    # 예:
+    # "2026-07-10":
+    #   laser_01: 300
+    #   plasma_02: 480
+    daily_machine_capacity_overrides: {}
+
+    # 예:
+    # "2026-07-15":
+    #   laser_01: false
+    #   plasma_01: true
+    daily_machine_enable_overrides: {}
+
+    # 예:
+    # "2026-07-20": 30
+    daily_job_cap_overrides: {}
+
+reward:
+  # makespan 증가를 얼마나 강하게 벌점 줄지
+  makespan_weight: 1.0
+  # 설비 간 부하 불균형을 얼마나 벌점 줄지
+  load_balance_weight: 0.1
+  # 긴급/우선 작업 배정을 얼마나 보너스로 줄지
+  priority_bonus_weight: 0.02
+  # soft constraint penalty를 reward에 얼마나 크게 반영할지
+  soft_penalty_weight: 1.0
+
+train:
+  episodes: 10
+  # 후보:
+  # - reinforce
+  # - ppo
+  # - self_labeling
+  algorithm: ppo
+
+algorithm:
+  reinforce:
+    lr: 0.0005
+    gamma: 0.99
+    entropy_coef: 0.001
+
+  ppo:
+    lr: 0.0003
+    gamma: 0.99
+    clip_eps: 0.2
+    update_epochs: 4
+    value_coef: 0.5
+    entropy_coef: 0.001
+
+  self_labeling:
+    lr: 0.0005
+    rollout_samples: 4
+    imitation_epochs: 3
+    sample_temperature: 1.0
+
+eval:
+  save_summary: false

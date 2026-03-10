@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+output/*.pt
+output/*.pth
+output/generated_*.yaml
+output/*.log
+
+# Keep the output directory itself
+!output/.gitkeep
