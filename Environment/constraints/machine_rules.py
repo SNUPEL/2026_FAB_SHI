@@ -46,11 +46,11 @@ def check_table_length_limit(context: ConstraintContext) -> ConstraintResult:
 
 
 def check_machine_single_processing(context: ConstraintContext) -> ConstraintResult:
-    """같은 시점에 같은 설비는 하나의 작업만 처리 가능하다는 제약입니다."""
+    """현재 시점에 설비의 처리 슬롯이 남아 있는지 확인합니다."""
 
     available_time = context.state.machine_available_at[context.machine.machine_id]
     passed = available_time <= context.state.current_time
-    reason = "" if passed else f"{context.machine.machine_id} busy until {available_time:.2f}"
+    reason = "" if passed else f"all slots of {context.machine.machine_id} busy until {available_time:.2f}"
     return ConstraintResult("machine_single_processing", passed, reason)
 
 
@@ -58,7 +58,7 @@ def check_daily_capacity_limit(context: ConstraintContext) -> ConstraintResult:
     """당일 설비 가용 시간을 초과하는지 확인합니다."""
 
     current_load = float(context.machine_daily_load)
-    next_load = current_load + context.job.estimate_total_minutes(context.machine)
+    next_load = current_load + float(context.candidate_processing_minutes)
     passed = next_load <= float(context.machine_daily_capacity_limit)
     reason = "" if passed else f"daily capacity exceeded on {context.machine.machine_id} ({context.current_day_key})"
     return ConstraintResult("daily_capacity_limit", passed, reason)
@@ -78,3 +78,17 @@ def check_daily_job_cap_limit(context: ConstraintContext) -> ConstraintResult:
     passed = predicted_count <= int(context.daily_job_cap)
     reason = "" if passed else f"daily job cap exceeded on {context.current_day_key}"
     return ConstraintResult("daily_job_cap_limit", passed, reason)
+
+
+def check_auxiliary_resources_available(context: ConstraintContext) -> ConstraintResult:
+    """후보 action이 요구하는 단순 슬롯 자원이 충분한지 확인합니다."""
+
+    passed = not context.resource_shortages
+    if passed:
+        return ConstraintResult("auxiliary_resources_available", True, "")
+
+    shortage_desc = ", ".join(
+        f"{resource_id} short by {shortage}"
+        for resource_id, shortage in sorted(context.resource_shortages.items())
+    )
+    return ConstraintResult("auxiliary_resources_available", False, shortage_desc)

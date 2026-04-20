@@ -21,6 +21,7 @@ class Job:
     base_stage_minutes: Dict[str, float]
     due_date_minutes: Optional[float] = None
     preferred_machine_types: Tuple[str, ...] = ()
+    required_resource_ids: Tuple[str, ...] = ()
 
     def estimate_total_minutes(self, machine: "Machine") -> float:
         """설비별 총 예상 처리시간.
@@ -53,6 +54,8 @@ class Machine:
     table_length_limit: float
     cut_speed_factor: float
     daily_capacity_minutes: float
+    parallel_capacity: int = 1
+    required_resource_ids: Tuple[str, ...] = ()
     position: Tuple[float, float] = (0.0, 0.0)
 
 
@@ -63,6 +66,26 @@ class DownstreamBay:
     bay_id: str
     priority_rank: int
     capacity_limit: int
+    transfer_time_minutes: float = 0.0
+    release_delay_minutes: Optional[float] = None
+
+
+@dataclass
+class AuxiliaryResource:
+    """크레인, 정반 등 단순 슬롯 자원."""
+
+    resource_id: str
+    capacity: int
+
+
+@dataclass(order=True)
+class DownstreamEvent:
+    """후공정 버퍼의 증감 이벤트."""
+
+    event_time: float
+    bay_id: str
+    delta: int
+    event_type: str = "arrival"
 
 
 @dataclass
@@ -75,4 +98,11 @@ class ScheduledOperation:
     finish_time: float
     downstream_bay: str
     estimated_minutes: float
+    processing_minutes: float = 0.0
+    changeover_minutes: float = 0.0
+    blocked_minutes: float = 0.0
+    downstream_arrival_time: Optional[float] = None
+    downstream_release_time: Optional[float] = None
+    machine_slot_index: int = 0
+    resource_ids: Tuple[str, ...] = ()
     stage_minutes: Dict[str, float] = field(default_factory=dict)

@@ -79,6 +79,21 @@ class ConstraintContext:
 
     machine_breakdown_active / machine_breakdown_reason:
       현재 시각에 특정 설비가 고장/비계획 정지 상태인지와, 그 이유
+
+    candidate_processing_minutes / candidate_elapsed_minutes:
+      현재 후보 action을 지금 시작했을 때의 순수 작업시간 / 실제 점유시간
+
+    candidate_finish_time:
+      작업구간 캘린더를 반영한 완료 시점
+
+    candidate_downstream_arrival_time / candidate_downstream_release_time:
+      후공정 버퍼 도착 및 해소 예정 시점
+
+    predicted_downstream_load_at_arrival:
+      후보 action까지 포함했을 때 도착 시점 예상 버퍼 적치량
+
+    required_resource_ids / resource_shortages:
+      후보 action이 점유해야 하는 단순 슬롯 자원과 부족 자원 목록
     """
 
     job: Any
@@ -102,3 +117,13 @@ class ConstraintContext:
     machine_calendar_reason: str = ""
     machine_breakdown_active: bool = False
     machine_breakdown_reason: str = ""
+    candidate_processing_minutes: float = 0.0
+    candidate_elapsed_minutes: float = 0.0
+    candidate_finish_time: float = 0.0
+    candidate_downstream_arrival_time: float = 0.0
+    candidate_downstream_release_time: Any = None
+    candidate_changeover_minutes: float = 0.0
+    candidate_blocked_minutes: float = 0.0
+    predicted_downstream_load_at_arrival: int = 0
+    required_resource_ids: Any = field(default_factory=tuple)
+    resource_shortages: Dict[str, int] = field(default_factory=dict)

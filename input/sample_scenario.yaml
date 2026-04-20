@@ -17,6 +17,8 @@ machines:
     table_length_limit: 30
     cut_speed_factor: 1.00
     daily_capacity_minutes: 600
+    parallel_capacity: 1
+    required_resource_ids: [cutting_support]
     position: [5, 5]
 
   # 플라즈마 설비 2
@@ -29,6 +31,8 @@ machines:
     table_length_limit: 30
     cut_speed_factor: 0.95
     daily_capacity_minutes: 600
+    parallel_capacity: 2
+    required_resource_ids: [cutting_support]
     position: [10, 5]
 
   # 레이저 설비 1
@@ -42,18 +46,30 @@ machines:
     table_length_limit: 10
     cut_speed_factor: 0.55
     daily_capacity_minutes: 600
+    parallel_capacity: 1
+    required_resource_ids: [precision_support]
     position: [24, 5]
+
+resources:
+  - resource_id: cutting_support
+    capacity: 2
+  - resource_id: precision_support
+    capacity: 1
 
 bays:
   # 우선순위가 높은 후공정 베이
   - bay_id: bay_A
     priority_rank: 1
     capacity_limit: 2
+    transfer_time_minutes: 10
+    release_delay_minutes: 180
 
   # 우선순위가 낮은 후공정 베이
   - bay_id: bay_B
     priority_rank: 2
     capacity_limit: 3
+    transfer_time_minutes: 15
+    release_delay_minutes: 240
 
 jobs:
   - job_id: job_001

@@ -20,11 +20,11 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from .constraints import ConstraintContext, ConstraintManager
 from .constraints.registry import CandidateConstraintBundle
-from .data import DownstreamBay, Job, Machine, ScheduledOperation
+from .data import AuxiliaryResource, DownstreamBay, DownstreamEvent, Job, Machine, ScheduledOperation
 from .reward import compute_load_imbalance, compute_step_reward
 from .state import SimulationState
 
@@ -40,6 +40,13 @@ class ActionCandidate:
     job: Job
     machine: Machine
     estimated_minutes: float
+    processing_minutes: float
+    finish_time: float
+    downstream_arrival_time: float
+    downstream_release_time: Optional[float]
+    changeover_minutes: float = 0.0
+    blocked_minutes: float = 0.0
+    required_resource_ids: Tuple[str, ...] = ()
     hard_reasons: List[str] = field(default_factory=list)
     soft_reasons: List[str] = field(default_factory=list)
     soft_penalty: float = 0.0
@@ -60,12 +67,14 @@ class CuttingSimulation:
         jobs: Dict[str, Job],
         machines: Dict[str, Machine],
         bays: Dict[str, DownstreamBay],
+        resources: Dict[str, AuxiliaryResource],
         layout,
         config: Dict,
     ):
         self.jobs = jobs
         self.machines = machines
         self.bays = bays
+        self.resources = resources
         self.layout = layout
         self.config = config
         self.minutes_per_day = int(config["simulation"].get("minutes_per_day", 1440))
@@ -92,10 +101,16 @@ class CuttingSimulation:
             current_time=0.0,
             unscheduled_jobs=set(self.jobs.keys()),
             machine_available_at={machine_id: 0.0 for machine_id in self.machines},
+            machine_slot_available_at={
+                machine_id: [0.0 for _ in range(max(1, int(machine.parallel_capacity)))]
+                for machine_id, machine in self.machines.items()
+            },
             machine_loads={machine_id: 0.0 for machine_id in self.machines},
             downstream_loads={bay_id: 0 for bay_id in self.bays},
             machine_daily_loads={},
             scheduled_job_count_by_day={},
+            machine_last_family={machine_id: None for machine_id in self.machines},
+            resource_active_until={resource_id: [] for resource_id in self.resources},
         )
 
     @staticmethod
@@ -185,6 +200,77 @@ class CuttingSimulation:
         if day_key not in self.state.scheduled_job_count_by_day:
             self.state.scheduled_job_count_by_day[day_key] = 0
 
+    def _sync_machine_earliest_availability(self, machine_id: str) -> None:
+        """설비 슬롯 목록을 기반으로 가장 이른 가용 시각을 갱신합니다."""
+
+        slot_times = self.state.machine_slot_available_at[machine_id]
+        self.state.machine_available_at[machine_id] = min(slot_times) if slot_times else self.state.current_time
+
+    def _sync_all_machine_availability(self) -> None:
+        """모든 설비의 가장 이른 가용 시각을 다시 계산합니다."""
+
+        for machine_id in self.machines:
+            self._sync_machine_earliest_availability(machine_id)
+
+    def _prune_resource_allocations(self, at_time: Optional[float] = None) -> None:
+        """현재 시점 이전에 종료된 보조자원 점유를 제거합니다."""
+
+        target_time = self.state.current_time if at_time is None else at_time
+        for resource_id, finish_times in self.state.resource_active_until.items():
+            self.state.resource_active_until[resource_id] = [
+                finish_time
+                for finish_time in finish_times
+                if finish_time > target_time
+            ]
+
+    def _apply_due_downstream_events(self, at_time: Optional[float] = None) -> None:
+        """현재 시점까지 도달한 후공정 버퍼 이벤트를 적용합니다."""
+
+        target_time = self.state.current_time if at_time is None else at_time
+        if not self.state.downstream_events:
+            return
+
+        pending_events: List[DownstreamEvent] = []
+        for event in sorted(self.state.downstream_events, key=lambda item: item.event_time):
+            if event.event_time <= target_time:
+                next_load = self.state.downstream_loads[event.bay_id] + int(event.delta)
+                self.state.downstream_loads[event.bay_id] = max(0, next_load)
+            else:
+                pending_events.append(event)
+        self.state.downstream_events = pending_events
+
+    def _move_current_time(self, new_time: float) -> None:
+        """시각 이동 시 상태 동기화를 함께 수행합니다."""
+
+        self.state.current_time = new_time
+        self._ensure_day_state(self._current_day_key())
+        self._prune_resource_allocations()
+        self._apply_due_downstream_events()
+
+    def _resource_shortages_for(self, resource_ids: Tuple[str, ...]) -> Dict[str, int]:
+        """현재 시점 기준으로 부족한 보조자원 슬롯을 계산합니다."""
+
+        self._prune_resource_allocations()
+        shortages: Dict[str, int] = {}
+        for resource_id in resource_ids:
+            resource = self.resources.get(resource_id)
+            if resource is None:
+                shortages[resource_id] = 1
+                continue
+            active_count = len(self.state.resource_active_until.get(resource_id, []))
+            shortage = active_count + 1 - int(resource.capacity)
+            if shortage > 0:
+                shortages[resource_id] = shortage
+        return shortages
+
+    def _required_resource_ids(self, job: Job, machine: Machine) -> Tuple[str, ...]:
+        """설비/작업이 동시에 요구하는 자원 목록을 정규화합니다."""
+
+        resource_ids = dict.fromkeys(
+            [*tuple(machine.required_resource_ids), *tuple(job.required_resource_ids)]
+        )
+        return tuple(resource_ids.keys())
+
     def _get_daily_override_map(self, flag_name: str, map_name: str) -> Dict:
         """override 활성화 여부와 실제 override map을 함께 읽습니다."""
 
@@ -192,7 +278,7 @@ class CuttingSimulation:
             return {}
         return self.override_config.get(map_name, {}) or {}
 
-    def _get_machine_enabled_flag(self, machine_id: str) -> bool:
+    def _get_machine_enabled_flag(self, machine_id: str, at_time: Optional[float] = None) -> bool:
         """기본 enabled + 날짜별 machine enable override를 반영합니다."""
 
         base_enabled = bool(self.machines[machine_id].enabled)
@@ -200,7 +286,7 @@ class CuttingSimulation:
             "enable_daily_machine_enable_overrides",
             "daily_machine_enable_overrides",
         )
-        current_day_key = self._current_day_key()
+        current_day_key = self._current_day_key(at_time)
         normalized = {
             self._normalize_date_key(day_key): value
             for day_key, value in override_map.items()
@@ -210,12 +296,13 @@ class CuttingSimulation:
             return bool(day_override[machine_id])
         return base_enabled
 
-    def _is_global_calendar_open(self) -> tuple[bool, str]:
+    def _is_global_calendar_open(self, at_time: Optional[float] = None) -> tuple[bool, str]:
         """현재 시각에 공장 전체가 가동 가능한지 판단합니다."""
 
         calendar_cfg = self.config.get("calendar", {})
-        current_day_key = self._current_day_key()
-        minute_of_day = self._minute_of_day(self.state.current_time, self.minutes_per_day)
+        target_time = self.state.current_time if at_time is None else at_time
+        current_day_key = self._current_day_key(target_time)
+        minute_of_day = self._minute_of_day(target_time, self.minutes_per_day)
 
         if calendar_cfg.get("enable_holidays_off", False):
             holiday_specs = calendar_cfg.get("holidays_off", []) or []
@@ -249,7 +336,7 @@ class CuttingSimulation:
 
         return True, ""
 
-    def _machine_windows_for_day(self, config_key: str, machine_id: str) -> List[str]:
+    def _machine_windows_for_day(self, config_key: str, machine_id: str, at_time: Optional[float] = None) -> List[str]:
         """설비별 운영/정지 시간 구간을 읽습니다.
 
         지원 형태:
@@ -266,7 +353,7 @@ class CuttingSimulation:
 
         calendar_cfg = self.config.get("calendar", {})
         raw_map = calendar_cfg.get(config_key, {}) or {}
-        current_day_key = self._current_day_key()
+        current_day_key = self._current_day_key(at_time)
 
         normalized = {}
         for day_key, machine_map in raw_map.items():
@@ -284,38 +371,40 @@ class CuttingSimulation:
             return [windows]
         return [str(window) for window in windows]
 
-    def _machine_calendar_status(self, machine_id: str) -> tuple[bool, str]:
+    def _machine_calendar_status(self, machine_id: str, at_time: Optional[float] = None) -> tuple[bool, str]:
         """현재 시각에 특정 설비가 계획된 운영시간 안에 있는지 판단합니다.
 
         이 함수는 "고장"이 아니라 "계획된 운영 캘린더"를 다룹니다.
         """
 
         calendar_cfg = self.config.get("calendar", {})
-        current_day_key = self._current_day_key()
-        minute_of_day = self._minute_of_day(self.state.current_time, self.minutes_per_day)
+        target_time = self.state.current_time if at_time is None else at_time
+        current_day_key = self._current_day_key(target_time)
+        minute_of_day = self._minute_of_day(target_time, self.minutes_per_day)
 
         if calendar_cfg.get("enable_machine_operating_windows", False):
-            windows = self._machine_windows_for_day("machine_operating_windows", machine_id)
+            windows = self._machine_windows_for_day("machine_operating_windows", machine_id, at_time=target_time)
             if windows and not any(self._is_in_time_window(minute_of_day, window) for window in windows):
                 return False, f"{machine_id} outside operating window on {current_day_key}"
 
         if calendar_cfg.get("enable_machine_shutdown_windows", False):
-            windows = self._machine_windows_for_day("machine_shutdown_windows", machine_id)
+            windows = self._machine_windows_for_day("machine_shutdown_windows", machine_id, at_time=target_time)
             for window in windows:
                 if self._is_in_time_window(minute_of_day, window):
                     return False, f"{machine_id} planned shutdown active ({window})"
 
         return True, ""
 
-    def _machine_breakdown_status(self, machine_id: str) -> tuple[bool, str]:
+    def _machine_breakdown_status(self, machine_id: str, at_time: Optional[float] = None) -> tuple[bool, str]:
         """현재 시각에 특정 설비가 고장/정지 상태인지 판단합니다."""
 
         calendar_cfg = self.config.get("calendar", {})
         if not calendar_cfg.get("enable_machine_breakdowns", False):
             return False, ""
 
-        current_day_key = self._current_day_key()
-        minute_of_day = self._minute_of_day(self.state.current_time, self.minutes_per_day)
+        target_time = self.state.current_time if at_time is None else at_time
+        current_day_key = self._current_day_key(target_time)
+        minute_of_day = self._minute_of_day(target_time, self.minutes_per_day)
         breakdown_map = calendar_cfg.get("machine_breakdowns", {}) or {}
         normalized = {
             self._normalize_date_key(day_key): machine_map
@@ -340,6 +429,94 @@ class CuttingSimulation:
                 return True, f"{machine_id} breakdown active ({window})"
 
         return False, ""
+
+    def _is_machine_working(self, machine_id: str, at_time: float) -> bool:
+        """주어진 시각에 작업이 실제로 진행될 수 있는지 판단합니다."""
+
+        global_open, _ = self._is_global_calendar_open(at_time=at_time)
+        machine_open, _ = self._machine_calendar_status(machine_id, at_time=at_time)
+        breakdown_active, _ = self._machine_breakdown_status(machine_id, at_time=at_time)
+        machine_enabled = self._get_machine_enabled_flag(machine_id, at_time=at_time)
+        return global_open and machine_open and (not breakdown_active) and machine_enabled
+
+    def _changeover_minutes_for(self, machine_id: str, job: Job) -> float:
+        """직전 계열과 다를 때 추가 셋업 시간을 계산합니다."""
+
+        setup_cfg = self.config.get("setup", {})
+        if not setup_cfg.get("enable_family_changeover", False):
+            return 0.0
+
+        previous_family = self.state.machine_last_family.get(machine_id)
+        if previous_family is None or previous_family == job.family:
+            return 0.0
+
+        machine_type = self.machines[machine_id].machine_type
+        by_type = setup_cfg.get("machine_type_changeover_minutes", {}) or {}
+        if machine_type in by_type:
+            return float(by_type[machine_type])
+        return float(setup_cfg.get("default_family_changeover_minutes", 0.0))
+
+    def _effective_finish_time(self, machine_id: str, start_time: float, processing_minutes: float) -> tuple[float, float]:
+        """작업 구간 중 비가동 시간을 반영해 실제 완료 시각을 계산합니다."""
+
+        calendar_cfg = self.config.get("calendar", {})
+        if not calendar_cfg.get("enable_operation_time_adjustment", False):
+            return start_time + processing_minutes, 0.0
+
+        remaining = float(processing_minutes)
+        current_time = float(start_time)
+        blocked_minutes = 0.0
+        max_extension = float(calendar_cfg.get("operation_time_adjustment_limit_minutes", 10080))
+        guard_end = start_time + processing_minutes + max_extension
+
+        while remaining > 1e-9 and current_time <= guard_end:
+            if self._is_machine_working(machine_id, current_time):
+                work_chunk = min(1.0, remaining)
+                current_time += work_chunk
+                remaining -= work_chunk
+            else:
+                current_time += 1.0
+                blocked_minutes += 1.0
+
+        return current_time, blocked_minutes
+
+    def _candidate_timing(self, job: Job, machine: Machine) -> Dict[str, float | Optional[float]]:
+        """현재 시점에 후보 action을 시작했을 때의 시간 정보를 계산합니다."""
+
+        start_time = self.state.current_time
+        changeover_minutes = self._changeover_minutes_for(machine.machine_id, job)
+        processing_minutes = job.estimate_total_minutes(machine) + changeover_minutes
+        finish_time, blocked_minutes = self._effective_finish_time(
+            machine.machine_id,
+            start_time,
+            processing_minutes,
+        )
+        bay = self.bays[job.downstream_bay]
+        arrival_time = finish_time + float(bay.transfer_time_minutes)
+        release_time = None
+        if bay.release_delay_minutes is not None:
+            release_time = arrival_time + float(bay.release_delay_minutes)
+
+        return {
+            "start_time": start_time,
+            "processing_minutes": processing_minutes,
+            "elapsed_minutes": finish_time - start_time,
+            "finish_time": finish_time,
+            "changeover_minutes": changeover_minutes,
+            "blocked_minutes": blocked_minutes,
+            "downstream_arrival_time": arrival_time,
+            "downstream_release_time": release_time,
+        }
+
+    def _project_downstream_load(self, bay_id: str, at_time: float) -> int:
+        """현재 시점 이후 이벤트를 반영해 특정 시점 예상 적치량을 계산합니다."""
+
+        self._apply_due_downstream_events()
+        predicted_load = int(self.state.downstream_loads[bay_id])
+        for event in self.state.downstream_events:
+            if self.state.current_time < event.event_time <= at_time and event.bay_id == bay_id:
+                predicted_load += int(event.delta)
+        return max(0, predicted_load)
 
     def _has_temporary_blocking_condition(self) -> bool:
         """현재 후보가 없는 이유가 "시간이 지나면 풀릴 가능성이 있는가"를 판단합니다.
@@ -397,6 +574,14 @@ class CuttingSimulation:
             if daily_load >= daily_capacity:
                 return True
 
+        self._prune_resource_allocations()
+        for finish_times in self.state.resource_active_until.values():
+            if finish_times:
+                return True
+
+        if any(event.event_time > self.state.current_time for event in self.state.downstream_events):
+            return True
+
         return False
 
     def _get_machine_daily_capacity_limit(self, machine_id: str) -> float:
@@ -443,7 +628,10 @@ class CuttingSimulation:
         """새 에피소드 시작."""
 
         self.state = self._build_initial_state()
+        self._sync_all_machine_availability()
         self._ensure_day_state(self._current_day_key(at_time=0.0))
+        self._prune_resource_allocations(at_time=0.0)
+        self._apply_due_downstream_events(at_time=0.0)
         self._advance_to_decision_epoch()
 
     def _is_machine_available(self, machine_id: str) -> bool:
@@ -454,8 +642,13 @@ class CuttingSimulation:
     def _build_constraint_context(self, job: Job, machine: Machine) -> ConstraintContext:
         """제약 평가에 필요한 문맥 객체를 만듭니다."""
 
+        self._apply_due_downstream_events()
+        self._prune_resource_allocations()
         current_day_key = self._current_day_key()
         self._ensure_day_state(current_day_key)
+        timing = self._candidate_timing(job, machine)
+        required_resource_ids = self._required_resource_ids(job, machine)
+        resource_shortages = self._resource_shortages_for(required_resource_ids)
         global_calendar_open, global_calendar_reason = self._is_global_calendar_open()
         machine_calendar_open, machine_calendar_reason = self._machine_calendar_status(machine.machine_id)
         machine_breakdown_active, machine_breakdown_reason = self._machine_breakdown_status(machine.machine_id)
@@ -481,18 +674,31 @@ class CuttingSimulation:
             machine_calendar_reason=machine_calendar_reason,
             machine_breakdown_active=machine_breakdown_active,
             machine_breakdown_reason=machine_breakdown_reason,
+            candidate_processing_minutes=float(timing["processing_minutes"]),
+            candidate_elapsed_minutes=float(timing["elapsed_minutes"]),
+            candidate_finish_time=float(timing["finish_time"]),
+            candidate_downstream_arrival_time=float(timing["downstream_arrival_time"]),
+            candidate_downstream_release_time=timing["downstream_release_time"],
+            candidate_changeover_minutes=float(timing["changeover_minutes"]),
+            candidate_blocked_minutes=float(timing["blocked_minutes"]),
+            predicted_downstream_load_at_arrival=(
+                self._project_downstream_load(job.downstream_bay, float(timing["downstream_arrival_time"])) + 1
+            ),
+            required_resource_ids=required_resource_ids,
+            resource_shortages=resource_shortages,
         )
 
-    def _evaluate_candidate(self, job: Job, machine: Machine) -> CandidateConstraintBundle:
+    def _evaluate_candidate(self, context: ConstraintContext) -> CandidateConstraintBundle:
         """후보 action 1개에 대해 하드/소프트 제약을 함께 평가합니다."""
 
-        context = self._build_constraint_context(job, machine)
         return self.constraint_manager.evaluate_candidate(context)
 
     def get_candidates(self) -> List[ActionCandidate]:
         """현재 의사결정 시점에서 가능한 action 후보 목록을 만듭니다."""
 
         candidates: List[ActionCandidate] = []
+        self._apply_due_downstream_events()
+        self._prune_resource_allocations()
         current_day_key = self._current_day_key()
         self._ensure_day_state(current_day_key)
 
@@ -503,7 +709,8 @@ class CuttingSimulation:
 
             for job_id in sorted(self.state.unscheduled_jobs):
                 job = self.jobs[job_id]
-                bundle = self._evaluate_candidate(job, machine)
+                context = self._build_constraint_context(job, machine)
+                bundle = self._evaluate_candidate(context)
 
                 # 하드 제약 하나라도 실패하면 이 action은 후보에서 제거합니다.
                 if not bundle.hard_passed:
@@ -514,7 +721,14 @@ class CuttingSimulation:
                         action_id=f"{job.job_id}@{machine.machine_id}",
                         job=job,
                         machine=machine,
-                        estimated_minutes=job.estimate_total_minutes(machine),
+                        estimated_minutes=float(context.candidate_elapsed_minutes),
+                        processing_minutes=float(context.candidate_processing_minutes),
+                        finish_time=float(context.candidate_finish_time),
+                        downstream_arrival_time=float(context.candidate_downstream_arrival_time),
+                        downstream_release_time=context.candidate_downstream_release_time,
+                        changeover_minutes=float(context.candidate_changeover_minutes),
+                        blocked_minutes=float(context.candidate_blocked_minutes),
+                        required_resource_ids=tuple(context.required_resource_ids),
                         hard_reasons=bundle.hard_reasons,
                         soft_reasons=bundle.soft_reasons,
                         soft_penalty=bundle.soft_penalty,
@@ -531,7 +745,14 @@ class CuttingSimulation:
     def _current_completion_time(self) -> float:
         """현재까지의 예상 전체 완료 시점을 계산합니다."""
 
-        return max(self.state.machine_available_at.values(), default=self.state.current_time)
+        slot_times = [
+            slot_time
+            for slot_list in self.state.machine_slot_available_at.values()
+            for slot_time in slot_list
+        ]
+        if slot_times:
+            return max(slot_times)
+        return self.state.current_time
 
     def get_makespan(self) -> float:
         """현재 스케줄의 makespan을 반환합니다.
@@ -548,7 +769,7 @@ class CuttingSimulation:
         """선택한 action으로부터 schedule 레코드를 만듭니다."""
 
         start_time = self.state.current_time
-        finish_time = start_time + candidate.estimated_minutes
+        finish_time = candidate.finish_time
 
         return ScheduledOperation(
             job_id=candidate.job.job_id,
@@ -557,8 +778,14 @@ class CuttingSimulation:
             finish_time=finish_time,
             downstream_bay=candidate.job.downstream_bay,
             estimated_minutes=candidate.estimated_minutes,
+            processing_minutes=candidate.processing_minutes,
+            changeover_minutes=candidate.changeover_minutes,
+            blocked_minutes=candidate.blocked_minutes,
+            downstream_arrival_time=candidate.downstream_arrival_time,
+            downstream_release_time=candidate.downstream_release_time,
+            resource_ids=tuple(candidate.required_resource_ids),
             stage_minutes={
-                "setup": candidate.job.base_stage_minutes.get("setup", 0.0),
+                "setup": candidate.job.base_stage_minutes.get("setup", 0.0) + candidate.changeover_minutes,
                 "cut": candidate.job.base_stage_minutes.get("cut", 0.0) * candidate.machine.cut_speed_factor,
                 "finish": candidate.job.base_stage_minutes.get("finish", 0.0),
             },
@@ -569,28 +796,70 @@ class CuttingSimulation:
 
         operation_day_key = self._current_day_key(at_time=operation.start_time)
         self._ensure_day_state(operation_day_key)
+        slot_times = self.state.machine_slot_available_at[operation.machine_id]
+        slot_index = min(
+            range(len(slot_times)),
+            key=lambda index: (slot_times[index], index),
+        )
+        slot_times[slot_index] = operation.finish_time
+        operation.machine_slot_index = slot_index
+        self._sync_machine_earliest_availability(operation.machine_id)
+
         self.state.schedule.append(operation)
         self.state.unscheduled_jobs.remove(operation.job_id)
-        self.state.machine_available_at[operation.machine_id] = operation.finish_time
-        self.state.machine_loads[operation.machine_id] += operation.estimated_minutes
-        self.state.machine_daily_loads[operation_day_key][operation.machine_id] += operation.estimated_minutes
+        self.state.machine_loads[operation.machine_id] += operation.processing_minutes
+        self.state.machine_daily_loads[operation_day_key][operation.machine_id] += operation.processing_minutes
         self.state.scheduled_job_count_by_day[operation_day_key] += 1
-        self.state.downstream_loads[operation.downstream_bay] += 1
+        self.state.machine_last_family[operation.machine_id] = self.jobs[operation.job_id].family
+
+        for resource_id in operation.resource_ids:
+            self.state.resource_active_until.setdefault(resource_id, []).append(operation.finish_time)
+
+        if operation.downstream_arrival_time is not None:
+            self.state.downstream_events.append(
+                DownstreamEvent(
+                    event_time=float(operation.downstream_arrival_time),
+                    bay_id=operation.downstream_bay,
+                    delta=1,
+                    event_type="arrival",
+                )
+            )
+        if operation.downstream_release_time is not None:
+            self.state.downstream_events.append(
+                DownstreamEvent(
+                    event_time=float(operation.downstream_release_time),
+                    bay_id=operation.downstream_bay,
+                    delta=-1,
+                    event_type="release",
+                )
+            )
+        self.state.downstream_events.sort(key=lambda item: item.event_time)
 
     def advance_time(self) -> bool:
         """다음 설비 완료 시점으로 시간을 넘깁니다."""
 
         future_times = sorted(
             {
-                available_time
-                for available_time in self.state.machine_available_at.values()
-                if available_time > self.state.current_time
+                slot_time
+                for slot_list in self.state.machine_slot_available_at.values()
+                for slot_time in slot_list
+                if slot_time > self.state.current_time
+            }
+            | {
+                finish_time
+                for finish_times in self.state.resource_active_until.values()
+                for finish_time in finish_times
+                if finish_time > self.state.current_time
+            }
+            | {
+                event.event_time
+                for event in self.state.downstream_events
+                if event.event_time > self.state.current_time
             }
         )
         if not future_times:
             return False
-        self.state.current_time = future_times[0]
-        self._ensure_day_state(self._current_day_key())
+        self._move_current_time(future_times[0])
         return True
 
     def _advance_to_decision_epoch(self) -> None:
@@ -619,8 +888,7 @@ class CuttingSimulation:
                 return
 
             if self._has_temporary_blocking_condition():
-                self.state.current_time = min(self.state.current_time + 1.0, horizon_minutes)
-                self._ensure_day_state(self._current_day_key())
+                self._move_current_time(min(self.state.current_time + 1.0, horizon_minutes))
                 continue
 
             moved = self.advance_time()
@@ -630,6 +898,8 @@ class CuttingSimulation:
     def build_observation(self) -> Dict:
         """현재 상태를 외부 정책이 읽기 쉬운 dict 형태로 반환합니다."""
 
+        self._apply_due_downstream_events()
+        self._prune_resource_allocations()
         candidates = self.get_candidates()
         current_day_key = self._current_day_key()
         self._ensure_day_state(current_day_key)
@@ -688,6 +958,9 @@ class CuttingSimulation:
                     "machine_type": candidate.machine.machine_type,
                     "machine_type_index": self.machine_type_to_index[candidate.machine.machine_type],
                     "estimated_minutes": candidate.estimated_minutes,
+                    "processing_minutes": candidate.processing_minutes,
+                    "blocked_minutes": candidate.blocked_minutes,
+                    "changeover_minutes": candidate.changeover_minutes,
                     "priority_weight": candidate.job.priority_weight,
                     "soft_penalty": candidate.soft_penalty,
                     "soft_reasons": candidate.soft_reasons,
@@ -700,6 +973,8 @@ class CuttingSimulation:
                     "downstream_priority_rank": self.bays[candidate.job.downstream_bay].priority_rank,
                     "downstream_load_ratio": self.state.downstream_loads[candidate.job.downstream_bay]
                     / max(self.bays[candidate.job.downstream_bay].capacity_limit, 1),
+                    "downstream_arrival_time_norm": candidate.downstream_arrival_time
+                    / max(self.config["simulation"]["horizon_minutes"], 1),
                     "machine_speed_factor": candidate.machine.cut_speed_factor,
                     "machine_load_ratio": self.state.machine_daily_loads[current_day_key][candidate.machine.machine_id]
                     / max(self._get_machine_daily_capacity_limit(candidate.machine.machine_id), 1.0),

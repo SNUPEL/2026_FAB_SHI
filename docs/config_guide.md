@@ -138,6 +138,8 @@
 - `machine_shutdown_windows`
 - `enable_machine_breakdowns`
 - `machine_breakdowns`
+- `enable_operation_time_adjustment`
+- `operation_time_adjustment_limit_minutes`
 
 핵심 규칙:
 - `constraints.hard_enabled.calendar_open`
@@ -145,12 +147,22 @@
 - `constraints.hard_enabled.machine_breakdown`
 
 중요:
-- 현재 구현은 `작업 시작 시점` 기준입니다.
-- 이미 시작한 작업이 점심시간/고장 시간에 걸쳐도 중간 정지하지는 않습니다.
+- 기본 hard mask는 여전히 `작업 시작 시점` 기준입니다.
+- 다만 `enable_operation_time_adjustment: true`이면 작업 구간 중 비가동 시간만큼 완료시각을 뒤로 미룹니다.
 
 ---
 
-### 2.11 reward
+### 2.11 setup
+
+- `enable_family_changeover`
+- `default_family_changeover_minutes`
+- `machine_type_changeover_minutes`
+
+즉, 직전 작업과 계열이 바뀌면 추가 셋업 시간을 반영할 수 있습니다.
+
+---
+
+### 2.12 reward
 
 - `makespan_weight`
 - `load_balance_weight`
@@ -162,7 +174,7 @@ reward에서 어떤 목표를 얼마나 중요하게 볼지도 설정합니다.
 
 ---
 
-### 2.12 train
+### 2.13 train
 
 - `episodes`
 - `algorithm`

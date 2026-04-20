@@ -49,7 +49,7 @@ def build_tensor_observation(observation: Dict, device: torch.device) -> TensorO
     family_size = max(int(vocab_sizes["family"]), 1)
     machine_type_size = max(int(vocab_sizes["machine_type"]), 1)
     bay_size = max(int(vocab_sizes["bay"]), 1)
-    candidate_dim = 11 + family_size + machine_type_size + bay_size
+    candidate_dim = 15 + family_size + machine_type_size + bay_size
 
     if not actions:
         return TensorObservation(
@@ -87,12 +87,16 @@ def build_tensor_observation(observation: Dict, device: torch.device) -> TensorO
         # 즉, job-machine pair를 수치 벡터로 바꾼 결과입니다.
         row = [
             action["estimated_minutes"] / 600.0,
+            action["processing_minutes"] / 600.0,
+            action["blocked_minutes"] / 600.0,
+            action["changeover_minutes"] / 120.0,
             action["priority_weight"] / 10.0,
             action["soft_penalty"],
             action["thickness"] / 100.0,
             action["plate_length"] / 50.0,
             action["downstream_priority_rank"] / 10.0,
             action["downstream_load_ratio"],
+            action["downstream_arrival_time_norm"],
             action["machine_speed_factor"],
             action["machine_load_ratio"],
             action["remaining_machine_capacity_ratio"],

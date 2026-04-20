@@ -55,6 +55,8 @@ def command_show_config(args: argparse.Namespace) -> None:
     print(f"- machine_operating_windows_enabled: {config['calendar'].get('enable_machine_operating_windows', False)}")
     print(f"- machine_shutdown_windows_enabled: {config['calendar'].get('enable_machine_shutdown_windows', False)}")
     print(f"- machine_breakdowns_enabled: {config['calendar'].get('enable_machine_breakdowns', False)}")
+    print(f"- operation_time_adjustment_enabled: {config['calendar'].get('enable_operation_time_adjustment', False)}")
+    print(f"- family_changeover_enabled: {config.get('setup', {}).get('enable_family_changeover', False)}")
 
 
 def command_simulate(args: argparse.Namespace) -> None:
@@ -67,6 +69,7 @@ def command_simulate(args: argparse.Namespace) -> None:
     print("[simulation]")
     print(f"- heuristic: {heuristic_name}")
     print(f"- current_time: {summary['current_time']:.2f}")
+    print(f"- makespan: {summary['makespan']:.2f}")
     print(f"- scheduled_jobs: {summary['scheduled_jobs']}")
     print(f"- unscheduled_jobs: {summary['unscheduled_jobs']}")
     print(f"- downstream_loads: {summary['downstream_loads']}")
@@ -112,6 +115,7 @@ def command_trace(args: argparse.Namespace) -> None:
     print("[trace summary]")
     print(f"- scheduled_jobs: {len(env.simulation.state.schedule)}")
     print(f"- current_time: {env.simulation.state.current_time:.2f}")
+    print(f"- makespan: {env.simulation.get_makespan():.2f}")
     print(f"- machine_loads: {env.simulation.state.machine_loads}")
 
 

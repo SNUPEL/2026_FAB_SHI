@@ -9,15 +9,16 @@
   "현재 시각에 새 작업을 시작할 수 있는가?"로 해석합니다.
 
 중요:
-- 현재 구현은 **작업 시작 시점 기준**입니다.
-- 즉, 이미 시작한 작업이 점심시간이나 고장 시간에 걸쳐도
-  중간 정지했다가 다시 이어서 하는 `preemption / resume`은 아직 구현하지 않았습니다.
+- hard constraint 자체는 **작업 시작 시점 기준**입니다.
+- 다만 `enable_operation_time_adjustment`를 켜면, 이미 시작한 작업이 점심시간이나 고장 시간에 걸칠 때
+  그 비가동 시간만큼 완료시각을 뒤로 미룹니다.
+- 완전한 `preemption / resume` 시뮬레이션은 아직 구현하지 않았습니다.
 
 ---
 
 ## 1. 현재 구현된 calendar 제약
 
-현재 코드에 실제로 들어가 있는 규칙은 아래 3개입니다.
+현재 코드에 실제로 들어가 있는 규칙/보정은 아래 4개입니다.
 
 ### 1.1 `calendar_open`
 
@@ -71,6 +72,19 @@
 
 ---
 
+### 1.4 작업 구간 보정
+
+`enable_operation_time_adjustment: true`이면 작업 시작 후 비가동 시간이 끼어드는 경우
+실제 완료시각을 자동으로 뒤로 미룹니다.
+
+예:
+- 11:45 시작
+- 순수 작업시간 50분
+- 점심시간 12:00-13:00
+- 실제 완료시각은 12:35가 아니라 13:35
+
+---
+
 ## 2. config.yaml에서 켜고 끄는 방법
 
 calendar category 전체를 켜려면:
@@ -100,6 +114,8 @@ constraints:
   - 설비별 운영시간 / 계획 정지 적용
 - `categories.calendar = true` + `hard_enabled.machine_breakdown = true`
   - 설비 고장 적용
+- `calendar.enable_operation_time_adjustment = true`
+  - 작업 시작 후 비가동 시간을 완료시각에 반영
 
 ---
 

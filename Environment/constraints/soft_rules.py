@@ -13,7 +13,7 @@ def check_due_date_urgency(context: ConstraintContext) -> ConstraintResult:
     if due_date is None:
         return ConstraintResult("due_date_urgency", True, "")
 
-    estimated_finish = context.state.current_time + context.job.estimate_total_minutes(context.machine)
+    estimated_finish = float(context.candidate_finish_time)
     slack = due_date - estimated_finish
     passed = slack >= 0
     penalty = abs(slack) / max(due_date, 1.0) if not passed else 0.0
@@ -33,9 +33,14 @@ def check_preferred_machine_type(context: ConstraintContext) -> ConstraintResult
     if not preferred_types:
         return ConstraintResult("preferred_machine_type", True, "")
 
-    passed = context.machine.machine_type in preferred_types
-    reason = "" if passed else f"{context.machine.machine_type} is not a preferred type for {context.job.job_id}"
-    return ConstraintResult("preferred_machine_type", passed, reason, penalty=0.5 if not passed else 0.0)
+    if context.machine.machine_type in preferred_types:
+        rank = preferred_types.index(context.machine.machine_type)
+        passed = rank == 0
+        reason = "" if passed else f"{context.machine.machine_type} is lower-ranked for {context.job.job_id}"
+        return ConstraintResult("preferred_machine_type", passed, reason, penalty=0.25 * rank)
+
+    reason = f"{context.machine.machine_type} is not a preferred type for {context.job.job_id}"
+    return ConstraintResult("preferred_machine_type", False, reason, penalty=1.0)
 
 
 def check_load_balance_preference(context: ConstraintContext) -> ConstraintResult:

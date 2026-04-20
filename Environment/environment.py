@@ -10,7 +10,7 @@
 
 from typing import Dict
 
-from .data import DownstreamBay, Job, Machine
+from .data import AuxiliaryResource, DownstreamBay, Job, Machine
 from .simulation import CuttingSimulation
 
 
@@ -28,6 +28,7 @@ class CuttingShopEnvironment:
         self.jobs = self._build_jobs(scenario["jobs"])
         self.machines = self._build_machines(scenario["machines"])
         self.bays = self._build_bays(scenario["bays"])
+        self.resources = self._build_resources(scenario.get("resources", []))
 
         # 현재는 위치 정보만 보관합니다.
         # 설비 크기, 이동 거리, 상세 레이아웃 모델은 이후 데이터가 들어오면 확장합니다.
@@ -39,6 +40,7 @@ class CuttingShopEnvironment:
             jobs=self.jobs,
             machines=self.machines,
             bays=self.bays,
+            resources=self.resources,
             layout=self.layout,
             config=self.config,
         )
@@ -57,6 +59,7 @@ class CuttingShopEnvironment:
                 base_stage_minutes=job["base_stage_minutes"],
                 due_date_minutes=job.get("due_date_minutes"),
                 preferred_machine_types=tuple(job.get("preferred_machine_types", [])),
+                required_resource_ids=tuple(job.get("required_resource_ids", [])),
             )
             for job in raw_jobs
         }
@@ -75,6 +78,8 @@ class CuttingShopEnvironment:
                 table_length_limit=machine["table_length_limit"],
                 cut_speed_factor=machine["cut_speed_factor"],
                 daily_capacity_minutes=machine["daily_capacity_minutes"],
+                parallel_capacity=int(machine.get("parallel_capacity", 1)),
+                required_resource_ids=tuple(machine.get("required_resource_ids", [])),
                 position=tuple(machine.get("position", (0.0, 0.0))),
             )
             for machine in raw_machines
@@ -88,8 +93,23 @@ class CuttingShopEnvironment:
                 bay_id=bay["bay_id"],
                 priority_rank=bay["priority_rank"],
                 capacity_limit=bay["capacity_limit"],
+                transfer_time_minutes=float(bay.get("transfer_time_minutes", 0.0)),
+                release_delay_minutes=(
+                    None if bay.get("release_delay_minutes") is None else float(bay.get("release_delay_minutes"))
+                ),
             )
             for bay in raw_bays
+        }
+
+    def _build_resources(self, raw_resources):
+        """시나리오의 보조자원 정의를 내부 객체로 변환합니다."""
+
+        return {
+            resource["resource_id"]: AuxiliaryResource(
+                resource_id=resource["resource_id"],
+                capacity=int(resource["capacity"]),
+            )
+            for resource in raw_resources
         }
 
     def reset(self):

@@ -75,6 +75,19 @@ calendar:
   enable_machine_breakdowns: false
   machine_breakdowns: {}
 
+  # 작업 도중 점심/정지/고장이 끼어들면 그 시간만큼 완료시각을 미룹니다.
+  # 완전한 preemption/resume은 아니고, 작업 구간의 비가동 시간을 보정하는 방식입니다.
+  enable_operation_time_adjustment: true
+  operation_time_adjustment_limit_minutes: 10080
+
+setup:
+  # 직전 작업과 계열이 달라질 때 추가 셋업 시간을 반영합니다.
+  enable_family_changeover: true
+  default_family_changeover_minutes: 12
+  machine_type_changeover_minutes:
+    plasma: 10
+    laser: 15
+
 action_space:
   # 추천 기본값:
   # - job_machine_pair: 작업-설비 쌍을 직접 선택
@@ -117,6 +130,7 @@ constraints:
     thickness_range: true
     table_length_limit: true
     machine_single_processing: true
+    auxiliary_resources_available: true
     daily_capacity_limit: true
     # 날짜별 전체 작업 수 제한.
     # override가 없으면 자동 통과합니다.

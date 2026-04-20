@@ -29,6 +29,7 @@ from .downstream_rules import (
     check_downstream_priority,
 )
 from .machine_rules import (
+    check_auxiliary_resources_available,
     check_daily_job_cap_limit,
     check_daily_capacity_limit,
     check_family_eligibility,
@@ -53,6 +54,7 @@ RULES = {
     "thickness_range": check_thickness_range,
     "table_length_limit": check_table_length_limit,
     "machine_single_processing": check_machine_single_processing,
+    "auxiliary_resources_available": check_auxiliary_resources_available,
     "daily_capacity_limit": check_daily_capacity_limit,
     "daily_job_cap_limit": check_daily_job_cap_limit,
     "downstream_capacity": check_downstream_capacity,
@@ -73,6 +75,7 @@ RULE_CATEGORIES = {
     "thickness_range": "machine",
     "table_length_limit": "machine",
     "machine_single_processing": "machine",
+    "auxiliary_resources_available": "layout",
     "daily_capacity_limit": "capacity",
     "daily_job_cap_limit": "capacity",
     "downstream_capacity": "downstream",

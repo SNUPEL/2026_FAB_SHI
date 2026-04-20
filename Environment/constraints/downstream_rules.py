@@ -11,7 +11,7 @@ def check_downstream_capacity(context: ConstraintContext) -> ConstraintResult:
     """
 
     bay = context.bays[context.job.downstream_bay]
-    predicted_load = context.state.downstream_loads[bay.bay_id] + 1
+    predicted_load = int(context.predicted_downstream_load_at_arrival)
     passed = predicted_load <= bay.capacity_limit
     reason = "" if passed else f"downstream capacity exceeded on {bay.bay_id}"
     return ConstraintResult("downstream_capacity", passed, reason)
@@ -46,7 +46,7 @@ def check_downstream_buffer_warning(context: ConstraintContext) -> ConstraintRes
     """
 
     bay = context.bays[context.job.downstream_bay]
-    predicted_load = context.state.downstream_loads[bay.bay_id] + 1
+    predicted_load = int(context.predicted_downstream_load_at_arrival)
     usage_ratio = predicted_load / max(bay.capacity_limit, 1)
     passed = usage_ratio < 0.8
     reason = "" if passed else f"downstream buffer warning on {bay.bay_id}: usage_ratio={usage_ratio:.2f}"

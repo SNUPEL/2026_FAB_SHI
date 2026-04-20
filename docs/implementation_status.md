@@ -50,9 +50,9 @@
 | 환경 인터페이스 | 완료 | `reset()`, `step(action_id)`, observation 반환 | Gym 완전 호환 wrapper 정리 | `Environment/environment.py` |
 | 시뮬레이션 시간 전진 | 완료 | 가능한 action이 없으면 다음 완료 시점 또는 calendar 해제 시점까지 자동 전진 | preemption / resume | `Environment/simulation.py` |
 | 설비 부하 추적 | 완료 | 설비별 누적 부하 계산 | 실제 일자/교대/가동 계획 반영 | `Environment/state.py`, `Environment/simulation.py` |
-| 후공정 적치 추적 | 완료 | bay별 적치량 누적 추적 | 시간대별 반출/감소 로직 | `Environment/state.py`, `Environment/simulation.py` |
-| 하드 제약 구조 | 완료 | 계열, 두께, 길이, 단일 처리, 일일 용량, 적치 한계, calendar, 설비별 운영시간, 설비 고장 제약 적용 | 현업 상세 하드 제약 추가 | `Environment/constraints/machine_rules.py`, `Environment/constraints/downstream_rules.py`, `Environment/constraints/calendar_rules.py` |
-| 소프트 제약 구조 | 완료 | 후공정 우선순위, 납기, 설비 선호, 적치 위험, 부하 평준화 penalty 적용 | 실제 penalty 계수 튜닝 | `Environment/constraints/soft_rules.py`, `Environment/reward.py` |
+| 후공정 적치 추적 | 완료 | bay별 도착/해소 이벤트 기반 버퍼 추적 | 실제 반출 실적 기반 파라미터 보정 | `Environment/state.py`, `Environment/simulation.py` |
+| 하드 제약 구조 | 완료 | 계열, 두께, 길이, 슬롯 기반 설비 점유, 보조자원 슬롯, 일일 용량, 적치 한계, calendar, 설비별 운영시간, 설비 고장 제약 적용 | 현업 상세 하드 제약 추가 | `Environment/constraints/machine_rules.py`, `Environment/constraints/downstream_rules.py`, `Environment/constraints/calendar_rules.py` |
+| 소프트 제약 구조 | 완료 | 후공정 우선순위, 납기, 순위형 설비 선호, 적치 위험, 부하 평준화 penalty 적용 | 실제 penalty 계수 튜닝 | `Environment/constraints/soft_rules.py`, `Environment/reward.py` |
 | 제약 registry | 완료 | 함수 1개 추가 후 config에서 on/off 가능 | 없음 | `Environment/constraints/registry.py` |
 | reward 구조 | 스켈레톤 완료 | makespan, load balance, priority bonus, soft penalty 조합 | 실제 목적식 계수 검증 | `Environment/reward.py` |
 | 휴리스틱 | 완료 | `spt`, `priority`, `load_balance` 사용 가능 | EDD, 적치 최소 초과 규칙, 후공정 우선 규칙 추가 | `Agent/heuristics.py` |
@@ -63,7 +63,7 @@
 | 네트워크 | 완료 | GNN + MLP 기반 정책/가치 네트워크 구현 | feature 확정 후 입력 스키마 튜닝 | `Train/network/*.py` |
 | 샘플 데이터 | 완료 | 샘플 설비/작업/베이 시나리오 존재 | 실제 현업 데이터 반영 | `input/sample_scenario.yaml` |
 | config 기반 제어 | 완료 | category/hard/soft/override/calendar, reward, action 모드 제어 | 현업 룰 확정 후 항목 확장 | `config.yaml`, `docs/config_guide.md` |
-| 2D 위치 정보 | 스켈레톤 완료 | 설비 위치 좌표만 보관 | 실제 레이아웃 제약, 이동거리, 면적/충돌 | `Environment/environment.py`, `input/sample_scenario.yaml` |
+| 2D 위치 정보 | 스켈레톤 완료 | 설비 위치 좌표와 단순 슬롯 자원 연결 가능 | 실제 레이아웃 제약, 이동거리, 면적/충돌 | `Environment/environment.py`, `input/sample_scenario.yaml` |
 | 설비 교체 시나리오 | 스켈레톤 완료 | 시나리오 파일에서 설비 목록 수정 가능 | 월별 도입/철거 이벤트 반영 | `input/sample_scenario.yaml` |
 
 ---
@@ -76,7 +76,8 @@
 | `family_eligibility` | 완료 | 설비별 가능 계열 제약 |
 | `thickness_range` | 완료 | 설비별 가능 두께 범위 |
 | `table_length_limit` | 완료 | 정반 또는 장비 길이 초과 여부 |
-| `machine_single_processing` | 완료 | 같은 시점에 한 설비는 하나의 작업만 처리 |
+| `machine_single_processing` | 완료 | 같은 시점에 설비의 가용 슬롯 수를 초과해 작업할 수 없음 |
+| `auxiliary_resources_available` | 완료 | 크레인/정반 등 단순 슬롯 자원 부족 여부 |
 | `daily_capacity_limit` | 완료 | 일일 가용시간 초과 여부 |
 | `daily_job_cap_limit` | 완료 | 일일 전체 작업 수 제한 |
 | `downstream_capacity` | 완료 | 후공정 bay 적치량 한계 |
@@ -92,7 +93,7 @@
 |---|---|---|
 | `downstream_priority` | 완료 | 후공정 우선순위가 높은 bay를 먼저 보내는 선호 |
 | `due_date_urgency` | 완료 | 납기 여유가 적은 작업 우선 |
-| `preferred_machine_type` | 완료 | 작업별 선호 설비 타입 |
+| `preferred_machine_type` | 완료 | 작업별 선호 설비 타입 및 선호 순위 |
 | `downstream_buffer_warning` | 완료 | 적치 한계 직전 경고 penalty |
 | `load_balance_preference` | 완료 | 과부하 설비 회피 선호 |
 

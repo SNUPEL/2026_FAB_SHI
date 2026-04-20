@@ -13,9 +13,9 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
-from .data import ScheduledOperation
+from .data import DownstreamEvent, ScheduledOperation
 
 
 @dataclass
@@ -27,7 +27,9 @@ class SimulationState:
     unscheduled_jobs:
       아직 배정되지 않은 작업 ID 집합
     machine_available_at:
-      각 설비가 다시 비는 시점
+      각 설비에서 가장 빨리 비는 슬롯 시점
+    machine_slot_available_at:
+      각 설비 슬롯별 다시 비는 시점
     machine_loads:
       각 설비에 누적된 총 부하
     downstream_loads:
@@ -37,6 +39,12 @@ class SimulationState:
       예: {"2026-01-01": {"laser_01": 120.0, "plasma_01": 80.0}}
     scheduled_job_count_by_day:
       날짜별 배정된 총 작업 수
+    machine_last_family:
+      각 설비에서 직전에 처리한 작업 계열
+    resource_active_until:
+      보조자원별 현재 점유 종료 시각 목록
+    downstream_events:
+      후공정 버퍼 증감 예정 이벤트
     schedule:
       지금까지의 배정 결과
     violation_log:
@@ -46,9 +54,13 @@ class SimulationState:
     current_time: float = 0.0
     unscheduled_jobs: Set[str] = field(default_factory=set)
     machine_available_at: Dict[str, float] = field(default_factory=dict)
+    machine_slot_available_at: Dict[str, List[float]] = field(default_factory=dict)
     machine_loads: Dict[str, float] = field(default_factory=dict)
     downstream_loads: Dict[str, int] = field(default_factory=dict)
     machine_daily_loads: Dict[str, Dict[str, float]] = field(default_factory=dict)
     scheduled_job_count_by_day: Dict[str, int] = field(default_factory=dict)
+    machine_last_family: Dict[str, Optional[str]] = field(default_factory=dict)
+    resource_active_until: Dict[str, List[float]] = field(default_factory=dict)
+    downstream_events: List[DownstreamEvent] = field(default_factory=list)
     schedule: List[ScheduledOperation] = field(default_factory=list)
     violation_log: List[str] = field(default_factory=list)
