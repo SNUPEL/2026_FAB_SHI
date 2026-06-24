@@ -1,8 +1,85 @@
 paths:
-  # 샘플 또는 실제 시나리오 입력 파일
-  scenario_path: input/sample_scenario.yaml
+  # 비워 두면 아래 source_data_path에서 scenario를 메모리로 생성합니다.
+  scenario_path:
+  # 현재 검증용 원본 절단 실적 파일
+  source_data_path: input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx
+  source_sheet_name: Sheet1
   # 결과 저장 폴더
   output_dir: output
+
+data:
+  target_series:
+    - NP
+  max_records: 20
+  # 현업 확인 기준: 택트타임은 기계가 아크로 절단하는 시간이며 단위는 분입니다.
+  # generated simulation과 휴리스틱/RL 검증은 실적 착수-종료 elapsed가 아니라 tact_time을 사용합니다.
+  process_time_source: tact_time
+
+factory:
+  bays:
+    - bay_id: "22"
+      name: Bay 22
+      position:
+        - 0
+        - 0
+      equipment:
+        PLS:
+          count: 4
+          machine_ids:
+            - PLS21
+            - PLS22
+            - PLS23
+            - PLS24
+    - bay_id: "23"
+      name: Bay 23
+      position:
+        - 0
+        - 1
+      equipment:
+        PLS:
+          count: 3
+          machine_ids:
+            - PLS31
+            - PLS32
+            - PLS33
+    - bay_id: "24"
+      name: Bay 24
+      position:
+        - 0
+        - 2
+      equipment:
+        PLS:
+          count: 4
+          machine_ids:
+            - PLS41
+            - PLS42
+            - PLS43
+            - PLS44
+    - bay_id: "25"
+      name: Bay 25
+      position:
+        - 0
+        - 3
+      equipment:
+        PLP:
+          count: 1
+          machine_ids:
+            - PLP02
+          machine_type: plasma
+          enabled: true
+          eligible_families:
+            - NP
+          min_thickness: 0
+          max_thickness: 100
+          table_length_limit: 55000
+          cut_speed_factor: 1.0
+          daily_capacity_minutes: 1440
+          parallel_capacity: 1
+          required_resource_ids: []
+        PLS:
+          count: 1
+          machine_ids:
+            - PLS52
 
 # 현재는 cpu 기준으로 동작합니다.
 # GPU가 있는 환경이면 cuda로 바꿀 수 있습니다.
@@ -90,13 +167,37 @@ setup:
 
 action_space:
   # 추천 기본값:
-  # - job_machine_pair: 작업-설비 쌍을 직접 선택
-  # 이후 필요하면 machine_then_job 방식도 확장 가능
-  mode: job_machine_pair
+  # - job_machine_pair: 단일 슬롯 baseline/debug 전용. batch 제약이 있는 현재 절단 환경의 기본값이 아님.
+  # - rolling_capacity: 과거 가정/legacy debug 전용. 현업 확인 결과 기본값으로 쓰지 않음.
+  # - batch_open: open_batch -> add_to_batch -> close_batch로 W/O 묶음을 만든 뒤 절단 시작
+  #
+  # 현재 현업 확인 결과 "같이 들어와서 같이 빠지는 batch 방식"이 맞으므로
+  # 현재 과제 기본값은 batch_open이다.
+  mode: batch_open
+  # job_machine_pair를 비교 실험으로 쓰려면 true로 명시한다.
+  # false 상태에서 max_wo_count > 1이면 환경 초기화가 실패한다.
+  allow_single_slot_baseline: false
+
+batch:
+  # batch_open mode에서만 사용한다.
+  #
+  # import/사용 흐름:
+  # - `Utils.config.load_config()`가 이 YAML을 dict로 읽는다.
+  # - `Environment.simulation.CuttingSimulation._batch_processing_rule()`가 아래 값을 읽는다.
+  # - open batch를 close할 때 `_batch_processing_minutes_for()`가 batch window 시간을 계산한다.
+  #
+  # 지원 값:
+  # - max_individual: batch 안 W/O별 예상시간 중 최댓값을 machine 점유시간으로 사용
+  # - sum_individual: batch 안 W/O별 예상시간 합을 machine 점유시간으로 사용
+  #
+  # 현재 추천:
+  # - 현업 batch/nesting id가 없으므로 우선 max_individual을 명시한다.
+  # - 이 값은 fallback이 아니라 "현재 가정"이다. 나중에 실측 batch id가 오면 검증 후 바꾼다.
+  processing_time_rule: max_individual
 
 agent:
   # 휴리스틱 기본 규칙
-  default_heuristic: spt
+  default_heuristic: batch_fill_spt
 
 network:
   # 후보 action graph를 인코딩하는 간단 GNN + MLP 구조입니다.
@@ -130,12 +231,29 @@ constraints:
     thickness_range: true
     table_length_limit: true
     machine_single_processing: true
+    machine_bay_consistency: true
+    block_set_same_bay: true
     auxiliary_resources_available: true
     daily_capacity_limit: true
     # 날짜별 전체 작업 수 제한.
     # override가 없으면 자동 통과합니다.
     daily_job_cap_limit: false
+    machine_day_wo_count_limit: false
+    machine_day_length_sum_limit: false
     downstream_capacity: true
+    # 미래 확장용 hard rule skeleton.
+    # 필요한 데이터가 들어오기 전에는 false로 둔다.
+    batch_wo_count_limit: true
+    batch_length_sum_limit: true
+    allowed_machine_ids: false
+    prohibited_machine_ids: false
+    allowed_bay_ids: false
+    table_type_eligibility: false
+    plate_width_range: false
+    machine_priority_tier_policy: false
+    bay_priority_tier_policy: false
+    downstream_due_date: false
+    downstream_required_start: false
 
   # 소프트 제약:
   # 선택은 가능하지만 penalty 또는 우선순위 점수로 반영되는 제약입니다.
@@ -177,6 +295,14 @@ constraints:
     # 예:
     # "2026-07-20": 30
     daily_job_cap_overrides: {}
+
+  # batch W/O 묶음 제약.
+  # 기존 key 이름은 machine_day_limits로 남아 있으나, 현재 기본 의미는 하루 총량이 아니라
+  # close되는 batch 1개에 포함 가능한 W/O count/길이합입니다.
+  # 현업 확인 기준: max_wo_count=3, max_length_sum=55000.
+  machine_day_limits:
+    max_wo_count: 3
+    max_length_sum: 55000
 
 reward:
   # makespan 증가를 얼마나 강하게 벌점 줄지

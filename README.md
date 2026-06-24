@@ -39,9 +39,87 @@
 > 학습과 휴리스틱을 붙일 수 있는 PMSP형 절단 스케줄링 환경은 구현 완료  
 > 단, 현업 데이터 기반 상세 택트타임 / 상세 물리 제약은 추후 채움
 
-상세 상태표는 아래 문서를 보면 됩니다.
+현재 중간발표/검증의 1차 초점은 **Phase 1: 블록 단위 Bay 배정**입니다.
 
-- [docs/implementation_status.md](docs/implementation_status.md)
+- Phase 1: 같은 블록의 모든 W/O를 하나의 절단 Bay에 배정
+- Phase 2: Phase 1 결과를 받아 Bay 내부 설비/W/O batch scheduling 수행
+- 현재 발표 비교: Phase 1만 수행하고 실적 Bay 부하와 비교
+
+상세 진행 상태와 다음 작업은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)를 기준으로 봅니다.
+
+---
+
+## 2.1 Phase 1 블록-Bay 휴리스틱 결론
+
+현업 확인 기준 Phase 1 목적은 블록을 Bay 22/23/24에 배정해 Bay별 부하를 평준화하는 것입니다. Bay 25가 포함된 블록은 현재 테스트/발표 범위에서 제외합니다.
+
+평준화 지표는 아래 4개입니다.
+
+1. 강재수량(`STL_QTY`) gap 최소화
+2. 절단장(`CUT_LTH`) gap 최소화
+3. 베벨수량(`BV_QTY`) gap 최소화
+4. 절단장 1000 초과 블록의 Bay 24 배정 최소화
+
+현업 우선순위는 `강재수량 -> 절단장 -> 베벨수량 -> 장척 Bay 22/23 선호`입니다. 다만 장척 블록은 운영상 Bay 24를 먼저 피하는 선호 제약에 가깝기 때문에, 실험에서는 장척 Bay24 회피를 Bay 선택 단계에서 먼저 고려하는 방식이 안정적이었습니다.
+
+### 단순 greedy 조합 실험
+
+설명 가능한 단순 greedy는 아래처럼 나눠 비교했습니다.
+
+- 블록 선택 규칙: `steel_first`, `cut_first`, `bevel_first`, `long_cut_first`
+- Bay 배정 규칙: `balance_lexicographic`, `long_cut_preference`
+
+이 4 x 2 조합 중 가장 설명성과 성능이 좋았던 아이디어는 다음입니다.
+
+```text
+bevel_first + long_cut_preference
+```
+
+의미:
+
+- 블록 선택: 베벨수량이 큰 블록부터 먼저 배정
+- Bay 선택: 장척 블록 Bay24 회피 -> 강재수량 -> 절단장 -> 베벨수량 순으로 평가
+
+이 조합이 좋은 이유:
+
+- 강재수량과 절단장은 상관이 높아 하나를 맞추면 다른 하나도 어느 정도 같이 맞춰지는 경향이 있음
+- 베벨수량은 특정 블록에 몰리는 희소 지표라 뒤로 미루면 복구가 어려움
+- 장척 블록은 개수가 적어 Bay 선택 단계에서 Bay24 회피를 우선 적용해도 제어 가능함
+
+### 코드에서 사용하는 공식 휴리스틱
+
+실제 코드에서 중간발표용 기본 실행 알고리즘은 아래입니다.
+
+```text
+long_cut_preferred_balanced
+```
+
+이 알고리즘은 `bevel_first + long_cut_preference`의 핵심 해석을 포함하되, 단순 greedy 하나로 고정하지 않고 기존 `priority_sweep_balanced`와 같은 beam/local-search 기반 탐색을 사용합니다.
+
+의미:
+
+- `CUT_LTH > 1000` 블록은 Bay 24를 먼저 피함
+- 이후 강재수량, 절단장, 베벨수량 평준화를 평가
+- 여러 블록 순서를 탐색해 단순 greedy보다 안정적인 배정을 찾음
+
+8개 현업 후보 작업일 실험 결과:
+
+| 알고리즘 | all_nonworse | any_worse | 장척 Bay24 악화 | 강재수량 악화 | 절단장 악화 | 베벨수량 악화 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `steel_lpt_greedy_insertion` | 1/8 | 7/8 | 6/8 | 0/8 | 0/8 | 2/8 |
+| `multi_objective_balanced` | 6/8 | 2/8 | 1/8 | 0/8 | 0/8 | 1/8 |
+| `priority_greedy_insertion` | 4/8 | 4/8 | 2/8 | 0/8 | 0/8 | 2/8 |
+| `long_cut_preferred_balanced` | 6/8 | 2/8 | 0/8 | 0/8 | 0/8 | 2/8 |
+
+따라서 결론은 다음과 같습니다.
+
+```text
+발표에서 설명할 핵심 아이디어:
+bevel_first + long_cut_preference
+
+실제 실행/산출물용 알고리즘:
+long_cut_preferred_balanced
+```
 
 ---
 
@@ -86,9 +164,8 @@ pmsp/
 │  ├─ scenario_generator.py
 │  └─ tact_time.py
 ├─ input/
-│  └─ sample_scenario.yaml
 ├─ output/
-└─ docs/
+└─ 현재과제_진행체크리스트.md
 ```
 
 ---
@@ -97,18 +174,26 @@ pmsp/
 
 ### 4.1 action
 
-현재 기본 action은 `job_machine_pair`입니다.
+현재 기본 action은 `batch_open`입니다.
 
 즉, 한 step에서 고르는 것은:
 
-- 작업 1개
-- 설비 1개
+- batch 열기: `open_batch:job_id@machine_id`
+- batch에 W/O 추가: `add_to_batch:batch_id:job_id`
+- batch 닫기 및 투입: `close_batch:batch_id@machine_id`
 
-의 쌍입니다.
+의 세 가지 action 중 하나입니다.
+
+현업 확인 기준:
+- W/O 1~3개를 batch로 묶을 수 있습니다.
+- batch의 `길이` 합은 55,000 이하입니다.
+- batch는 같이 들어오고 같이 빠집니다.
+- `job_machine_pair` 단건 방식은 baseline/debug 전용입니다.
 
 예:
-- `job_003 @ laser_01`
-- `job_008 @ plasma_02`
+- `open_batch:job_003@PLS21`
+- `add_to_batch:B000001:job_008`
+- `close_batch:B000001@PLS21`
 
 ---
 
@@ -191,9 +276,7 @@ pmsp/
 - 특정 날짜 설비 비가동
 - 특정 날짜 하루 작업 수 제한
 
-상세 설명:
-- [docs/constraint_catalog.md](docs/constraint_catalog.md)
-- [docs/config_guide.md](docs/config_guide.md)
+상세 설명은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)의 제약조건 섹션을 기준으로 봅니다.
 
 ---
 
@@ -213,8 +296,7 @@ pmsp/
 - 현재는 **작업 시작 시점 기준**입니다.
 - 작업이 이미 시작된 뒤 점심시간/고장이 끼어드는 `preemption / resume`은 아직 없습니다.
 
-상세 설명:
-- [docs/calendar_constraints.md](docs/calendar_constraints.md)
+상세 설명은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)의 calendar/제약 항목을 기준으로 봅니다.
 
 ---
 
@@ -228,8 +310,7 @@ pmsp/
 
 즉, simulation 본문을 매번 수정하지 않아도 됩니다.
 
-상세 가이드:
-- [docs/constraint_add_guide.md](docs/constraint_add_guide.md)
+상세 가이드는 [AGENTS.md](AGENTS.md)와 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)의 제약 추가 기준을 따릅니다.
 
 ---
 
@@ -260,8 +341,7 @@ train:
 - [Train/algorithm/self_labeling.py](Train/algorithm/self_labeling.py)
 - [Train/network/policy_value.py](Train/network/policy_value.py)
 
-참고 논문/코드:
-- [docs/rl_references.md](docs/rl_references.md)
+참고 논문/코드는 필요 시 별도 정리하고, 현재 실행 기준은 master checklist에만 유지합니다.
 
 ---
 
@@ -279,31 +359,48 @@ python3 main.py show-config --config config.yaml
 python3 main.py simulate --config config.yaml
 ```
 
-### 9.3 step-by-step trace
+### 9.3 Phase 1 블록-Bay 배정
+
+```bash
+python3 main.py phase1 \
+  --config config_np_100.yaml \
+  --mode heuristic \
+  --algorithm long_cut_preferred_balanced \
+  --bay-ids 22,23,24 \
+  --output-dir output/phase1_np_100_long_cut_preferred_balanced
+```
+
+주요 산출물:
+
+- `phase1_block_bay_plan.json`
+- `phase1_block_assignments.csv`
+- `phase1_bay_loads.csv`
+
+### 9.4 step-by-step trace
 
 ```bash
 python3 main.py trace --config config.yaml
 ```
 
-### 9.4 택트타임 분석 스켈레톤
+### 9.5 택트타임 분석 스켈레톤
 
 ```bash
 python3 main.py analyze-tact --config config.yaml
 ```
 
-### 9.5 시나리오 생성
+### 9.6 시나리오 생성
 
 ```bash
 python3 main.py generate-scenario --config config.yaml --duplicate-jobs 2 --output-path output/generated_scenario.yaml
 ```
 
-### 9.6 학습
+### 9.7 학습
 
 ```bash
 python3 main.py train --config config.yaml
 ```
 
-### 9.7 평가
+### 9.8 평가
 
 ```bash
 python3 main.py eval --config config.yaml
@@ -364,15 +461,9 @@ calendar:
 
 ## 12. 문서 안내
 
-- 문제 정의: [docs/problem_definition.md](docs/problem_definition.md)
-- 코드 매핑: [docs/research_plan_to_code_map.md](docs/research_plan_to_code_map.md)
-- 구현 상태: [docs/implementation_status.md](docs/implementation_status.md)
-- 구현 로드맵: [docs/implementation_roadmap.md](docs/implementation_roadmap.md)
-- action 설명: [docs/action_space_notes.md](docs/action_space_notes.md)
-- 제약 설명: [docs/constraint_catalog.md](docs/constraint_catalog.md)
-- 제약 추가 가이드: [docs/constraint_add_guide.md](docs/constraint_add_guide.md)
-- calendar 설명: [docs/calendar_constraints.md](docs/calendar_constraints.md)
-- config 설명: [docs/config_guide.md](docs/config_guide.md)
+- 작업 규칙: [AGENTS.md](AGENTS.md)
+- 단일 master checklist: [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)
+- 메일/Q&A 원문 정리: [메일내용/메일내용_정리.md](메일내용/메일내용_정리.md)
 
 ---
 
