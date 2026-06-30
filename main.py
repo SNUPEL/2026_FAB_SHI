@@ -11,6 +11,16 @@
   python3 main.py eval --config config.yaml
 """
 
+# LINE-BY-LINE: Windows conda에서 pandas/numpy와 torch가 서로 다른 Intel OpenMP runtime을 초기화하면
+# `libiomp5md.dll already initialized`로 학습이 중단될 수 있습니다.
+# 사용: 반드시 torch/numpy/pandas import보다 먼저 설정해야 하며, 판넬라인 PPO eval runner와 같은 실행 보호 장치입니다.
+import os
+
+# LINE-BY-LINE: 사용자가 외부에서 명시한 값은 존중하고, 없는 경우에만 Windows OpenMP 중복 초기화 허용값을 설정합니다.
+if os.name == "nt" and "KMP_DUPLICATE_LIB_OK" not in os.environ:
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    print("[CHECK][main.openmp_guard] KMP_DUPLICATE_LIB_OK=TRUE")
+
 # LINE-BY-LINE: `argparse` 모듈을 가져옵니다. 사용: 이 파일 안에서 해당 라이브러리 기능을 호출합니다.
 import argparse
 # LINE-BY-LINE: `csv` 모듈을 가져옵니다. 사용: 이 파일 안에서 해당 라이브러리 기능을 호출합니다.
@@ -27,6 +37,9 @@ from Agent.heuristics import select_action_by_rule
 # LINE-BY-LINE: `Environment.environment` 모듈에서 `CuttingShopEnvironment`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Environment.environment import CuttingShopEnvironment
 from Environment.gym_wrapper import GYMNASIUM_AVAILABLE, run_hierarchical_trace_export, run_wrapper_equivalence
+from Train.algorithm.phase1_imitation import train_phase1_pointer_imitation
+from Train.algorithm.phase1_pair_self_labeling import train_phase1_pair_self_labeling
+from Train.algorithm.phase1_self_labeling import PHASE1_SELF_LABEL_HEURISTIC_BANK, train_phase1_pointer_self_labeling
 # LINE-BY-LINE: `Train.runner` 모듈에서 `run_eval, run_train`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Train.runner import run_eval, run_train
 # LINE-BY-LINE: `Utils.config` 모듈에서 `load_config`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
@@ -40,6 +53,16 @@ from Utils.factory_builder import build_factory_scenario_parts
 # LINE-BY-LINE: `Utils.io` 모듈에서 scenario loader를 가져옵니다. `load_scenario`는 명시 YAML용, `load_scenario_for_config`는 config 기반 원본 데이터 로딩용입니다.
 from Utils.io import load_scenario, load_scenario_for_config
 from Utils.learning_data_builder import build_learning_data_package
+from Utils.phase1_block_data_generator import (
+    load_phase1_actual_blocks,
+    write_phase1_block_generation_package,
+)
+from Utils.phase1_episode_dataset import (
+    build_phase1_actual_workday_jobs,
+    build_phase1_episode_jobs,
+    jobs_from_phase1_episode_blocks,
+    write_phase1_episode_dataset,
+)
 from Utils.phase1_bay_balancer import (
     CANONICAL_PHASE1_HEURISTIC,
     LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
@@ -50,6 +73,7 @@ from Utils.phase1_bay_balancer import (
     build_phase1_bay_plan,
     write_phase1_bay_plan,
 )
+from Utils.phase1_mdp import write_phase1_mdp_trace_package
 # LINE-BY-LINE: `Utils.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
 # LINE-BY-LINE: `Utils.scenario_generator` 모듈에서 `generate_scenario_from_template, save_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
@@ -373,6 +397,313 @@ def command_phase1(args: argparse.Namespace) -> None:
     print(f"- bay_loads_csv: {paths['bay_loads_csv']}")
 
 
+def command_phase1_mdp_trace(args: argparse.Namespace) -> None:
+    """Build Phase 1 SELECT_BLOCK -> SELECT_BAY self-label trace."""
+
+    print("[phase1-mdp-trace-cli]")
+    print(f"- config: {args.config}")
+    print(f"- algorithm: {args.algorithm}")
+    print(f"- requested_bay_ids: {args.bay_ids}")
+    env = build_environment(args.config)
+    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = str(Path("output") / f"phase1_mdp_trace_{Path(args.config).stem}_{args.algorithm}")
+
+    paths = write_phase1_mdp_trace_package(
+        jobs=env.jobs,
+        bay_ids=bay_ids,
+        algorithm=args.algorithm,
+        output_dir=output_dir,
+    )
+
+    print(f"- resolved_bay_ids: {bay_ids}")
+    print(f"- output_dir: {output_dir}")
+    print(f"- trace_csv: {paths['trace_csv']}")
+    print(f"- action_table_jsonl: {paths['action_table_jsonl']}")
+    print(f"- manifest_json: {paths['manifest_json']}")
+    print(f"- plan_json: {paths['plan_json']}")
+
+
+def command_phase1_train_imitation(args: argparse.Namespace) -> None:
+    """Train Phase 1 pointer policy from a self-label action table."""
+
+    print("[phase1-train-imitation]")
+    print(f"- action_table: {args.action_table}")
+    print(f"- eval_action_table: {args.eval_action_table}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- epochs: {args.epochs}")
+    print(f"- lr: {args.lr}")
+    print(f"- hidden_dim: {args.hidden_dim}")
+    summary = train_phase1_pointer_imitation(
+        action_table_path=args.action_table,
+        output_dir=args.output_dir,
+        eval_action_table_path=args.eval_action_table,
+        epochs=args.epochs,
+        lr=args.lr,
+        hidden_dim=args.hidden_dim,
+        seed=args.seed,
+    )
+    print(f"- checkpoint_path: {summary['checkpoint_path']}")
+    print(f"- metrics_csv: {summary['metrics_csv']}")
+    print(f"- summary_json: {summary['summary_json']}")
+    print(f"- final_loss: {summary['final_loss']}")
+    print(f"- final_accuracy: {summary['final_accuracy']}")
+    if "eval_accuracy" in summary:
+        print(f"- eval_loss: {summary['eval_loss']}")
+        print(f"- eval_accuracy: {summary['eval_accuracy']}")
+
+
+def command_phase1_train_self_labeling(args: argparse.Namespace) -> None:
+    """Train Phase 1 pointer policy with best-of-K self-labeling."""
+
+    print("[phase1-train-self-labeling-cli]")
+    print(f"- config: {args.config}")
+    print(f"- episode_mode: {args.episode_mode}")
+    print(f"- block_xlsx: {args.block_xlsx}")
+    print(f"- gyel: {args.gyel}")
+    print(f"- min_blocks: {args.min_blocks}")
+    print(f"- max_blocks: {args.max_blocks}")
+    print(f"- noise_ratio: {args.noise_ratio}")
+    print(f"- requested_bay_ids: {args.bay_ids}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- episodes: {args.episodes}")
+    print(f"- rollout_samples: {args.rollout_samples}")
+    print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
+    print(f"- score_mode: {args.score_mode}")
+    env = build_environment(args.config)
+    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
+    heuristic_algorithms = [
+        item.strip()
+        for item in str(args.heuristic_algorithms).split(",")
+        if item.strip()
+    ]
+    if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
+        heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
+    fixed_jobs = None
+    episode_jobs = None
+    episode_metadata = None
+    if args.episode_mode == "fixed":
+        fixed_jobs = env.jobs
+    else:
+        actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+        episode_specs = build_phase1_episode_jobs(
+            actual_blocks=actual_blocks,
+            episode_count=args.episodes,
+            min_blocks=args.min_blocks,
+            max_blocks=args.max_blocks,
+            seed=args.seed,
+            noise_ratio=args.noise_ratio,
+        )
+        episode_jobs = [spec["jobs"] for spec in episode_specs]
+        episode_metadata = [
+            {
+                "episode_id": spec["episode_id"],
+                "problem_id": spec["problem_id"],
+                "block_count": spec["block_count"],
+                "seed": spec["seed"],
+            }
+            for spec in episode_specs
+        ]
+    summary = train_phase1_pointer_self_labeling(
+        jobs=fixed_jobs,
+        episode_jobs=episode_jobs,
+        episode_metadata=episode_metadata,
+        bay_ids=bay_ids,
+        output_dir=args.output_dir,
+        episodes=args.episodes,
+        rollout_samples=args.rollout_samples,
+        heuristic_algorithms=heuristic_algorithms,
+        score_mode=args.score_mode,
+        lr=args.lr,
+        hidden_dim=args.hidden_dim,
+        temperature=args.temperature,
+        seed=args.seed,
+    )
+    print(f"- resolved_bay_ids: {bay_ids}")
+    print(f"- checkpoint_path: {summary['checkpoint_path']}")
+    print(f"- metrics_csv: {summary['metrics_csv']}")
+    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
+    print(f"- best_action_table_jsonl: {summary['best_action_table_jsonl']}")
+    print(f"- learning_data_manifest_json: {summary['learning_data_manifest_json']}")
+    print(f"- loss_curve_png: {summary['loss_curve_png']}")
+    print(f"- best_source_counts_png: {summary['best_source_counts_png']}")
+    print(f"- best_score0_curve_png: {summary['best_score0_curve_png']}")
+    print(f"- summary_json: {summary['summary_json']}")
+    print(f"- best_source_counts: {summary['best_source_counts']}")
+
+
+def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
+    """Train Phase 1 direct pair-action policy with best-of-K self-labeling."""
+
+    print("[phase1-train-pair-self-labeling-cli]")
+    print(f"- config: {args.config}")
+    print(f"- block_xlsx: {args.block_xlsx}")
+    print(f"- gyel: {args.gyel}")
+    print(f"- min_blocks: {args.min_blocks}")
+    print(f"- max_blocks: {args.max_blocks}")
+    print(f"- noise_ratio: {args.noise_ratio}")
+    print(f"- requested_bay_ids: {args.bay_ids}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- episodes: {args.episodes}")
+    print(f"- rollout_samples: {args.rollout_samples}")
+    print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
+    print(f"- score_mode: {args.score_mode}")
+    print(f"- actual_validation_wo_xlsx: {args.actual_validation_wo_xlsx}")
+    print(f"- actual_validation_workdays: {args.actual_validation_workdays}")
+    print(f"- resume_checkpoint: {args.resume_checkpoint}")
+    env = build_environment(args.config)
+    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
+    heuristic_algorithms = [
+        item.strip()
+        for item in str(args.heuristic_algorithms).split(",")
+        if item.strip()
+    ]
+    if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
+        heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
+    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+
+    def episode_factory(episode: int):
+        episode_id = f"EP{episode:05d}"
+        specs = build_phase1_episode_jobs(
+            actual_blocks=actual_blocks,
+            episode_count=1,
+            min_blocks=args.min_blocks,
+            max_blocks=args.max_blocks,
+            seed=args.seed + episode - 1,
+            noise_ratio=args.noise_ratio,
+            verbose=False,
+        )
+        spec = specs[0]
+        return {
+            "jobs": jobs_from_phase1_episode_blocks(spec["blocks"], episode_id),
+            "metadata": {
+                "episode_id": episode_id,
+                "problem_id": episode_id,
+                "block_count": spec["block_count"],
+                "seed": spec["seed"],
+            },
+        }
+
+    def synthetic_validation_episode_factory(validation_episode: int):
+        episode_id = f"VAL{validation_episode:05d}"
+        specs = build_phase1_episode_jobs(
+            actual_blocks=actual_blocks,
+            episode_count=1,
+            min_blocks=args.min_blocks,
+            max_blocks=args.max_blocks,
+            seed=args.seed + 10_000_000 + validation_episode - 1,
+            noise_ratio=args.noise_ratio,
+            verbose=False,
+        )
+        spec = specs[0]
+        return {
+            "jobs": jobs_from_phase1_episode_blocks(spec["blocks"], episode_id),
+            "metadata": {
+                "episode_id": episode_id,
+                "problem_id": episode_id,
+                "block_count": spec["block_count"],
+                "seed": spec["seed"],
+                "validation_source": "synthetic",
+            },
+        }
+
+    actual_validation_workdays = [
+        item.strip()
+        for item in str(args.actual_validation_workdays).split(",")
+        if item.strip()
+    ]
+    actual_validation_payloads = []
+    if actual_validation_workdays:
+        actual_validation_payloads = build_phase1_actual_workday_jobs(
+            source_path=args.actual_validation_wo_xlsx,
+            workdays=actual_validation_workdays,
+            bay_ids=bay_ids,
+            gyel=args.gyel,
+        )
+    total_validation_episodes = args.validation_episodes + len(actual_validation_payloads)
+
+    def validation_episode_factory(validation_episode: int):
+        if validation_episode <= args.validation_episodes:
+            return synthetic_validation_episode_factory(validation_episode)
+        actual_index = validation_episode - args.validation_episodes - 1
+        payload = actual_validation_payloads[actual_index]
+        return {"jobs": payload["jobs"], "metadata": payload["metadata"]}
+
+    summary = train_phase1_pair_self_labeling(
+        episode_jobs=None,
+        episode_metadata=None,
+        bay_ids=bay_ids,
+        output_dir=args.output_dir,
+        episodes=args.episodes,
+        rollout_samples=args.rollout_samples,
+        heuristic_algorithms=heuristic_algorithms,
+        score_mode=args.score_mode,
+        lr=args.lr,
+        hidden_dim=args.hidden_dim,
+        temperature=args.temperature,
+        seed=args.seed,
+        episode_factory=episode_factory,
+        checkpoint_every=args.checkpoint_every,
+        validation_every=args.validation_every,
+        validation_episodes=total_validation_episodes,
+        validation_episode_factory=validation_episode_factory,
+        resume_checkpoint=args.resume_checkpoint,
+    )
+    print(f"- resolved_bay_ids: {bay_ids}")
+    print(f"- checkpoint_path: {summary['checkpoint_path']}")
+    print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
+    print(f"- metrics_csv: {summary['metrics_csv']}")
+    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
+    print(f"- best_action_table_jsonl: {summary['best_action_table_jsonl']}")
+    print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
+    print(f"- validation_candidate_summary_csv: {summary.get('validation_candidate_summary_csv', '')}")
+    print(f"- validation_steel_gap_png: {summary.get('validation_steel_gap_png', '')}")
+    print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
+    print(f"- validation_bevel_gap_png: {summary.get('validation_bevel_gap_png', '')}")
+    print(f"- validation_long_cut_png: {summary.get('validation_long_cut_png', '')}")
+    print(f"- validation_best_source_counts_png: {summary.get('validation_best_source_counts_png', '')}")
+    print(f"- validation_agent_rank_png: {summary.get('validation_agent_rank_png', '')}")
+    print(f"- actual_validation_problem_count: {len(actual_validation_payloads)}")
+    print(f"- summary_json: {summary['summary_json']}")
+    print(f"- best_source_counts: {summary['best_source_counts']}")
+
+
+def command_phase1_build_episode_dataset(args: argparse.Namespace) -> None:
+    """Build variable-size Phase 1 train/test self-label episodes."""
+
+    print("[phase1-build-episode-dataset]")
+    print(f"- block_xlsx: {args.block_xlsx}")
+    print(f"- gyel: {args.gyel}")
+    print(f"- episode_count: {args.episode_count}")
+    print(f"- min_blocks: {args.min_blocks}")
+    print(f"- max_blocks: {args.max_blocks}")
+    print(f"- train_ratio: {args.train_ratio}")
+    print(f"- bay_ids: {args.bay_ids}")
+    print(f"- algorithm: {args.algorithm}")
+    print(f"- seed: {args.seed}")
+    print(f"- noise_ratio: {args.noise_ratio}")
+    print(f"- output_dir: {args.output_dir}")
+    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+    bay_ids = [bay_id.strip() for bay_id in args.bay_ids.split(",") if bay_id.strip()]
+    paths = write_phase1_episode_dataset(
+        actual_blocks=actual_blocks,
+        output_dir=args.output_dir,
+        episode_count=args.episode_count,
+        min_blocks=args.min_blocks,
+        max_blocks=args.max_blocks,
+        train_ratio=args.train_ratio,
+        bay_ids=bay_ids,
+        algorithm=args.algorithm,
+        seed=args.seed,
+        noise_ratio=args.noise_ratio,
+    )
+    print(f"- train_action_table_jsonl: {paths['train_action_table_jsonl']}")
+    print(f"- test_action_table_jsonl: {paths['test_action_table_jsonl']}")
+    print(f"- manifest_json: {paths['manifest_json']}")
+    print(f"- episode_summary_csv: {paths['episode_summary_csv']}")
+
+
 def command_apply_phase1_to_phase2(args: argparse.Namespace) -> None:
     """Write a Phase 2 scenario whose W/Os follow a Phase 1 block-Bay plan."""
 
@@ -409,6 +740,34 @@ def command_apply_phase1_to_phase2(args: argparse.Namespace) -> None:
     print(f"- plan_assignment_count: {summary['plan_assignment_count']}")
     print(f"- output_scenario: {args.output_scenario}")
     print("[VALIDATION][main.command_apply_phase1_to_phase2] passed=true")
+
+
+def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
+    """Generate block-only synthetic data for Phase 1 training smoke tests."""
+
+    print("[generate-phase1-blocks]")
+    print(f"- block_xlsx: {args.block_xlsx}")
+    print(f"- gyel: {args.gyel}")
+    print(f"- n_blocks: {args.n_blocks}")
+    print(f"- seed: {args.seed}")
+    print(f"- noise_ratio: {args.noise_ratio}")
+    print(f"- correlation_method: {args.correlation_method}")
+    print(f"- output_dir: {args.output_dir}")
+    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+    paths = write_phase1_block_generation_package(
+        actual_blocks=actual_blocks,
+        output_dir=args.output_dir,
+        n_blocks=args.n_blocks,
+        seed=args.seed,
+        noise_ratio=args.noise_ratio,
+        method=args.correlation_method,
+    )
+    print(f"- synthetic_csv: {paths['synthetic_csv']}")
+    print(f"- summary_json: {paths['summary_json']}")
+    print(f"- distribution_summary_csv: {paths['distribution_summary_csv']}")
+    print(f"- actual_correlation_csv: {paths['actual_correlation_csv']}")
+    print(f"- synthetic_correlation_csv: {paths['synthetic_correlation_csv']}")
+    print(f"- correlation_delta_csv: {paths['correlation_delta_csv']}")
 
 
 # LINE-BY-LINE: `command_simulate(args: argparse.Namespace)` 함수를 정의합니다. 반환 타입: `None`. 사용: CLI 명령에서 사용자가 실행한 subcommand를 처리합니다.
@@ -1447,6 +1806,225 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phase1_parser.set_defaults(func=command_phase1)
 
+    phase1_mdp_trace_parser = subparsers.add_parser(
+        "phase1-mdp-trace",
+        parents=[common_parser],
+        help="Build Phase 1 SELECT_BLOCK -> SELECT_BAY self-label trace",
+    )
+    phase1_mdp_trace_parser.add_argument(
+        "--algorithm",
+        default=LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
+        choices=[
+            CANONICAL_PHASE1_HEURISTIC,
+            LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
+            MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+            PRIORITY_SWEEP_PHASE1_HEURISTIC,
+            PRIORITY_GREEDY_PHASE1_HEURISTIC,
+            "lpt_steel_quantity",
+            "heuristic",
+        ],
+        help="Phase 1 heuristic used as self-label teacher",
+    )
+    phase1_mdp_trace_parser.add_argument(
+        "--bay-ids",
+        default=None,
+        help="Optional comma-separated Bay IDs. Default uses enabled machine Bays from config.",
+    )
+    phase1_mdp_trace_parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Directory for Phase 1 MDP trace outputs",
+    )
+    phase1_mdp_trace_parser.set_defaults(func=command_phase1_mdp_trace)
+
+    phase1_train_imitation_parser = subparsers.add_parser(
+        "phase1-train-imitation",
+        help="Train Phase 1 pointer policy from phase1_action_table.jsonl",
+    )
+    phase1_train_imitation_parser.add_argument(
+        "--action-table",
+        required=True,
+        help="Path to phase1_action_table.jsonl from phase1-mdp-trace",
+    )
+    phase1_train_imitation_parser.add_argument(
+        "--eval-action-table",
+        default=None,
+        help="Optional holdout phase1_action_table.jsonl for eval metrics",
+    )
+    phase1_train_imitation_parser.add_argument(
+        "--output-dir",
+        default="output/phase1_imitation",
+        help="Directory for checkpoint and metrics",
+    )
+    phase1_train_imitation_parser.add_argument("--epochs", type=int, default=20, help="Training epochs")
+    phase1_train_imitation_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    phase1_train_imitation_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
+    phase1_train_imitation_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
+    phase1_train_imitation_parser.set_defaults(func=command_phase1_train_imitation)
+
+    phase1_train_self_labeling_parser = subparsers.add_parser(
+        "phase1-train-self-labeling",
+        parents=[common_parser],
+        help="Train Phase 1 pointer policy with best-of-K self-labeling",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--bay-ids",
+        default="22,23,24",
+        help="Optional comma-separated Bay IDs. Default uses 22,23,24 for Phase 1.",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--output-dir",
+        default="output/phase1_self_labeling",
+        help="Directory for checkpoint and metrics",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--episode-mode",
+        choices=["sampled", "fixed"],
+        default="sampled",
+        help="sampled uses block-level synthetic episodes; fixed repeats config_np_100 for smoke/debug only",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--block-xlsx",
+        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
+        help="Actual block Excel/CSV path used for sampled self-labeling episodes",
+    )
+    phase1_train_self_labeling_parser.add_argument("--gyel", default="NP", help="Series filter for sampled episodes")
+    phase1_train_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per sampled episode")
+    phase1_train_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per sampled episode")
+    phase1_train_self_labeling_parser.add_argument(
+        "--noise-ratio",
+        type=float,
+        default=0.03,
+        help="Bootstrap jitter ratio for sampled episodes",
+    )
+    phase1_train_self_labeling_parser.add_argument("--episodes", type=int, default=20, help="Self-labeling episodes")
+    phase1_train_self_labeling_parser.add_argument(
+        "--rollout-samples",
+        type=int,
+        default=4,
+        help="Current-policy sampled candidates per episode",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--heuristic-algorithms",
+        default="all8",
+        help="Comma-separated heuristic candidates that compete with agent samples",
+    )
+    phase1_train_self_labeling_parser.add_argument(
+        "--score-mode",
+        choices=["steel_first"],
+        default="steel_first",
+        help="Fixed objective: steel gap, cut gap, bevel gap, long-cut Bay24 count",
+    )
+    phase1_train_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    phase1_train_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
+    phase1_train_self_labeling_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    phase1_train_self_labeling_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
+    phase1_train_self_labeling_parser.set_defaults(func=command_phase1_train_self_labeling)
+
+    phase1_train_pair_self_labeling_parser = subparsers.add_parser(
+        "phase1-train-pair-self-labeling",
+        parents=[common_parser],
+        help="Train Phase 1 direct SELECT_PAIR(block,bay) policy with best-of-K self-labeling",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--bay-ids",
+        default="22,23,24",
+        help="Optional comma-separated Bay IDs. Default uses 22,23,24 for Phase 1.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--block-xlsx",
+        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
+        help="Actual block Excel/CSV path used for sampled pair self-labeling episodes",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument("--gyel", default="NP", help="Series filter for sampled episodes")
+    phase1_train_pair_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per sampled episode")
+    phase1_train_pair_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per sampled episode")
+    phase1_train_pair_self_labeling_parser.add_argument("--noise-ratio", type=float, default=0.03, help="Bootstrap jitter ratio")
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--output-dir",
+        default="output/phase1_pair_self_labeling",
+        help="Directory for checkpoint and metrics",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument("--episodes", type=int, default=20, help="Self-labeling episodes")
+    phase1_train_pair_self_labeling_parser.add_argument("--rollout-samples", type=int, default=4, help="Current-policy sampled candidates per episode")
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--heuristic-algorithms",
+        default="all8",
+        help="Comma-separated heuristic candidates, or all8",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--score-mode",
+        choices=["steel_first"],
+        default="steel_first",
+        help="Fixed objective: steel gap, cut gap, bevel gap, long-cut Bay24 count",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    phase1_train_pair_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
+    phase1_train_pair_self_labeling_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    phase1_train_pair_self_labeling_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
+    phase1_train_pair_self_labeling_parser.add_argument("--checkpoint-every", type=int, default=100, help="Save periodic checkpoint every N episodes")
+    phase1_train_pair_self_labeling_parser.add_argument("--validation-every", type=int, default=100, help="Run holdout validation every N episodes")
+    phase1_train_pair_self_labeling_parser.add_argument("--validation-episodes", type=int, default=20, help="Holdout validation episodes per validation run")
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--resume-checkpoint",
+        default="",
+        help="Resume pair self-labeling from explicit checkpoint path or 'latest' in output-dir/checkpoints",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--actual-validation-wo-xlsx",
+        default="input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx",
+        help="W/O Excel/CSV path used for fixed actual Phase 1 validation",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--actual-validation-workdays",
+        default="20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429",
+        help="Comma-separated actual workdays for fixed validation. Empty string disables actual validation.",
+    )
+    phase1_train_pair_self_labeling_parser.set_defaults(func=command_phase1_train_pair_self_labeling)
+
+    phase1_episode_dataset_parser = subparsers.add_parser(
+        "phase1-build-episode-dataset",
+        help="Build variable-size Phase 1 train/test self-label episodes",
+    )
+    phase1_episode_dataset_parser.add_argument(
+        "--block-xlsx",
+        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
+        help="Actual block Excel/CSV path used as the block-only source distribution",
+    )
+    phase1_episode_dataset_parser.add_argument("--gyel", default="NP", help="Series filter")
+    phase1_episode_dataset_parser.add_argument("--episode-count", type=int, default=40, help="Number of episodes")
+    phase1_episode_dataset_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per episode")
+    phase1_episode_dataset_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per episode")
+    phase1_episode_dataset_parser.add_argument("--train-ratio", type=float, default=0.8, help="Train episode ratio")
+    phase1_episode_dataset_parser.add_argument("--bay-ids", default="22,23,24", help="Comma-separated Phase 1 Bay IDs")
+    phase1_episode_dataset_parser.add_argument(
+        "--algorithm",
+        default=LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
+        choices=[
+            CANONICAL_PHASE1_HEURISTIC,
+            LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
+            MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+            PRIORITY_SWEEP_PHASE1_HEURISTIC,
+            PRIORITY_GREEDY_PHASE1_HEURISTIC,
+            "lpt_steel_quantity",
+            "heuristic",
+        ],
+        help="Phase 1 teacher heuristic",
+    )
+    phase1_episode_dataset_parser.add_argument("--seed", type=int, default=2026, help="Dataset seed")
+    phase1_episode_dataset_parser.add_argument(
+        "--noise-ratio",
+        type=float,
+        default=0.03,
+        help="Bootstrap jitter ratio. Set 0 for exact empirical bootstrap.",
+    )
+    phase1_episode_dataset_parser.add_argument(
+        "--output-dir",
+        default="output/phase1_episode_dataset",
+        help="Output directory for episode dataset files",
+    )
+    phase1_episode_dataset_parser.set_defaults(func=command_phase1_build_episode_dataset)
+
     apply_phase1_parser = subparsers.add_parser(
         "apply-phase1-to-phase2",
         parents=[common_parser],
@@ -1474,6 +2052,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output Phase 2 scenario YAML path",
     )
     apply_phase1_parser.set_defaults(func=command_apply_phase1_to_phase2)
+
+    generate_phase1_blocks_parser = subparsers.add_parser(
+        "generate-phase1-blocks",
+        help="Generate block-only synthetic data for Phase 1 training",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--block-xlsx",
+        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
+        help="Actual block Excel/CSV path used as the block-only source distribution",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--gyel",
+        default="NP",
+        help="Series filter. Use NP for the current Phase 1 scope.",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--n-blocks",
+        type=int,
+        default=787,
+        help="Number of synthetic block rows to generate",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--seed",
+        type=int,
+        default=2026,
+        help="Random seed for deterministic generation",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--noise-ratio",
+        type=float,
+        default=0.03,
+        help="Small bootstrap jitter ratio. Set 0 for exact empirical bootstrap.",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--correlation-method",
+        choices=["pearson", "spearman"],
+        default="pearson",
+        help="Correlation method for actual vs synthetic validation",
+    )
+    generate_phase1_blocks_parser.add_argument(
+        "--output-dir",
+        default="output/generated/phase1_block_only_synthetic",
+        help="Output directory for synthetic CSV and validation reports",
+    )
+    generate_phase1_blocks_parser.set_defaults(func=command_generate_phase1_blocks)
 
     # LINE-BY-LINE: `simulate_parser`에 `subparsers.add_parser("simulate", parents=[common_parser], help="Run one heuristic-based scheduli...` 결과를 저장합니다. 의미/사용: `simulate_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     simulate_parser = subparsers.add_parser("simulate", parents=[common_parser], help="Run one heuristic-based scheduling simulation")

@@ -56,6 +56,8 @@ class Phase1Block:
     bevel_quantity_sum: int
     long_cut_over_1000: int
     allowed_bay_ids: Tuple[str, ...]
+    length_avg: float | None = None
+    thickness_avg: float | None = None
 
 
 def build_phase1_bay_plan(
@@ -97,13 +99,13 @@ def build_phase1_bay_plan(
         assignments, bay_loads = _assign_blocks_multi_objective(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
-            score_mode="long_cut_first",
+            score_mode="steel_first",
         )
     elif normalized_algorithm == LONG_CUT_PREFERRED_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_multi_objective(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
-            score_mode="long_cut_first",
+            score_mode="steel_first",
         )
     elif normalized_algorithm == PRIORITY_GREEDY_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_priority_greedy(blocks=blocks, bay_ids=normalized_bay_ids)
@@ -331,6 +333,7 @@ def _collect_blocks(
     jobs: Mapping[str, object],
     bay_ids: Tuple[str, ...],
     require_multi_objective: bool,
+    long_cut_hard_mask: bool = True,
 ) -> List[Phase1Block]:
     """Group W/O jobs by block set and validate Phase 1 required fields."""
 
@@ -349,6 +352,8 @@ def _collect_blocks(
         steel_quantity_sum = 0
         cut_length_sum = 0.0
         bevel_quantity_sum = 0
+        length_values: List[float] = []
+        thickness_values: List[float] = []
         for job in block_jobs:
             job_id = _require_text(_job_attr(job, "job_id"), "job_id", block_set_id)
             steel_quantity_sum += _require_positive_int(
@@ -370,8 +375,20 @@ def _collect_blocks(
                     "bevel_quantity",
                     job_id,
                 )
+            length_value = _job_attr(job, "plate_length")
+            if length_value not in (None, ""):
+                length_values.append(_require_non_negative_float(length_value, "plate_length", job_id))
+            thickness_value = _job_attr(job, "thickness")
+            if thickness_value not in (None, ""):
+                thickness_values.append(_require_non_negative_float(thickness_value, "thickness", job_id))
         long_cut_over_1000 = 1 if cut_length_sum > 1000 else 0
         allowed_bay_ids = _allowed_bays_for_block(block_jobs, bay_ids, block_set_id)
+        if long_cut_hard_mask:
+            allowed_bay_ids = _apply_long_cut_hard_mask(
+                allowed_bay_ids=allowed_bay_ids,
+                long_cut_over_1000=long_cut_over_1000,
+                block_set_id=block_set_id,
+            )
         project_no, block_no = _project_block_labels(block_set_id, block_jobs)
         blocks.append(
             Phase1Block(
@@ -385,6 +402,8 @@ def _collect_blocks(
                 bevel_quantity_sum=bevel_quantity_sum,
                 long_cut_over_1000=long_cut_over_1000,
                 allowed_bay_ids=allowed_bay_ids,
+                length_avg=None if not length_values else sum(length_values) / len(length_values),
+                thickness_avg=None if not thickness_values else sum(thickness_values) / len(thickness_values),
             )
         )
 
@@ -638,26 +657,20 @@ def _multi_objective_load_score(
     bay_loads: Mapping[str, Mapping[str, int | float]],
     score_mode: str = "steel_first",
 ) -> Tuple:
-    """Score current Bay loads with the confirmed Phase 1 objective order."""
+    """Score current Bay loads with the single confirmed Phase 1 objective order.
+
+    The tuple contract is intentionally fixed:
+    `(steel_gap, cut_gap, bevel_gap, long_cut_bay24_count)`.
+
+    Long-cut Bay 24 avoidance is enforced earlier by candidate hard masking.
+    It remains in the score only as an audit/count field, not as the first
+    lexicographic objective.
+    """
 
     steel_values = [row["steel_quantity_sum"] for row in bay_loads.values()]
     cut_values = [row["cut_length_sum"] for row in bay_loads.values()]
     bevel_values = [row["bevel_quantity_sum"] for row in bay_loads.values()]
-    wo_values = [row["wo_count"] for row in bay_loads.values()]
-    block_values = [row["block_count"] for row in bay_loads.values()]
     long_cut_bay24_count = sum(int(row["long_cut_bay24_count"]) for row in bay_loads.values())
-    if score_mode == "long_cut_first":
-        return (
-            long_cut_bay24_count,
-            _round_score(_gap(steel_values)),
-            _round_score(_absdev(steel_values)),
-            _round_score(_gap(cut_values)),
-            _round_score(_absdev(cut_values)),
-            _round_score(_gap(bevel_values)),
-            _round_score(_absdev(bevel_values)),
-            _round_score(_gap(wo_values)),
-            _round_score(_gap(block_values)),
-        )
     if score_mode != "steel_first":
         print(
             "[ERROR][phase1_bay_balancer._multi_objective_load_score] "
@@ -666,21 +679,16 @@ def _multi_objective_load_score(
         raise RuntimeError(f"unknown_score_mode: {score_mode}")
     return (
         _round_score(_gap(steel_values)),
-        _round_score(_absdev(steel_values)),
         _round_score(_gap(cut_values)),
-        _round_score(_absdev(cut_values)),
         _round_score(_gap(bevel_values)),
-        _round_score(_absdev(bevel_values)),
         long_cut_bay24_count,
-        _round_score(_gap(wo_values)),
-        _round_score(_gap(block_values)),
     )
 
 
 def _priority_sweep_load_score(bay_loads: Mapping[str, Mapping[str, int | float]]) -> Tuple:
-    """Score with long-cut Bay 24 avoidance before the three workload balances."""
+    """Backward-compatible wrapper for the fixed Phase 1 score tuple."""
 
-    return _multi_objective_load_score(bay_loads, score_mode="long_cut_first")
+    return _multi_objective_load_score(bay_loads, score_mode="steel_first")
 
 
 def _assign_blocks_multi_objective(
@@ -894,11 +902,8 @@ def _priority_greedy_projected_score(
     bevel_values = [row["bevel_quantity_sum"] for row in projected.values()]
     return (
         _round_score(_gap(steel_values)),
-        _round_score(_absdev(steel_values)),
         _round_score(_gap(cut_values)),
-        _round_score(_absdev(cut_values)),
         _round_score(_gap(bevel_values)),
-        _round_score(_absdev(bevel_values)),
         sum(int(row["long_cut_bay24_count"]) for row in projected.values()),
         bay_id,
     )
@@ -927,20 +932,20 @@ def _build_summary(
             "long_cut_over_1000_prefer_bay22_23",
         ]
     elif algorithm == PRIORITY_SWEEP_PHASE1_HEURISTIC:
-        load_metric = "priority_sweep_lexicographic"
+        load_metric = "multi_objective_lexicographic"
         objective_priority = [
-            "long_cut_over_1000_prefer_bay22_23",
             "steel_quantity_sum",
             "cut_length_sum",
             "bevel_quantity_sum",
+            "long_cut_over_1000_prefer_bay22_23",
         ]
     elif algorithm == LONG_CUT_PREFERRED_PHASE1_HEURISTIC:
-        load_metric = "long_cut_preferred_lexicographic"
+        load_metric = "multi_objective_lexicographic"
         objective_priority = [
-            "long_cut_over_1000_prefer_bay22_23",
             "steel_quantity_sum",
             "cut_length_sum",
             "bevel_quantity_sum",
+            "long_cut_over_1000_prefer_bay22_23",
         ]
     elif algorithm == PRIORITY_GREEDY_PHASE1_HEURISTIC:
         load_metric = "priority_greedy_lexicographic"
@@ -1012,6 +1017,31 @@ def _allowed_bays_for_block(
         )
         raise RuntimeError(f"no feasible Bay for block_set_id={block_set_id}")
     return tuple(bay_id for bay_id in bay_ids if bay_id in allowed)
+
+
+def _apply_long_cut_hard_mask(
+    allowed_bay_ids: Tuple[str, ...],
+    long_cut_over_1000: int,
+    block_set_id: str,
+) -> Tuple[str, ...]:
+    """Remove Bay 24 from long-cut block candidates.
+
+    Phase 1 현업 룰은 `CUT_LTH > 1000` block을 Bay 22/23에 우선 배정하는
+    선호에서, 현재 Proposed 실험 기준 하드마스크로 승격한다. 따라서 generated
+    planning 경로에서는 장척 block의 Bay 24 action을 만들지 않는다.
+    """
+
+    if not long_cut_over_1000:
+        return allowed_bay_ids
+    masked = tuple(bay_id for bay_id in allowed_bay_ids if str(bay_id) != "24")
+    if not masked:
+        print(
+            "[ERROR][phase1_bay_balancer._apply_long_cut_hard_mask] "
+            f"cause=no_feasible_bay_after_long_cut_mask block_set_id={block_set_id} "
+            f"allowed_bay_ids={allowed_bay_ids}"
+        )
+        raise RuntimeError(f"no feasible Bay after long-cut hard mask: {block_set_id}")
+    return masked
 
 
 def _project_block_labels(block_set_id: str, block_jobs: Sequence[object]) -> Tuple[str, str]:
@@ -1130,15 +1160,6 @@ def _gap(values: Sequence[int | float]) -> float:
     """Return max-min for a non-empty numeric sequence."""
 
     return max(values) - min(values) if values else 0
-
-
-def _absdev(values: Sequence[int | float]) -> float:
-    """Return total absolute deviation from the mean."""
-
-    if not values:
-        return 0
-    mean = sum(values) / len(values)
-    return sum(abs(value - mean) for value in values)
 
 
 def _round_score(value: int | float) -> float:

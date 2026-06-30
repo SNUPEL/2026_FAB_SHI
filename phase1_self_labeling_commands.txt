@@ -1,0 +1,70 @@
+Phase 1 sampled self-labeling commands
+
+Run from:
+/mnt/c/users/user/desktop/research/과제/pmsp
+
+Meaning:
+- sampled mode: every episode samples a different synthetic block problem from the real block file.
+- fixed mode: repeats config_np_100.yaml and is smoke/debug only.
+- all8: 8 heuristic candidates compete with rollout-samples agent candidates.
+- pair-action hardmask_gaponly: length/thickness, block count, W/O gap, and absdev are not used; CUT_LTH > 1000 blocks cannot select Bay 24; score tuple is (steel_gap, cut_gap, bevel_gap, long_cut_bay24).
+
+1. Compile check
+python -X pycache_prefix=/tmp/pmsp_pycache -m py_compile main.py Train/algorithm/phase1_self_labeling.py Train/algorithm/phase1_pair_self_labeling.py Train/algorithm/phase1_imitation.py Train/network/phase1_pointer.py Utils/phase1_mdp.py Utils/phase1_bay_balancer.py Utils/phase1_episode_dataset.py Utils/phase1_block_data_generator.py
+
+2. Unit tests
+python -X pycache_prefix=/tmp/pmsp_pycache tests/test_phase1_self_labeling.py
+python -X pycache_prefix=/tmp/pmsp_pycache tests/test_phase1_episode_dataset.py
+python -X pycache_prefix=/tmp/pmsp_pycache tests/test_phase1_pair_self_labeling.py
+
+3. Small sampled smoke
+python main.py phase1-train-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --episode-mode sampled --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx --gyel NP --episodes 5 --min-blocks 12 --max-blocks 20 --noise-ratio 0.03 --rollout-samples 2 --heuristic-algorithms all8 --hidden-dim 32 --output-dir output/phase1_self_labeling_sampled_smoke
+
+4. Full sampled training
+python main.py phase1-train-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --episode-mode sampled --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx --gyel NP --episodes 1000 --min-blocks 12 --max-blocks 80 --noise-ratio 0.03 --rollout-samples 64 --heuristic-algorithms all8 --hidden-dim 128 --output-dir output/phase1_self_labeling_sampled_1000x12_80
+
+5. Pair-action sampled smoke
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx --gyel NP --episodes 5 --min-blocks 12 --max-blocks 20 --noise-ratio 0.03 --rollout-samples 2 --heuristic-algorithms all8 --hidden-dim 32 --checkpoint-every 5 --validation-every 5 --validation-episodes 5 --output-dir output/phase1_pair_hardmask_gaponly_smoke
+
+6. Pair-action full sampled training
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx --gyel NP --episodes 1000 --min-blocks 12 --max-blocks 80 --noise-ratio 0.03 --rollout-samples 64 --heuristic-algorithms all8 --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --output-dir output/phase1_pair_hardmask_gaponly_1000x12_80
+
+7. Resume interrupted pair-action full sampled training
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx --gyel NP --episodes 1000 --min-blocks 12 --max-blocks 80 --noise-ratio 0.03 --rollout-samples 64 --heuristic-algorithms all8 --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --output-dir output/phase1_pair_hardmask_gaponly_1000x12_80 --resume-checkpoint latest
+
+8. Fixed 100-row debug only
+python main.py phase1-train-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --episode-mode fixed --episodes 20 --rollout-samples 4 --heuristic-algorithms all8 --hidden-dim 64 --output-dir output/phase1_self_labeling_fixed_np_100_debug
+
+9. Open live notebook
+python -m notebook notebooks/phase1_self_labeling_live_train.ipynb
+
+10. Actual + business6 heuristics + Proposed sampling comparison
+python scripts/evaluate_phase1_pair_sampling.py --checkpoint output/phase1_pair_v5_hardmask_score4_h4_s64/phase1_pair_pointer_best.pt --wo-xlsx input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx --bay-ids 22,23,24 --workdays 20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429 --gyel NP --samples 256 --heuristic-algorithms business6 --output-dir output/phase1_actual_business6_proposed_s256
+
+Key outputs:
+output/phase1_self_labeling_sampled_1000x12_80/metrics.csv
+output/phase1_self_labeling_sampled_1000x12_80/candidate_summary.csv
+output/phase1_self_labeling_sampled_1000x12_80/best_action_table.jsonl
+output/phase1_self_labeling_sampled_1000x12_80/learning_data_manifest.json
+output/phase1_self_labeling_sampled_1000x12_80/loss_curve.png
+output/phase1_self_labeling_sampled_1000x12_80/best_source_counts.png
+output/phase1_self_labeling_sampled_1000x12_80/best_score0_curve.png
+output/phase1_pair_self_labeling_sampled_1000x12_80/metrics.csv
+output/phase1_pair_self_labeling_sampled_1000x12_80/candidate_summary.csv
+output/phase1_pair_self_labeling_sampled_1000x12_80/best_action_table.jsonl
+output/phase1_pair_self_labeling_sampled_1000x12_80/validation_summary.csv
+output/phase1_pair_self_labeling_sampled_1000x12_80/phase1_pair_pointer_best.pt
+output/phase1_pair_self_labeling_sampled_1000x12_80/checkpoints/phase1_pair_pointer_ep00100.pt
+output/phase1_pair_self_labeling_sampled_1000x12_80/summary.json
+output/phase1_actual_business6_proposed_s256/sampling256_summary.csv
+output/phase1_actual_business6_proposed_s256/sampling256_candidates.csv
+output/phase1_actual_business6_proposed_s256/sampling256_raw_samples.csv
+output/phase1_actual_business6_proposed_s256/sampling256_report.json
+output/phase1_actual_business6_proposed_s256/metric_all_objectives.png
+output/phase1_actual_business6_proposed_s256/metric_steel_gap.png
+output/phase1_actual_business6_proposed_s256/metric_cut_gap.png
+output/phase1_actual_business6_proposed_s256/metric_bevel_gap.png
+
+Pair-action validation:
+- validation_summary.csv contains validation_source=synthetic and validation_source=actual_8days.
+- actual_8days uses workdays 20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429 by default.

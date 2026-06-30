@@ -47,6 +47,8 @@
 
 상세 진행 상태와 다음 작업은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)를 기준으로 봅니다.
 
+Phase 1 학습/MDP 구성은 [Phase1_MDP_RL_구성.md](Phase1_MDP_RL_구성.md)에 정리되어 있습니다.
+
 ---
 
 ## 2.1 Phase 1 블록-Bay 휴리스틱 결론
@@ -119,6 +121,51 @@ bevel_first + long_cut_preference
 
 실제 실행/산출물용 알고리즘:
 long_cut_preferred_balanced
+```
+
+### Phase 1 MDP/self-labeling
+
+Phase 1 학습 구조는 `SELECT_BLOCK -> SELECT_BAY` 계층형 MDP로 둡니다. 현재 구현은 바로 PPO를 돌리는 단계가 아니라, 검증된 `long_cut_preferred_balanced` 휴리스틱을 teacher label로 사용해 supervised/self-labeling용 trace를 만드는 단계입니다.
+
+구현 파일:
+
+- `Utils/phase1_mdp.py`
+- `Train/network/phase1_pointer.py`
+- `Train/algorithm/phase1_imitation.py`
+
+100건 smoke 기준 산출 결과:
+
+```text
+job_count = 100
+block_count = 18
+trace_row_count = 36
+decision_count_per_block = 2
+steel_quantity_gap = 1
+cut_length_gap = 172.763
+bevel_quantity_gap = 8
+long_cut_bay24_count = 0
+```
+
+100건 self-label overfit smoke 기준 학습 결과:
+
+```text
+example_count = 36
+epochs = 300
+hidden_dim = 128
+final_loss = 0.050265
+final_accuracy = 1.000000
+```
+
+실적 블록분포 기반 variable-size episode 학습 결과:
+
+```text
+episode_count = 40
+block_count_per_episode = 12~80
+train_action_count = 2968
+test_action_count = 732
+eval_accuracy = 0.760929
+eval_SELECT_BLOCK_accuracy = 0.879781
+eval_SELECT_BAY_accuracy = 0.642077
 ```
 
 ---
@@ -376,31 +423,93 @@ python3 main.py phase1 \
 - `phase1_block_assignments.csv`
 - `phase1_bay_loads.csv`
 
-### 9.4 step-by-step trace
+### 9.4 Phase 1 MDP/self-label trace
+
+```bash
+python3 main.py phase1-mdp-trace \
+  --config config_np_100.yaml \
+  --algorithm long_cut_preferred_balanced \
+  --bay-ids 22,23,24 \
+  --output-dir output/phase1_mdp_trace_np_100_long_cut_preferred
+```
+
+주요 산출물:
+
+- `phase1_mdp_trace.csv`
+- `phase1_action_table.jsonl`
+- `phase1_mdp_manifest.json`
+
+### 9.5 Phase 1 imitation 학습
+
+```bash
+python3 main.py phase1-train-imitation \
+  --action-table output/phase1_mdp_trace_np_100_long_cut_preferred/phase1_action_table.jsonl \
+  --output-dir output/phase1_imitation_np_100_long_cut_preferred_norm_overfit \
+  --epochs 300 \
+  --lr 0.001 \
+  --hidden-dim 128 \
+  --seed 0
+```
+
+주요 산출물:
+
+- `phase1_pointer.pt`
+- `metrics.csv`
+- `summary.json`
+
+### 9.6 Phase 1 variable-size episode dataset
+
+```bash
+python3 main.py phase1-build-episode-dataset \
+  --block-xlsx input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx \
+  --gyel NP \
+  --episode-count 40 \
+  --min-blocks 12 \
+  --max-blocks 80 \
+  --train-ratio 0.8 \
+  --bay-ids 22,23,24 \
+  --algorithm long_cut_preferred_balanced \
+  --seed 2026 \
+  --noise-ratio 0.03 \
+  --output-dir output/phase1_episode_dataset_40x12_80
+```
+
+```bash
+python3 main.py phase1-train-imitation \
+  --action-table output/phase1_episode_dataset_40x12_80/phase1_train_action_table.jsonl \
+  --eval-action-table output/phase1_episode_dataset_40x12_80/phase1_test_action_table.jsonl \
+  --output-dir output/phase1_imitation_episode_40x12_80_epoch100 \
+  --epochs 100 \
+  --lr 0.001 \
+  --hidden-dim 128 \
+  --seed 0
+```
+
+### 9.7 step-by-step trace
 
 ```bash
 python3 main.py trace --config config.yaml
 ```
 
-### 9.5 택트타임 분석 스켈레톤
+### 9.8 택트타임 분석 스켈레톤
 
 ```bash
 python3 main.py analyze-tact --config config.yaml
 ```
 
-### 9.6 시나리오 생성
+### 9.9 시나리오 생성
 
 ```bash
 python3 main.py generate-scenario --config config.yaml --duplicate-jobs 2 --output-path output/generated_scenario.yaml
 ```
 
-### 9.7 학습
+### 9.10 학습
 
 ```bash
 python3 main.py train --config config.yaml
 ```
 
-### 9.8 평가
+### 9.11 평가
 
 ```bash
 python3 main.py eval --config config.yaml

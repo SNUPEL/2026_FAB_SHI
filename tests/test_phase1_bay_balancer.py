@@ -18,6 +18,7 @@ from Utils.phase1_bay_balancer import (
     apply_phase1_plan_to_scenario,
     build_phase1_bay_plan,
     _improve_multi_objective_assignment,
+    _collect_blocks,
     _multi_objective_assignment_score,
     _priority_sweep_load_score,
 )
@@ -74,6 +75,69 @@ class Phase1BayBalancerTest(unittest.TestCase):
         assignments = {row["block_set_id"]: row["assigned_bay"] for row in result["assignments"]}
 
         self.assertEqual(assignments["P1::B1"], "23")
+
+    def test_long_cut_block_hard_masks_bay24_candidates(self) -> None:
+        """CUT_LTH > 1000 blocks must not expose Bay 24 as a generated planning candidate."""
+
+        jobs = {
+            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1200, bevel_quantity=1),
+            "WO_SHORT": self._job("WO_SHORT", "P1::SHORT", 5, cut_length=100, bevel_quantity=1),
+        }
+
+        result = build_phase1_bay_plan(
+            jobs=jobs,
+            bay_ids=["22", "23", "24"],
+            algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+        )
+        long_row = next(row for row in result["assignments"] if row["block_set_id"] == "P1::LONG")
+
+        self.assertNotEqual(long_row["assigned_bay"], "24")
+        self.assertEqual(long_row["candidate_bays"], "22|23")
+        self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
+
+    def test_long_cut_hard_mask_can_be_disabled_for_baseline_comparison(self) -> None:
+        """Baseline heuristic comparison may inspect Bay 24 without changing Proposed planning."""
+
+        jobs = {
+            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1200, bevel_quantity=1),
+        }
+
+        masked = _collect_blocks(
+            jobs=jobs,
+            bay_ids=("22", "23", "24"),
+            require_multi_objective=True,
+            long_cut_hard_mask=True,
+        )
+        unmasked = _collect_blocks(
+            jobs=jobs,
+            bay_ids=("22", "23", "24"),
+            require_multi_objective=True,
+            long_cut_hard_mask=False,
+        )
+
+        self.assertEqual(masked[0].allowed_bay_ids, ("22", "23"))
+        self.assertEqual(unmasked[0].allowed_bay_ids, ("22", "23", "24"))
+
+    def test_long_cut_block_with_only_bay24_fails_without_fallback(self) -> None:
+        """Hard masking Bay 24 must fail loudly if no Bay 22/23 candidate remains."""
+
+        jobs = {
+            "WO_LONG": self._job(
+                "WO_LONG",
+                "P1::LONG",
+                10,
+                allowed_bay_ids=("24",),
+                cut_length=1200,
+                bevel_quantity=1,
+            ),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "long-cut hard mask"):
+            build_phase1_bay_plan(
+                jobs=jobs,
+                bay_ids=["22", "23", "24"],
+                algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+            )
 
     def test_steel_lpt_greedy_insertion_is_canonical_heuristic_name(self) -> None:
         """The visible heuristic name should describe sorting and insertion behavior."""
@@ -159,8 +223,8 @@ class Phase1BayBalancerTest(unittest.TestCase):
             _multi_objective_assignment_score(blocks, initial, bay_ids),
         )
 
-    def test_priority_sweep_score_prioritizes_long_cut_bay24_before_balance(self) -> None:
-        """The priority-sweep mode must treat long-cut Bay 24 assignment as the first objective."""
+    def test_priority_sweep_score_uses_fixed_gap_tuple(self) -> None:
+        """The public score tuple must stay steel/cut/bevel/long-cut for every mode."""
 
         no_long_cut_bay24_but_uneven = {
             "22": self._load(steel=1, cut_length=10.0, bevel_quantity=1, long_cut_bay24_count=0),
@@ -173,13 +237,15 @@ class Phase1BayBalancerTest(unittest.TestCase):
             "24": self._load(steel=34, cut_length=340.0, bevel_quantity=34, long_cut_bay24_count=1),
         }
 
+        self.assertEqual(_priority_sweep_load_score(no_long_cut_bay24_but_uneven), (97, 970.0, 97, 0))
+        self.assertEqual(_priority_sweep_load_score(one_long_cut_bay24_but_balanced), (1, 10.0, 1, 1))
         self.assertLess(
-            _priority_sweep_load_score(no_long_cut_bay24_but_uneven),
             _priority_sweep_load_score(one_long_cut_bay24_but_balanced),
+            _priority_sweep_load_score(no_long_cut_bay24_but_uneven),
         )
 
-    def test_priority_sweep_balanced_reports_long_cut_first_priority(self) -> None:
-        """The new heuristic name should expose the 4th objective as first priority."""
+    def test_priority_sweep_balanced_reports_fixed_objective_priority(self) -> None:
+        """Legacy heuristic names should still report the fixed public objective order."""
 
         jobs = {
             "WO_A1": self._job("WO_A1", "P1::B1", 10, cut_length=1500, bevel_quantity=0),
@@ -194,14 +260,14 @@ class Phase1BayBalancerTest(unittest.TestCase):
         )
 
         self.assertEqual(result["algorithm"], "priority_sweep_balanced")
-        self.assertEqual(result["summary"]["load_metric"], "priority_sweep_lexicographic")
+        self.assertEqual(result["summary"]["load_metric"], "multi_objective_lexicographic")
         self.assertEqual(
             result["summary"]["objective_priority"],
             [
-                "long_cut_over_1000_prefer_bay22_23",
                 "steel_quantity_sum",
                 "cut_length_sum",
                 "bevel_quantity_sum",
+                "long_cut_over_1000_prefer_bay22_23",
             ],
         )
 
@@ -227,14 +293,14 @@ class Phase1BayBalancerTest(unittest.TestCase):
         )
 
         self.assertEqual(result["algorithm"], "long_cut_preferred_balanced")
-        self.assertEqual(result["summary"]["load_metric"], "long_cut_preferred_lexicographic")
+        self.assertEqual(result["summary"]["load_metric"], "multi_objective_lexicographic")
         self.assertEqual(
             result["summary"]["objective_priority"],
             [
-                "long_cut_over_1000_prefer_bay22_23",
                 "steel_quantity_sum",
                 "cut_length_sum",
                 "bevel_quantity_sum",
+                "long_cut_over_1000_prefer_bay22_23",
             ],
         )
         self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
