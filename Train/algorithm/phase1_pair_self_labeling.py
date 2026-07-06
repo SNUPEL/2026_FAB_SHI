@@ -165,12 +165,19 @@ class Phase1PairCandidate:
     bay_loads: Dict[str, Dict[str, int | float]]
 
 
+Phase2FeedbackScorer = Callable[
+    [Phase1PairCandidate, Mapping[str, object], Sequence[str]],
+    Sequence[int | float],
+]
+
+
 def build_phase1_pair_candidates(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
     bay_loads: Mapping[str, Mapping[str, int | float]] | None = None,
     remaining_block_ids: Sequence[str] | None = None,
     assigned_block_count: int = 0,
+    long_cut_hard_mask: bool = True,
 ) -> List[Dict]:
     """Build direct `(block, bay)` candidates for the current Phase 1 state.
 
@@ -179,6 +186,7 @@ def build_phase1_pair_candidates(
     - `bay_ids`: `["22", "23", "24"]`.
     - `bay_loads`: 현재까지 Bay별 누적 부하. None이면 모두 0으로 시작.
     - `remaining_block_ids`: 아직 배정하지 않은 block만 후보로 만들 때 사용.
+    - `long_cut_hard_mask`: True면 장척 block의 Bay24 후보를 제거하고, False면 평가 실험용으로 Bay24 후보를 유지.
 
     출력 예시:
     - `[{"action_id": "PROJ_1::BLK_2@22", "features": [...]}, ...]`
@@ -187,7 +195,12 @@ def build_phase1_pair_candidates(
     # LINE-BY-LINE: Bay ID를 문자열 tuple로 정규화하고, 빈 Bay 입력이면 여기서 실패합니다.
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
     # LINE-BY-LINE: W/O job들을 block_set_id 기준으로 묶고, 강재수량/절단장/베벨수량 등을 block 단위로 합산합니다.
-    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids, require_multi_objective=True)
+    blocks = _collect_blocks(
+        jobs=jobs,
+        bay_ids=normalized_bay_ids,
+        require_multi_objective=True,
+        long_cut_hard_mask=long_cut_hard_mask,
+    )
     # LINE-BY-LINE: 남은 block 목록이 외부에서 오면 그것만 사용하고, 없으면 전체 block을 남은 후보로 봅니다.
     remaining = set(remaining_block_ids) if remaining_block_ids is not None else {block.block_set_id for block in blocks}
     # LINE-BY-LINE: 현재 Bay별 부하를 복사합니다. 원본 dict를 직접 수정하지 않기 위해 새 dict를 만듭니다.
@@ -253,6 +266,7 @@ def train_phase1_pair_self_labeling(
     validation_episodes: int = 20,
     validation_episode_factory: Callable[[int], Mapping[str, object]] | None = None,
     resume_checkpoint: str | Path | None = None,
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> Dict:
     """Train a pair-action policy from best-of-K complete assignments.
 
@@ -278,6 +292,7 @@ def train_phase1_pair_self_labeling(
         validation_every,
         validation_episodes,
         validation_episode_factory,
+        phase2_feedback_scorer,
     )
     # LINE-BY-LINE: PyTorch 난수 seed를 고정해 같은 입력에서 같은 초기 모델/샘플링을 재현합니다.
     torch.manual_seed(seed)
@@ -366,12 +381,28 @@ def train_phase1_pair_self_labeling(
         for algorithm in heuristic_algorithms:
             candidates.append(_run_phase1_pair_heuristic_candidate(jobs, normalized_bay_ids, algorithm))
 
-        # LINE-BY-LINE: 모든 후보 중 목적함수 tuple이 가장 작은 후보를 pseudo-label teacher로 선택합니다.
-        best = min(candidates, key=lambda candidate: _score_bay_loads(candidate.bay_loads, score_mode))
+        # LINE-BY-LINE: 모든 후보 중 Phase2 feedback + Phase1 목적함수 tuple이 가장 작은 후보를 pseudo-label teacher로 선택합니다.
+        best = min(
+            candidates,
+            key=lambda candidate: _candidate_learning_score(
+                candidate=candidate,
+                jobs=jobs,
+                bay_ids=normalized_bay_ids,
+                score_mode=score_mode,
+                phase2_feedback_scorer=phase2_feedback_scorer,
+            ),
+        )
         # LINE-BY-LINE: best 후보의 transition sequence를 target으로 cross entropy 학습 1회를 수행합니다.
         loss = _teacher_forcing_update(model, optimizer, best.transitions)
         # LINE-BY-LINE: 선택된 best 후보의 목적함수 score tuple입니다. 낮을수록 좋습니다.
         score = _score_bay_loads(best.bay_loads, score_mode)
+        phase2_feedback_score = _candidate_phase2_feedback_score(
+            candidate=best,
+            jobs=jobs,
+            bay_ids=normalized_bay_ids,
+            phase2_feedback_scorer=phase2_feedback_scorer,
+        )
+        learning_score = phase2_feedback_score + score
         # LINE-BY-LINE: 모든 agent/heuristic 후보를 CSV audit row로 저장합니다.
         for candidate_index, candidate in enumerate(candidates, start=1):
             candidate_rows.append(
@@ -384,6 +415,9 @@ def train_phase1_pair_self_labeling(
                     candidate=candidate,
                     best=best,
                     score_mode=score_mode,
+                    jobs=jobs,
+                    bay_ids=normalized_bay_ids,
+                    phase2_feedback_scorer=phase2_feedback_scorer,
                 )
             )
         # LINE-BY-LINE: 실제 학습 target으로 사용한 best 후보의 step별 action table을 JSONL에 누적합니다.
@@ -406,6 +440,8 @@ def train_phase1_pair_self_labeling(
                 "best_source": best.source,
                 "loss": loss,
                 "score_json": json.dumps(list(score), ensure_ascii=False),
+                "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
+                "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
                 "candidate_count": len(candidates),
             }
         )
@@ -442,6 +478,7 @@ def train_phase1_pair_self_labeling(
                 heuristic_algorithms=heuristic_algorithms,
                 score_mode=score_mode,
                 episode=episode,
+                phase2_feedback_scorer=phase2_feedback_scorer,
             )
             # LINE-BY-LINE: validation episode별 agent 요약 row를 누적합니다.
             validation_rows.extend(validation["rows"])
@@ -496,6 +533,17 @@ def train_phase1_pair_self_labeling(
         episode=episodes,
         validation_score=None,
     )
+    # LINE-BY-LINE: Phase 2 feedback scorer 사용 여부와 score prefix 길이를 summary에 남깁니다. 사용: 서로 다른 학습 run 비교 시 같은 목적함수였는지 확인합니다.
+    phase2_feedback_score_length = 0
+    if phase2_feedback_scorer is not None and metrics_rows:
+        try:
+            phase2_feedback_score_length = len(json.loads(metrics_rows[-1]["phase2_feedback_score_json"]))
+        except (KeyError, json.JSONDecodeError, TypeError) as exc:
+            print(
+                "[ERROR][phase1_pair_self_labeling.train] "
+                f"cause=invalid_phase2_feedback_score_json episode={metrics_rows[-1].get('episode')}"
+            )
+            raise RuntimeError("invalid phase2_feedback_score_json in metrics rows") from exc
     # LINE-BY-LINE: CLI와 외부 notebook이 읽을 수 있는 summary dict를 구성합니다.
     summary = {
         "checkpoint_path": str(checkpoint_path),
@@ -516,6 +564,8 @@ def train_phase1_pair_self_labeling(
         "checkpoint_every": checkpoint_every,
         "validation_every": validation_every,
         "validation_episodes": validation_episodes,
+        "phase2_feedback_score_enabled": phase2_feedback_scorer is not None,
+        "phase2_feedback_score_length": phase2_feedback_score_length,
         "resume_checkpoint": str(resume_path) if resume_path is not None else "",
         "start_episode": start_episode,
         "resumed_from_episode": start_episode - 1 if resume_path is not None else 0,
@@ -535,8 +585,13 @@ def run_phase1_pair_policy_rollout(
     seed: int,
     source: str,
     selection: str = "sample",
+    long_cut_hard_mask: bool = True,
 ) -> Phase1PairCandidate:
-    """Sample one direct pair-action assignment."""
+    """Sample one direct pair-action assignment.
+
+    `long_cut_hard_mask=False` is for evaluation-only ablation. Training/default
+    planning keeps the confirmed hard-mask behavior.
+    """
 
     if temperature <= 0:
         print(f"[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_rollout] cause=non_positive_temperature value={temperature}")
@@ -547,7 +602,12 @@ def run_phase1_pair_policy_rollout(
     generator = torch.Generator()
     generator.manual_seed(int(seed))
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
-    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids, require_multi_objective=True)
+    blocks = _collect_blocks(
+        jobs=jobs,
+        bay_ids=normalized_bay_ids,
+        require_multi_objective=True,
+        long_cut_hard_mask=long_cut_hard_mask,
+    )
     bay_loads = _empty_bay_loads(normalized_bay_ids)
     remaining = {block.block_set_id for block in blocks}
     transitions: List[Phase1PairTransition] = []
@@ -560,6 +620,7 @@ def run_phase1_pair_policy_rollout(
             bay_loads=bay_loads,
             remaining_block_ids=sorted(remaining),
             assigned_block_count=block_step,
+            long_cut_hard_mask=long_cut_hard_mask,
         )
         env_features = _pair_env_features(
             bay_loads=bay_loads,
@@ -609,6 +670,7 @@ def _validate_pair_policy(
     heuristic_algorithms: Sequence[str],
     score_mode: str,
     episode: int,
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> Dict:
     """Evaluate deterministic greedy policy against the heuristic bank."""
 
@@ -636,7 +698,16 @@ def _validate_pair_policy(
         for algorithm in heuristic_algorithms:
             candidates.append(_run_phase1_pair_heuristic_candidate(jobs, bay_ids, algorithm))
         scored = [
-            (_score_bay_loads(candidate.bay_loads, score_mode), candidate)
+            (
+                _candidate_learning_score(
+                    candidate=candidate,
+                    jobs=jobs,
+                    bay_ids=bay_ids,
+                    score_mode=score_mode,
+                    phase2_feedback_scorer=phase2_feedback_scorer,
+                ),
+                candidate,
+            )
             for candidate in candidates
         ]
         scored.sort(key=lambda item: item[0])
@@ -645,12 +716,20 @@ def _validate_pair_policy(
             for rank, (_, candidate) in enumerate(scored, start=1)
         }
         agent_score = _score_bay_loads(candidates[0].bay_loads, score_mode)
-        best_score, best_candidate = scored[0]
+        agent_learning_score = _candidate_learning_score(
+            candidate=candidates[0],
+            jobs=jobs,
+            bay_ids=bay_ids,
+            score_mode=score_mode,
+            phase2_feedback_scorer=phase2_feedback_scorer,
+        )
+        best_learning_score, best_candidate = scored[0]
+        best_score = _score_bay_loads(best_candidate.bay_loads, score_mode)
         agent_rank = rank_by_source["agent_greedy"]
         agent_is_best = int(agent_rank == 1)
         agent_best_count += agent_is_best
-        agent_scores.append(agent_score)
-        agent_scores_by_source.setdefault(validation_source, []).append(agent_score)
+        agent_scores.append(agent_learning_score)
+        agent_scores_by_source.setdefault(validation_source, []).append(agent_learning_score)
         for candidate_index, candidate in enumerate(candidates, start=1):
             candidate_rows.append(
                 _validation_candidate_summary_row(
@@ -664,6 +743,9 @@ def _validate_pair_policy(
                     best=best_candidate,
                     rank=rank_by_source[candidate.source],
                     score_mode=score_mode,
+                    jobs=jobs,
+                    bay_ids=bay_ids,
+                    phase2_feedback_scorer=phase2_feedback_scorer,
                 )
             )
         rows.append(
@@ -674,7 +756,9 @@ def _validate_pair_policy(
                 "problem_id": problem_id,
                 "block_count": block_count,
                 "agent_score_json": json.dumps(list(agent_score), ensure_ascii=False),
+                "agent_learning_score_json": json.dumps(list(agent_learning_score), ensure_ascii=False),
                 "best_score_json": json.dumps(list(best_score), ensure_ascii=False),
+                "best_learning_score_json": json.dumps(list(best_learning_score), ensure_ascii=False),
                 "best_source": best_candidate.source,
                 "agent_is_best": agent_is_best,
                 "agent_rank": agent_rank,
@@ -1049,6 +1133,50 @@ def _score_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]], score_m
     return _multi_objective_load_score(bay_loads, score_mode=score_mode)
 
 
+def _candidate_learning_score(
+    candidate: Phase1PairCandidate,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    score_mode: str,
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
+) -> tuple:
+    """Return the score used to choose the self-labeling teacher candidate."""
+
+    return _candidate_phase2_feedback_score(
+        candidate=candidate,
+        jobs=jobs,
+        bay_ids=bay_ids,
+        phase2_feedback_scorer=phase2_feedback_scorer,
+    ) + _score_bay_loads(candidate.bay_loads, score_mode)
+
+
+def _candidate_phase2_feedback_score(
+    candidate: Phase1PairCandidate,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
+) -> tuple:
+    """Return optional Phase 2 feedback score, or an empty tuple when disabled."""
+
+    if phase2_feedback_scorer is None:
+        return ()
+    raw_score = phase2_feedback_scorer(candidate, jobs, bay_ids)
+    if raw_score is None:
+        print(
+            "[ERROR][phase1_pair_self_labeling._candidate_phase2_feedback_score] "
+            f"cause=none_feedback_score source={candidate.source}"
+        )
+        raise RuntimeError("Phase 2 feedback scorer returned None")
+    try:
+        return tuple(float(value) for value in raw_score)
+    except (TypeError, ValueError) as exc:
+        print(
+            "[ERROR][phase1_pair_self_labeling._candidate_phase2_feedback_score] "
+            f"cause=invalid_feedback_score source={candidate.source} raw_score={raw_score}"
+        )
+        raise RuntimeError("Phase 2 feedback score must be a numeric sequence") from exc
+
+
 def _plain_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]]) -> Dict[str, Dict[str, int | float]]:
     """Return JSON-safe Bay load mapping."""
 
@@ -1122,6 +1250,7 @@ def _validate_train_inputs(
     validation_every: int,
     validation_episodes: int,
     validation_episode_factory: Callable[[int], Mapping[str, object]] | None,
+    phase2_feedback_scorer: Phase2FeedbackScorer | None,
 ) -> None:
     """Validate pair self-labeling train controls."""
 
@@ -1159,6 +1288,12 @@ def _validate_train_inputs(
             f"cause=non_positive_validation_episodes validation_episodes={validation_episodes}"
         )
         raise RuntimeError("validation_episodes must be positive when validation is enabled")
+    if phase2_feedback_scorer is not None and not callable(phase2_feedback_scorer):
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_train_inputs] "
+            f"cause=non_callable_phase2_feedback_scorer type={type(phase2_feedback_scorer).__name__}"
+        )
+        raise RuntimeError("phase2_feedback_scorer must be callable")
 
 
 def _episode_payload(
@@ -1212,10 +1347,20 @@ def _candidate_summary_row(
     candidate: Phase1PairCandidate,
     best: Phase1PairCandidate,
     score_mode: str,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> Dict:
     """Return one candidate audit row."""
 
     score = _score_bay_loads(candidate.bay_loads, score_mode)
+    phase2_feedback_score = _candidate_phase2_feedback_score(
+        candidate=candidate,
+        jobs=jobs,
+        bay_ids=bay_ids,
+        phase2_feedback_scorer=phase2_feedback_scorer,
+    )
+    learning_score = phase2_feedback_score + score
     row = {
         "episode": episode,
         "problem_id": problem_id,
@@ -1226,6 +1371,8 @@ def _candidate_summary_row(
         "is_best": int(candidate is best),
         "score_mode": score_mode,
         "score_json": json.dumps(list(score), ensure_ascii=False),
+        "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
+        "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
         "assignment_count": len(candidate.assignments),
         "transition_count": len(candidate.transitions),
         "bay_loads_json": json.dumps(candidate.bay_loads, ensure_ascii=False, sort_keys=True),
@@ -1245,10 +1392,20 @@ def _validation_candidate_summary_row(
     best: Phase1PairCandidate,
     rank: int,
     score_mode: str,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> Dict:
     """Return one validation candidate audit row."""
 
     score = _score_bay_loads(candidate.bay_loads, score_mode)
+    phase2_feedback_score = _candidate_phase2_feedback_score(
+        candidate=candidate,
+        jobs=jobs,
+        bay_ids=bay_ids,
+        phase2_feedback_scorer=phase2_feedback_scorer,
+    )
+    learning_score = phase2_feedback_score + score
     row = {
         "train_episode": train_episode,
         "validation_episode": validation_episode,
@@ -1261,6 +1418,8 @@ def _validation_candidate_summary_row(
         "is_best": int(candidate is best),
         "score_mode": score_mode,
         "score_json": json.dumps(list(score), ensure_ascii=False),
+        "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
+        "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
         "assignment_count": len(candidate.assignments),
         "transition_count": len(candidate.transitions),
         "bay_loads_json": json.dumps(candidate.bay_loads, ensure_ascii=False, sort_keys=True),
@@ -1331,6 +1490,8 @@ def _write_metrics(path: Path, rows: Sequence[Mapping]) -> None:
             "best_source",
             "loss",
             "score_json",
+            "phase2_feedback_score_json",
+            "learning_score_json",
             "candidate_count",
         ],
         rows,
@@ -1352,6 +1513,8 @@ def _write_candidate_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "is_best",
             "score_mode",
             "score_json",
+            "phase2_feedback_score_json",
+            "learning_score_json",
             *PHASE1_SCORE_FIELD_NAMES,
             "assignment_count",
             "transition_count",
@@ -1378,6 +1541,8 @@ def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> 
             "is_best",
             "score_mode",
             "score_json",
+            "phase2_feedback_score_json",
+            "learning_score_json",
             *PHASE1_SCORE_FIELD_NAMES,
             "assignment_count",
             "transition_count",
@@ -1582,7 +1747,9 @@ def _write_validation_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "problem_id",
             "block_count",
             "agent_score_json",
+            "agent_learning_score_json",
             "best_score_json",
+            "best_learning_score_json",
             "best_source",
             "agent_is_best",
             "agent_rank",

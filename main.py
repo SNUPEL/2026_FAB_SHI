@@ -73,6 +73,15 @@ from Utils.phase1_bay_balancer import (
     build_phase1_bay_plan,
     write_phase1_bay_plan,
 )
+from Utils.phase1_phase2_communication import (
+    DEFAULT_BATCH_MAX_LENGTH_SUM,
+    DEFAULT_BATCH_MAX_WO_COUNT,
+    DEFAULT_WIDE_BTH_THRESHOLD,
+    apply_phase1_messages_to_scenario,
+    load_communication_jsonl,
+    score_phase1_assignments_with_phase2_feedback,
+    write_phase1_phase2_communication_package,
+)
 from Utils.phase1_mdp import write_phase1_mdp_trace_package
 # LINE-BY-LINE: `Utils.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
@@ -552,6 +561,10 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- actual_validation_wo_xlsx: {args.actual_validation_wo_xlsx}")
     print(f"- actual_validation_workdays: {args.actual_validation_workdays}")
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
+    print(f"- enable_phase2_feedback_score: {args.enable_phase2_feedback_score}")
+    print(f"- phase2_wide_bth_threshold: {args.phase2_wide_bth_threshold}")
+    print(f"- phase2_batch_max_wo_count: {args.phase2_batch_max_wo_count}")
+    print(f"- phase2_batch_max_length_sum: {args.phase2_batch_max_length_sum}")
     env = build_environment(args.config)
     bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
     heuristic_algorithms = [
@@ -630,6 +643,25 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         payload = actual_validation_payloads[actual_index]
         return {"jobs": payload["jobs"], "metadata": payload["metadata"]}
 
+    phase2_feedback_scorer = None
+    if args.enable_phase2_feedback_score:
+        enabled_machines = [machine for machine in env.machines.values() if machine.enabled]
+        if not enabled_machines:
+            print("[ERROR][main.command_phase1_train_pair_self_labeling] cause=no_enabled_machines_for_phase2_feedback")
+            raise RuntimeError("Phase 2 feedback scoring requires at least one enabled machine")
+
+        def phase2_feedback_scorer(candidate, jobs, candidate_bay_ids):
+            return score_phase1_assignments_with_phase2_feedback(
+                assignments=candidate.assignments,
+                jobs=jobs,
+                bay_ids=candidate_bay_ids,
+                machines=enabled_machines,
+                algorithm=str(candidate.source),
+                wide_bth_threshold=args.phase2_wide_bth_threshold,
+                batch_max_wo_count=args.phase2_batch_max_wo_count,
+                batch_max_length_sum=args.phase2_batch_max_length_sum,
+            )
+
     summary = train_phase1_pair_self_labeling(
         episode_jobs=None,
         episode_metadata=None,
@@ -649,6 +681,7 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         validation_episodes=total_validation_episodes,
         validation_episode_factory=validation_episode_factory,
         resume_checkpoint=args.resume_checkpoint,
+        phase2_feedback_scorer=phase2_feedback_scorer,
     )
     print(f"- resolved_bay_ids: {bay_ids}")
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
@@ -740,6 +773,80 @@ def command_apply_phase1_to_phase2(args: argparse.Namespace) -> None:
     print(f"- plan_assignment_count: {summary['plan_assignment_count']}")
     print(f"- output_scenario: {args.output_scenario}")
     print("[VALIDATION][main.command_apply_phase1_to_phase2] passed=true")
+
+
+def command_phase1_phase2_communicate(args: argparse.Namespace) -> None:
+    """Write limited Phase 1 <-> Phase 2 communication messages and feedback."""
+
+    print("[phase1-phase2-communicate]")
+    print(f"- config: {args.config}")
+    print(f"- scenario_path_override: {args.scenario_path}")
+    print(f"- phase1_plan: {args.phase1_plan}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- wide_bth_threshold: {args.wide_bth_threshold}")
+    print(f"- batch_max_wo_count: {args.batch_max_wo_count}")
+    print(f"- batch_max_length_sum: {args.batch_max_length_sum}")
+
+    plan_path = Path(args.phase1_plan)
+    if not plan_path.exists():
+        print(
+            "[ERROR][main.command_phase1_phase2_communicate] "
+            f"cause=missing_phase1_plan path={plan_path}"
+        )
+        raise FileNotFoundError(f"Phase 1 plan does not exist: {plan_path}")
+
+    config = load_config(args.config)
+    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
+    with plan_path.open("r", encoding="utf-8") as file:
+        plan = json.load(file)
+
+    package = write_phase1_phase2_communication_package(
+        scenario=scenario,
+        plan=plan,
+        output_dir=args.output_dir,
+        wide_bth_threshold=args.wide_bth_threshold,
+        batch_max_wo_count=args.batch_max_wo_count,
+        batch_max_length_sum=args.batch_max_length_sum,
+    )
+    summary = package["summary"]
+    print(f"- block_message_count: {summary['block_message_count']}")
+    print(f"- feedback_message_count: {summary['feedback_message_count']}")
+    print(f"- repair_required_count: {summary['repair_required_count']}")
+    print(f"- infeasible_count: {summary['infeasible_count']}")
+    print(f"- hard_violation_count: {summary['hard_violation_count']}")
+    print(f"- phase1_to_phase2_jsonl: {package['phase1_to_phase2_jsonl']}")
+    print(f"- phase2_to_phase1_jsonl: {package['phase2_to_phase1_jsonl']}")
+    print(f"- feedback_csv: {package['feedback_csv']}")
+    print(f"- manifest_json: {package['manifest_json']}")
+    print("[VALIDATION][main.command_phase1_phase2_communicate] passed=true")
+
+
+def command_apply_phase1_messages_to_phase2(args: argparse.Namespace) -> None:
+    """Write a Phase 2 scenario using Phase 1-to-Phase 2 message JSONL."""
+
+    print("[apply-phase1-messages-to-phase2]")
+    print(f"- config: {args.config}")
+    print(f"- scenario_path_override: {args.scenario_path}")
+    print(f"- phase1_messages: {args.phase1_messages}")
+    print(f"- assignment_mode: {args.assignment_mode}")
+    print(f"- output_scenario: {args.output_scenario}")
+
+    config = load_config(args.config)
+    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
+    messages = load_communication_jsonl(args.phase1_messages)
+    result = apply_phase1_messages_to_scenario(
+        scenario=scenario,
+        phase1_messages=messages,
+        assignment_mode=args.assignment_mode,
+    )
+    save_scenario(result["scenario"], args.output_scenario)
+    summary = result["summary"]
+
+    print(f"- assigned_job_count: {summary['assigned_job_count']}")
+    print(f"- assigned_block_count: {summary['assigned_block_count']}")
+    print(f"- message_assignment_count: {summary['message_assignment_count']}")
+    print(f"- output_scenario: {args.output_scenario}")
+    print("[VALIDATION][main.command_apply_phase1_messages_to_phase2] passed=true")
 
 
 def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
@@ -1980,6 +2087,29 @@ def build_parser() -> argparse.ArgumentParser:
         default="20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429",
         help="Comma-separated actual workdays for fixed validation. Empty string disables actual validation.",
     )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--enable-phase2-feedback-score",
+        action="store_true",
+        help="Prepend Phase 2 feasibility feedback score to the pair self-labeling objective.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--phase2-wide-bth-threshold",
+        type=float,
+        default=DEFAULT_WIDE_BTH_THRESHOLD,
+        help="BTH/plate_width threshold for wide-plate Phase 2 feedback.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--phase2-batch-max-wo-count",
+        type=int,
+        default=DEFAULT_BATCH_MAX_WO_COUNT,
+        help="Estimated Phase 2 batch W/O count limit used by feedback scoring.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--phase2-batch-max-length-sum",
+        type=float,
+        default=DEFAULT_BATCH_MAX_LENGTH_SUM,
+        help="Estimated Phase 2 batch LTH sum limit used by feedback scoring.",
+    )
     phase1_train_pair_self_labeling_parser.set_defaults(func=command_phase1_train_pair_self_labeling)
 
     phase1_episode_dataset_parser = subparsers.add_parser(
@@ -2052,6 +2182,74 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output Phase 2 scenario YAML path",
     )
     apply_phase1_parser.set_defaults(func=command_apply_phase1_to_phase2)
+
+    communicate_parser = subparsers.add_parser(
+        "phase1-phase2-communicate",
+        parents=[common_parser],
+        help="Write limited Phase 1-to-Phase 2 messages and Phase 2 feedback",
+    )
+    communicate_parser.add_argument(
+        "--scenario-path",
+        default=None,
+        help="Optional source scenario override. Default follows config/data-source loader.",
+    )
+    communicate_parser.add_argument(
+        "--phase1-plan",
+        required=True,
+        help="Phase 1 plan JSON path, usually phase1_block_bay_plan.json",
+    )
+    communicate_parser.add_argument(
+        "--output-dir",
+        default="output/phase1_phase2_communication",
+        help="Output directory for communication JSONL/CSV/manifest files",
+    )
+    communicate_parser.add_argument(
+        "--wide-bth-threshold",
+        type=float,
+        default=4500.0,
+        help="BTH/plate_width threshold for wide blocks. Width above this requires Bay 22/23.",
+    )
+    communicate_parser.add_argument(
+        "--batch-max-wo-count",
+        type=int,
+        default=3,
+        help="Phase 2 machine batch W/O capacity.",
+    )
+    communicate_parser.add_argument(
+        "--batch-max-length-sum",
+        type=float,
+        default=55000.0,
+        help="Phase 2 machine batch LTH sum capacity.",
+    )
+    communicate_parser.set_defaults(func=command_phase1_phase2_communicate)
+
+    apply_messages_parser = subparsers.add_parser(
+        "apply-phase1-messages-to-phase2",
+        parents=[common_parser],
+        help="Apply Phase 1-to-Phase 2 message JSONL to a Phase 2 scenario",
+    )
+    apply_messages_parser.add_argument(
+        "--scenario-path",
+        default=None,
+        help="Optional source scenario override. Default follows config/data-source loader.",
+    )
+    apply_messages_parser.add_argument(
+        "--phase1-messages",
+        required=True,
+        help="Phase 1-to-Phase 2 message JSONL path.",
+    )
+    apply_messages_parser.add_argument(
+        "--assignment-mode",
+        default="allowed_bay_ids",
+        choices=["cut_bay", "allowed_bay_ids"],
+        help="How to write Phase 1 message Bay into Phase 2 jobs.",
+    )
+    apply_messages_parser.add_argument(
+        "--output-scenario",
+        default="output/generated/phase2_from_phase1_messages.yaml",
+        help="Output Phase 2 scenario YAML path.",
+    )
+    apply_messages_parser.set_defaults(func=command_apply_phase1_messages_to_phase2)
 
     generate_phase1_blocks_parser = subparsers.add_parser(
         "generate-phase1-blocks",

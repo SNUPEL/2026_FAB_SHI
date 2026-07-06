@@ -13,6 +13,7 @@ from Train.algorithm.phase1_pair_self_labeling import (
     build_phase1_pair_candidates,
     run_phase1_pair_policy_rollout,
     train_phase1_pair_self_labeling,
+    _candidate_learning_score,
 )
 from Train.algorithm.phase1_self_labeling import PHASE1_SELF_LABEL_HEURISTIC_BANK
 
@@ -279,6 +280,83 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
         self.assertEqual(summary["start_episode"], 3)
         self.assertEqual(summary["resumed_from_episode"], 2)
         self.assertEqual([int(row["episode"]) for row in metrics], [1, 2, 3, 4])
+
+    def test_pair_learning_score_can_prepend_phase2_feedback(self) -> None:
+        jobs = {
+            "WO_A": self._job("WO_A", "P1::A", steel=10, cut_length=500, bevel_quantity=2),
+        }
+        base_better_but_phase2_bad = run_phase1_pair_policy_rollout(
+            jobs=jobs,
+            bay_ids=["22", "23", "24"],
+            model=None,
+            temperature=1.0,
+            seed=1,
+            source="bad_for_phase2",
+        )
+        base_worse_but_phase2_ok = run_phase1_pair_policy_rollout(
+            jobs=jobs,
+            bay_ids=["22", "23", "24"],
+            model=None,
+            temperature=1.0,
+            seed=2,
+            source="ok_for_phase2",
+        )
+
+        def phase2_feedback_scorer(candidate, _jobs, _bay_ids):
+            return (0,) if candidate.source == "ok_for_phase2" else (1,)
+
+        self.assertLess(
+            _candidate_learning_score(
+                candidate=base_worse_but_phase2_ok,
+                jobs=jobs,
+                bay_ids=["22", "23", "24"],
+                score_mode="steel_first",
+                phase2_feedback_scorer=phase2_feedback_scorer,
+            ),
+            _candidate_learning_score(
+                candidate=base_better_but_phase2_bad,
+                jobs=jobs,
+                bay_ids=["22", "23", "24"],
+                score_mode="steel_first",
+                phase2_feedback_scorer=phase2_feedback_scorer,
+            ),
+        )
+
+    def test_pair_training_writes_phase2_feedback_learning_score_when_enabled(self) -> None:
+        episode_jobs = [
+            {
+                "WO_A": self._job("WO_A", "P1::A", steel=10, cut_length=500, bevel_quantity=2),
+                "WO_B": self._job("WO_B", "P1::B", steel=7, cut_length=400, bevel_quantity=8),
+            },
+        ]
+        episode_metadata = [{"problem_id": "EP00001", "block_count": 2, "seed": 101}]
+
+        def phase2_feedback_scorer(candidate, _jobs, _bay_ids):
+            return (0,) if candidate.source == "bevel_first_balanced" else (1,)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = train_phase1_pair_self_labeling(
+                episode_jobs=episode_jobs,
+                episode_metadata=episode_metadata,
+                bay_ids=["22", "23", "24"],
+                output_dir=temp_dir,
+                episodes=1,
+                rollout_samples=1,
+                heuristic_algorithms=("steel_first_balanced", "bevel_first_balanced"),
+                hidden_dim=16,
+                seed=1,
+                phase2_feedback_scorer=phase2_feedback_scorer,
+            )
+            with Path(summary["metrics_csv"]).open(encoding="utf-8-sig") as file:
+                metrics = list(csv.DictReader(file))
+            with Path(summary["candidate_summary_csv"]).open(encoding="utf-8-sig") as file:
+                candidates = list(csv.DictReader(file))
+
+        self.assertEqual(metrics[0]["best_source"], "bevel_first_balanced")
+        self.assertEqual(json.loads(metrics[0]["phase2_feedback_score_json"]), [0])
+        self.assertIn("phase2_feedback_score_json", candidates[0])
+        self.assertEqual(summary["phase2_feedback_score_enabled"], True)
+        self.assertEqual(summary["phase2_feedback_score_length"], 1)
 
     @staticmethod
     def _job(
