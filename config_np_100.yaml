@@ -132,7 +132,7 @@ constraints:
         machine_single_processing: true
         batch_wo_count_limit: true
         batch_length_sum_limit: true
-        family_eligibility: false
+        family_eligibility: true
         thickness_range: false
         table_length_limit: false
       soft_enabled: {}

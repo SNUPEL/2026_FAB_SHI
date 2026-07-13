@@ -30,11 +30,52 @@ class Phase2ConstraintProfileTest(unittest.TestCase):
                 "machine_single_processing",
                 "batch_wo_count_limit",
                 "batch_length_sum_limit",
+                "family_eligibility",
             },
         )
-        self.assertFalse(self.profile.hard_enabled["family_eligibility"])
+        self.assertTrue(self.profile.hard_enabled["family_eligibility"])
         self.assertFalse(self.profile.hard_enabled["thickness_range"])
         self.assertFalse(self.profile.hard_enabled["table_length_limit"])
+
+    def test_family_eligibility_rejects_incompatible_job_in_mixed_family_batch(self) -> None:
+        np_job = self._job("WO_NP", "P1::NP::A", plate_length=10_000.0, family="NP")
+        fl_job = self._job("WO_FL", "P1::FL::A", plate_length=10_000.0, family="FL")
+        np_machine = self._machine("PLS21", "22", eligible_families=("NP",))
+        compatible_machine = self._machine("PLS22", "22", eligible_families=("NP", "FL"))
+        jobs = {job.job_id: job for job in (np_job, fl_job)}
+        assignments = {np_job.block_set_id: "22", fl_job.block_set_id: "22"}
+
+        rejected = evaluate_phase2_action_constraints(
+            profile=self.profile,
+            job=fl_job,
+            machine=np_machine,
+            jobs=jobs,
+            machines={np_machine.machine_id: np_machine},
+            phase1_assignments=assignments,
+            machine_available_at={np_machine.machine_id: 0.0},
+            current_time=0.0,
+            candidate_batch_job_ids=(np_job.job_id, fl_job.job_id),
+            candidate_batch_length_sum=20_000.0,
+            max_wo_count=3,
+            max_length_sum=55_000.0,
+        )
+        accepted = evaluate_phase2_action_constraints(
+            profile=self.profile,
+            job=fl_job,
+            machine=compatible_machine,
+            jobs=jobs,
+            machines={compatible_machine.machine_id: compatible_machine},
+            phase1_assignments=assignments,
+            machine_available_at={compatible_machine.machine_id: 0.0},
+            current_time=0.0,
+            candidate_batch_job_ids=(np_job.job_id, fl_job.job_id),
+            candidate_batch_length_sum=20_000.0,
+            max_wo_count=3,
+            max_length_sum=55_000.0,
+        )
+
+        self.assertIn("family_eligibility", rejected.hard_failed_rule_names)
+        self.assertTrue(accepted.hard_passed)
 
     def test_common_evaluator_rejects_disabled_wrong_bay_busy_and_batch_overflow(self) -> None:
         job = self._job("WO_A", "P1::A", plate_length=30_000.0)
@@ -260,11 +301,16 @@ class Phase2ConstraintProfileTest(unittest.TestCase):
             )
 
     @staticmethod
-    def _job(job_id: str, block_set_id: str, plate_length: float) -> SimpleNamespace:
+    def _job(
+        job_id: str,
+        block_set_id: str,
+        plate_length: float,
+        family: str = "NP",
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             job_id=job_id,
             block_set_id=block_set_id,
-            family="NP",
+            family=family,
             plate_length=plate_length,
             thickness=13.0,
             cut_length=100.0,
@@ -277,12 +323,17 @@ class Phase2ConstraintProfileTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _machine(machine_id: str, bay_id: str, enabled: bool = True) -> SimpleNamespace:
+    def _machine(
+        machine_id: str,
+        bay_id: str,
+        enabled: bool = True,
+        eligible_families: tuple[str, ...] = ("NP",),
+    ) -> SimpleNamespace:
         return SimpleNamespace(
             machine_id=machine_id,
             bay_id=bay_id,
             enabled=enabled,
-            eligible_families=("OTHER",),
+            eligible_families=eligible_families,
             min_thickness=99.0,
             max_thickness=100.0,
             table_length_limit=1.0,

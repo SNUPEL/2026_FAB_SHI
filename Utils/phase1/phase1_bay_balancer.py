@@ -20,6 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
+from Utils.phase1.multi_series_rules import (
+    LEGACY_NP_RULE_PROFILE,
+    MULTI_SERIES_RULE_PROFILE,
+    apply_phase1_series_bay_mask,
+    balancing_group_for_series,
+    bay_capacity_weights_for_group,
+)
+
 
 CANONICAL_PHASE1_HEURISTIC = "steel_lpt_greedy_insertion"
 MULTI_OBJECTIVE_PHASE1_HEURISTIC = "multi_objective_balanced"
@@ -42,9 +50,10 @@ SUPPORTED_PHASE1_ALGORITHMS = {
 class Phase1Block:
     """Aggregated input unit for Phase 1.
 
-    A block is identified by `block_set_id`, usually `호선번호::블록명`.
-    `steel_quantity_sum` is the primary workload used for Bay balancing.
-    `wo_count` is reported as a secondary workload metric.
+    A block is identified by `block_set_id`, `호선번호::계열::블록명`.
+    신규 다계열 profile의 사전식 목적은 `wo_count`, `cut_length_sum`,
+    `bevel_quantity_sum` 순서다. `steel_quantity_sum`은 기존 NP 회귀와
+    데이터 audit를 위해 유지한다.
     """
 
     block_set_id: str
@@ -59,6 +68,12 @@ class Phase1Block:
     allowed_bay_ids: Tuple[str, ...]
     length_avg: float | None = None
     thickness_avg: float | None = None
+    family: str = ""
+    balancing_group: str = ""
+    width_max: float | None = None
+    wide_plate_over_4500: int = 0
+    cnt_block: int = 0
+    bay_mask_reason_codes: Tuple[str, ...] = ()
 
 
 def build_phase1_bay_plan(
@@ -67,6 +82,8 @@ def build_phase1_bay_plan(
     algorithm: str = CANONICAL_PHASE1_HEURISTIC,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     long_cut_hard_mask: bool = True,
+    score_mode: str = "steel_first",
+    rule_profile: str = LEGACY_NP_RULE_PROFILE,
 ) -> Dict:
     """Assign block sets to cutting Bays using a deterministic LPT heuristic.
 
@@ -81,6 +98,8 @@ def build_phase1_bay_plan(
 
     normalized_algorithm = _normalize_algorithm(algorithm)
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
+    normalized_rule_profile = _normalize_rule_profile(rule_profile)
+    _validate_score_profile_contract(score_mode, normalized_rule_profile, long_cut_hard_mask)
     capacity_weights = _normalize_bay_capacity_weights(normalized_bay_ids, bay_capacity_weights)
     blocks = _collect_blocks(
         jobs=jobs,
@@ -93,33 +112,37 @@ def build_phase1_bay_plan(
             LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
         },
         long_cut_hard_mask=long_cut_hard_mask,
+        rule_profile=normalized_rule_profile,
     )
+    if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
+        _validate_multi_series_plan_scope(blocks, normalized_bay_ids, capacity_weights)
     if normalized_algorithm == MULTI_OBJECTIVE_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_multi_objective(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
             bay_capacity_weights=capacity_weights,
-            score_mode="steel_first",
+            score_mode=score_mode,
         )
     elif normalized_algorithm == PRIORITY_SWEEP_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_multi_objective(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
             bay_capacity_weights=capacity_weights,
-            score_mode="steel_first",
+            score_mode=score_mode,
         )
     elif normalized_algorithm == LONG_CUT_PREFERRED_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_multi_objective(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
             bay_capacity_weights=capacity_weights,
-            score_mode="steel_first",
+            score_mode=score_mode,
         )
     elif normalized_algorithm == PRIORITY_GREEDY_PHASE1_HEURISTIC:
         assignments, bay_loads = _assign_blocks_priority_greedy(
             blocks=blocks,
             bay_ids=normalized_bay_ids,
             bay_capacity_weights=capacity_weights,
+            score_mode=score_mode,
         )
     else:
         assignments, bay_loads = _assign_blocks_lpt(
@@ -133,6 +156,7 @@ def build_phase1_bay_plan(
         job_count=len(jobs),
         block_count=len(blocks),
         algorithm=normalized_algorithm,
+        score_mode=score_mode,
     )
     return {
         "phase": "phase1_block_to_bay",
@@ -140,6 +164,8 @@ def build_phase1_bay_plan(
         "summary": summary,
         "bay_capacity_weights": capacity_weights,
         "long_cut_hard_mask": bool(long_cut_hard_mask),
+        "score_mode": score_mode,
+        "rule_profile": normalized_rule_profile,
         "bay_loads": bay_loads,
         "assignments": assignments,
     }
@@ -254,12 +280,18 @@ def write_phase1_bay_plan(plan: Mapping, output_dir: str | Path) -> Dict[str, st
         "block_set_id",
         "project_no",
         "block_no",
+        "family",
+        "balancing_group",
         "assigned_bay",
         "wo_count",
         "steel_quantity_sum",
         "cut_length_sum",
         "bevel_quantity_sum",
         "long_cut_over_1000",
+        "width_max",
+        "wide_plate_over_4500",
+        "cnt_block",
+        "bay_mask_reason_codes",
         "candidate_bays",
         "job_ids",
         "bay_steel_quantity_before",
@@ -323,6 +355,79 @@ def _normalize_algorithm(algorithm: str) -> str:
     if algorithm in {"heuristic", "lpt_steel_quantity"}:
         return CANONICAL_PHASE1_HEURISTIC
     return algorithm
+
+
+def _normalize_rule_profile(rule_profile: object) -> str:
+    """Phase 1 rule profile을 명시적으로 검증한다."""
+
+    normalized = str(rule_profile).strip()
+    if normalized not in {LEGACY_NP_RULE_PROFILE, MULTI_SERIES_RULE_PROFILE}:
+        print(
+            "[ERROR][phase1_bay_balancer._normalize_rule_profile] "
+            f"cause=unknown_rule_profile rule_profile={rule_profile}"
+        )
+        raise RuntimeError(f"unknown Phase 1 rule profile: {rule_profile}")
+    return normalized
+
+
+def _validate_score_profile_contract(
+    score_mode: str,
+    rule_profile: str,
+    long_cut_hard_mask: bool,
+) -> None:
+    """신규 profile이 구 규칙으로 조용히 실행되는 것을 막는다."""
+
+    supported_scores = {"steel_first", "wo_first"}
+    if score_mode not in supported_scores:
+        print(
+            "[ERROR][phase1_bay_balancer._validate_score_profile_contract] "
+            f"cause=unknown_score_mode score_mode={score_mode}"
+        )
+        raise RuntimeError(f"unknown Phase 1 score mode: {score_mode}")
+    if rule_profile == MULTI_SERIES_RULE_PROFILE and score_mode != "wo_first":
+        print(
+            "[ERROR][phase1_bay_balancer._validate_score_profile_contract] "
+            f"cause=multi_series_requires_wo_first score_mode={score_mode}"
+        )
+        raise RuntimeError("multi-series Phase 1 requires score_mode=wo_first")
+    if rule_profile == MULTI_SERIES_RULE_PROFILE and not long_cut_hard_mask:
+        print(
+            "[ERROR][phase1_bay_balancer._validate_score_profile_contract] "
+            "cause=multi_series_requires_confirmed_np_cut_mask"
+        )
+        raise RuntimeError("multi-series Phase 1 cannot disable confirmed NP CUT_LTH hard mask")
+
+
+def _validate_multi_series_plan_scope(
+    blocks: Sequence[Phase1Block],
+    bay_ids: Tuple[str, ...],
+    capacity_weights: Mapping[str, float],
+) -> None:
+    """한 plan이 하나의 평준화 그룹과 정확한 capacity 계약만 포함하게 한다."""
+
+    groups = {block.balancing_group for block in blocks}
+    if len(groups) != 1:
+        print(
+            "[ERROR][phase1_bay_balancer._validate_multi_series_plan_scope] "
+            f"cause=mixed_balancing_groups groups={sorted(groups)}"
+        )
+        raise RuntimeError(f"multi-series Phase 1 plan must contain one balancing group: {sorted(groups)}")
+    group = next(iter(groups))
+    expected = bay_capacity_weights_for_group(group)
+    if set(bay_ids) != set(expected):
+        print(
+            "[ERROR][phase1_bay_balancer._validate_multi_series_plan_scope] "
+            f"cause=bay_scope_mismatch group={group} expected={sorted(expected)} actual={list(bay_ids)}"
+        )
+        raise RuntimeError(f"Phase 1 Bay scope mismatch for group={group}")
+    for bay_id, expected_weight in expected.items():
+        if not math.isclose(float(capacity_weights[bay_id]), expected_weight, rel_tol=0.0, abs_tol=1e-9):
+            print(
+                "[ERROR][phase1_bay_balancer._validate_multi_series_plan_scope] "
+                f"cause=capacity_weight_mismatch group={group} bay_id={bay_id} "
+                f"expected={expected_weight} actual={capacity_weights[bay_id]}"
+            )
+            raise RuntimeError(f"Phase 1 capacity weight mismatch: group={group} bay={bay_id}")
 
 
 def _phase1_assignment_map(plan: Mapping) -> Dict[str, str]:
@@ -421,6 +526,7 @@ def _collect_blocks(
     bay_ids: Tuple[str, ...],
     require_multi_objective: bool,
     long_cut_hard_mask: bool = True,
+    rule_profile: str = LEGACY_NP_RULE_PROFILE,
 ) -> List[Phase1Block]:
     """Group W/O jobs by block set and validate Phase 1 required fields."""
 
@@ -428,6 +534,7 @@ def _collect_blocks(
         print("[ERROR][phase1_bay_balancer._collect_blocks] cause=no_jobs")
         raise RuntimeError("Phase 1 requires at least one job")
 
+    normalized_rule_profile = _normalize_rule_profile(rule_profile)
     grouped: Dict[str, List[object]] = {}
     for job_key, job in jobs.items():
         block_set_id = _require_text(_job_attr(job, "block_set_id"), "block_set_id", str(job_key))
@@ -441,13 +548,24 @@ def _collect_blocks(
         bevel_quantity_sum = 0
         length_values: List[float] = []
         thickness_values: List[float] = []
+        width_values: List[float] = []
+        family_values: set[str] = set()
         for job in block_jobs:
             job_id = _require_text(_job_attr(job, "job_id"), "job_id", block_set_id)
-            steel_quantity_sum += _require_positive_int(
-                _job_attr(job, "steel_quantity"),
-                "steel_quantity",
-                job_id,
-            )
+            if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
+                steel_quantity_sum += _require_non_negative_int(
+                    _job_attr(job, "steel_quantity"), "steel_quantity", job_id
+                )
+                family_values.add(_require_text(_job_attr(job, "family"), "family", job_id).upper())
+                width_values.append(
+                    _require_non_negative_float(_job_attr(job, "plate_width"), "plate_width", job_id)
+                )
+            else:
+                steel_quantity_sum += _require_positive_int(
+                    _job_attr(job, "steel_quantity"),
+                    "steel_quantity",
+                    job_id,
+                )
             cut_length_value = _job_attr(job, "cut_length")
             if require_multi_objective or cut_length_value not in (None, ""):
                 cut_length_sum += _require_non_negative_float(
@@ -468,15 +586,58 @@ def _collect_blocks(
             thickness_value = _job_attr(job, "thickness")
             if thickness_value not in (None, ""):
                 thickness_values.append(_require_non_negative_float(thickness_value, "thickness", job_id))
-        long_cut_over_1000 = 1 if cut_length_sum > 1000 else 0
-        allowed_bay_ids = _allowed_bays_for_block(block_jobs, bay_ids, block_set_id)
-        if long_cut_hard_mask:
+
+        project_no, block_no = _project_block_labels(block_set_id, block_jobs)
+        family = ""
+        balancing_group = ""
+        width_max = None if not width_values else max(width_values)
+        wide_plate_over_4500 = 0
+        cnt_block = 0
+        bay_mask_reason_codes: Tuple[str, ...] = ()
+        long_cut_over_1000 = 1 if (
+            cut_length_sum >= 1000
+            if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE
+            else cut_length_sum > 1000
+        ) else 0
+        allowed_bay_ids = _allowed_bays_for_block(
+            block_jobs,
+            bay_ids,
+            block_set_id,
+            use_cut_bay_restriction=normalized_rule_profile == LEGACY_NP_RULE_PROFILE,
+        )
+        if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
+            if len(family_values) != 1:
+                print(
+                    "[ERROR][phase1_bay_balancer._collect_blocks] "
+                    f"cause=mixed_family_in_block block_set_id={block_set_id} families={sorted(family_values)}"
+                )
+                raise RuntimeError(f"mixed family in Phase 1 block: {block_set_id}")
+            family = next(iter(family_values))
+            id_parts = block_set_id.split("::")
+            if len(id_parts) != 3 or id_parts[1].upper() != family:
+                print(
+                    "[ERROR][phase1_bay_balancer._collect_blocks] "
+                    f"cause=block_key_family_mismatch block_set_id={block_set_id} family={family}"
+                )
+                raise RuntimeError(f"block key/family mismatch: {block_set_id}")
+            mask = apply_phase1_series_bay_mask(
+                series=family,
+                block_no=block_no,
+                width_max=width_max,
+                cut_length_sum=cut_length_sum,
+                requested_bays=allowed_bay_ids,
+            )
+            balancing_group = mask.balancing_group
+            allowed_bay_ids = mask.allowed_bay_ids
+            bay_mask_reason_codes = mask.reason_codes
+            wide_plate_over_4500 = int(family == "NP" and float(width_max) > 4500.0)
+            cnt_block = int(family == "NP" and block_no.upper().startswith("CNT_BLK"))
+        elif long_cut_hard_mask:
             allowed_bay_ids = _apply_long_cut_hard_mask(
                 allowed_bay_ids=allowed_bay_ids,
                 long_cut_over_1000=long_cut_over_1000,
                 block_set_id=block_set_id,
             )
-        project_no, block_no = _project_block_labels(block_set_id, block_jobs)
         blocks.append(
             Phase1Block(
                 block_set_id=block_set_id,
@@ -491,6 +652,12 @@ def _collect_blocks(
                 allowed_bay_ids=allowed_bay_ids,
                 length_avg=None if not length_values else sum(length_values) / len(length_values),
                 thickness_avg=None if not thickness_values else sum(thickness_values) / len(thickness_values),
+                family=family,
+                balancing_group=balancing_group,
+                width_max=width_max,
+                wide_plate_over_4500=wide_plate_over_4500,
+                cnt_block=cnt_block,
+                bay_mask_reason_codes=bay_mask_reason_codes,
             )
         )
 
@@ -523,12 +690,18 @@ def _assign_blocks_lpt(
                 "block_set_id": block.block_set_id,
                 "project_no": block.project_no,
                 "block_no": block.block_no,
+                "family": block.family,
+                "balancing_group": block.balancing_group,
                 "assigned_bay": best_bay,
                 "wo_count": block.wo_count,
                 "steel_quantity_sum": block.steel_quantity_sum,
                 "cut_length_sum": round(block.cut_length_sum, 6),
                 "bevel_quantity_sum": block.bevel_quantity_sum,
                 "long_cut_over_1000": block.long_cut_over_1000,
+                "width_max": block.width_max,
+                "wide_plate_over_4500": block.wide_plate_over_4500,
+                "cnt_block": block.cnt_block,
+                "bay_mask_reason_codes": "|".join(block.bay_mask_reason_codes),
                 "candidate_bays": "|".join(block.allowed_bay_ids),
                 "job_ids": "|".join(block.job_ids),
                 "bay_steel_quantity_before": load_before,
@@ -558,12 +731,18 @@ def _assignment_rows_from_mapping(
                 "block_set_id": block.block_set_id,
                 "project_no": block.project_no,
                 "block_no": block.block_no,
+                "family": block.family,
+                "balancing_group": block.balancing_group,
                 "assigned_bay": best_bay,
                 "wo_count": block.wo_count,
                 "steel_quantity_sum": block.steel_quantity_sum,
                 "cut_length_sum": round(block.cut_length_sum, 6),
                 "bevel_quantity_sum": block.bevel_quantity_sum,
                 "long_cut_over_1000": block.long_cut_over_1000,
+                "width_max": block.width_max,
+                "wide_plate_over_4500": block.wide_plate_over_4500,
+                "cnt_block": block.cnt_block,
+                "bay_mask_reason_codes": "|".join(block.bay_mask_reason_codes),
                 "candidate_bays": "|".join(block.allowed_bay_ids),
                 "job_ids": "|".join(block.job_ids),
                 "bay_steel_quantity_before": load_before,
@@ -578,26 +757,40 @@ def _assign_blocks_priority_greedy(
     blocks: Iterable[Phase1Block],
     bay_ids: Tuple[str, ...],
     bay_capacity_weights: Mapping[str, int | float] | None = None,
+    score_mode: str = "steel_first",
 ) -> Tuple[List[Dict], Dict[str, Dict]]:
     """Assign each block immediately using the presentation-friendly rule."""
 
     bay_loads = _empty_phase1_bay_loads(bay_ids, bay_capacity_weights)
     assignments: List[Dict] = []
-    sorted_blocks = sorted(
-        blocks,
-        key=lambda block: (
-            -block.long_cut_over_1000,
-            -block.steel_quantity_sum,
-            -block.cut_length_sum,
-            -block.bevel_quantity_sum,
-            block.block_set_id,
-        ),
-    )
+    if score_mode == "wo_first":
+        sorted_blocks = sorted(
+            blocks,
+            key=lambda block: (
+                -block.wo_count,
+                -block.cut_length_sum,
+                -block.bevel_quantity_sum,
+                block.block_set_id,
+            ),
+        )
+    else:
+        sorted_blocks = sorted(
+            blocks,
+            key=lambda block: (
+                -block.long_cut_over_1000,
+                -block.steel_quantity_sum,
+                -block.cut_length_sum,
+                -block.bevel_quantity_sum,
+                block.block_set_id,
+            ),
+        )
 
     for block in sorted_blocks:
         best_bay = min(
             block.allowed_bay_ids,
-            key=lambda bay_id: _priority_greedy_projected_score(bay_loads, bay_id, block),
+            key=lambda bay_id: _priority_greedy_projected_score(
+                bay_loads, bay_id, block, score_mode=score_mode
+            ),
         )
         load_before = int(bay_loads[best_bay]["steel_quantity_sum"])
         _add_block_load(bay_loads[best_bay], best_bay, block)
@@ -606,12 +799,18 @@ def _assign_blocks_priority_greedy(
                 "block_set_id": block.block_set_id,
                 "project_no": block.project_no,
                 "block_no": block.block_no,
+                "family": block.family,
+                "balancing_group": block.balancing_group,
                 "assigned_bay": best_bay,
                 "wo_count": block.wo_count,
                 "steel_quantity_sum": block.steel_quantity_sum,
                 "cut_length_sum": round(block.cut_length_sum, 6),
                 "bevel_quantity_sum": block.bevel_quantity_sum,
                 "long_cut_over_1000": block.long_cut_over_1000,
+                "width_max": block.width_max,
+                "wide_plate_over_4500": block.wide_plate_over_4500,
+                "cnt_block": block.cnt_block,
+                "bay_mask_reason_codes": "|".join(block.bay_mask_reason_codes),
                 "candidate_bays": "|".join(block.allowed_bay_ids),
                 "job_ids": "|".join(block.job_ids),
                 "bay_steel_quantity_before": load_before,
@@ -722,24 +921,27 @@ def _multi_objective_load_score(
 ) -> Tuple:
     """Score current Bay loads with the confirmed Phase 1 objective order.
 
-    The tuple contract is intentionally fixed as `(steel_gap, cut_gap,
-    bevel_gap)`. Each load is divided by that Bay's `capacity_weight`, so Bay
-    22 with four machines can receive more raw workload than Bay 23 with three
-    machines while still being balanced. Long-cut Bay24 avoidance is enforced
-    earlier by candidate hard masking and is not a score term.
+    `steel_first`는 기존 NP 회귀용 `(STL_QTY, CUT_LTH, BV_QTY)`이고,
+    `wo_first`는 신규 확정 계약 `(W/O 수, CUT_LTH, BV_QTY)`이다. 모든
+    값은 Bay 설비 수인 `capacity_weight`로 나눈 뒤 max-min gap을 구한다.
     """
 
     steel_values = [_capacity_normalized_value(row, "steel_quantity_sum") for row in bay_loads.values()]
+    wo_values = [_capacity_normalized_value(row, "wo_count") for row in bay_loads.values()]
     cut_values = [_capacity_normalized_value(row, "cut_length_sum") for row in bay_loads.values()]
     bevel_values = [_capacity_normalized_value(row, "bevel_quantity_sum") for row in bay_loads.values()]
-    if score_mode != "steel_first":
+    if score_mode == "steel_first":
+        primary_values = steel_values
+    elif score_mode == "wo_first":
+        primary_values = wo_values
+    else:
         print(
             "[ERROR][phase1_bay_balancer._multi_objective_load_score] "
             f"cause=unknown_score_mode score_mode={score_mode}"
         )
         raise RuntimeError(f"unknown_score_mode: {score_mode}")
     return (
-        _round_score(_gap(steel_values)),
+        _round_score(_gap(primary_values)),
         _round_score(_gap(cut_values)),
         _round_score(_gap(bevel_values)),
     )
@@ -802,7 +1004,7 @@ def _assign_blocks_multi_objective(
     capacity_weights = _normalize_bay_capacity_weights(bay_ids, bay_capacity_weights)
     best_assignment: Dict[str, str] | None = None
     best_score: Tuple | None = None
-    for ordered_blocks in _multi_objective_block_orders(block_list):
+    for ordered_blocks in _multi_objective_block_orders(block_list, score_mode=score_mode):
         assignment = _beam_search_multi_objective_assignment(
             ordered_blocks,
             bay_ids,
@@ -839,18 +1041,31 @@ def _assign_blocks_multi_objective(
     )
 
 
-def _multi_objective_block_orders(blocks: Sequence[Phase1Block]) -> List[Tuple[Phase1Block, ...]]:
+def _multi_objective_block_orders(
+    blocks: Sequence[Phase1Block],
+    score_mode: str = "steel_first",
+) -> List[Tuple[Phase1Block, ...]]:
     """Return deterministic block orders for multi-start search."""
 
     if not blocks:
         return []
-    max_steel = max(block.steel_quantity_sum for block in blocks) or 1
+    if score_mode == "steel_first":
+        primary_value = lambda block: block.steel_quantity_sum
+    elif score_mode == "wo_first":
+        primary_value = lambda block: block.wo_count
+    else:
+        print(
+            "[ERROR][phase1_bay_balancer._multi_objective_block_orders] "
+            f"cause=unknown_score_mode score_mode={score_mode}"
+        )
+        raise RuntimeError(f"unknown_score_mode: {score_mode}")
+    max_primary = max(primary_value(block) for block in blocks) or 1
     max_cut = max(block.cut_length_sum for block in blocks) or 1.0
     max_bevel = max(block.bevel_quantity_sum for block in blocks) or 1
 
     def combined_load(block: Phase1Block) -> float:
         return (
-            block.steel_quantity_sum / max_steel
+            primary_value(block) / max_primary
             + block.cut_length_sum / max_cut
             + block.bevel_quantity_sum / max_bevel
             + block.long_cut_over_1000
@@ -858,7 +1073,7 @@ def _multi_objective_block_orders(blocks: Sequence[Phase1Block]) -> List[Tuple[P
 
     order_specs = [
         lambda block: (
-            -block.steel_quantity_sum,
+            -primary_value(block),
             -block.cut_length_sum,
             -block.bevel_quantity_sum,
             -block.long_cut_over_1000,
@@ -866,14 +1081,14 @@ def _multi_objective_block_orders(blocks: Sequence[Phase1Block]) -> List[Tuple[P
         ),
         lambda block: (
             -block.cut_length_sum,
-            -block.steel_quantity_sum,
+            -primary_value(block),
             -block.bevel_quantity_sum,
             -block.long_cut_over_1000,
             block.block_set_id,
         ),
         lambda block: (
             -block.bevel_quantity_sum,
-            -block.steel_quantity_sum,
+            -primary_value(block),
             -block.cut_length_sum,
             -block.long_cut_over_1000,
             block.block_set_id,
@@ -881,13 +1096,13 @@ def _multi_objective_block_orders(blocks: Sequence[Phase1Block]) -> List[Tuple[P
         lambda block: (
             -block.long_cut_over_1000,
             -block.cut_length_sum,
-            -block.steel_quantity_sum,
+            -primary_value(block),
             -block.bevel_quantity_sum,
             block.block_set_id,
         ),
         lambda block: (
             -combined_load(block),
-            -block.steel_quantity_sum,
+            -primary_value(block),
             -block.cut_length_sum,
             -block.bevel_quantity_sum,
             block.block_set_id,
@@ -989,20 +1204,13 @@ def _priority_greedy_projected_score(
     bay_loads: Mapping[str, Mapping[str, int | float]],
     bay_id: str,
     block: Phase1Block,
+    score_mode: str = "steel_first",
 ) -> Tuple:
     """Score one immediate greedy insertion candidate."""
 
     projected = {current_bay_id: dict(loads) for current_bay_id, loads in bay_loads.items()}
     _add_block_load(projected[bay_id], bay_id, block)
-    steel_values = [_capacity_normalized_value(row, "steel_quantity_sum") for row in projected.values()]
-    cut_values = [_capacity_normalized_value(row, "cut_length_sum") for row in projected.values()]
-    bevel_values = [_capacity_normalized_value(row, "bevel_quantity_sum") for row in projected.values()]
-    return (
-        _round_score(_gap(steel_values)),
-        _round_score(_gap(cut_values)),
-        _round_score(_gap(bevel_values)),
-        bay_id,
-    )
+    return _multi_objective_load_score(projected, score_mode=score_mode) + (bay_id,)
 
 
 def _build_summary(
@@ -1011,6 +1219,7 @@ def _build_summary(
     job_count: int,
     block_count: int,
     algorithm: str,
+    score_mode: str = "steel_first",
 ) -> Dict:
     """Build top-level numeric summary for CLI/report output."""
 
@@ -1019,34 +1228,23 @@ def _build_summary(
     bevel_values = [int(row.get("bevel_quantity_sum", 0)) for row in bay_loads.values()]
     wo_values = [int(row["wo_count"]) for row in bay_loads.values()]
     block_values = [int(row["block_count"]) for row in bay_loads.values()]
+    confirmed_priority = [
+        "wo_count_per_capacity" if score_mode == "wo_first" else "steel_quantity_sum_per_capacity",
+        "cut_length_sum_per_capacity",
+        "bevel_quantity_sum_per_capacity",
+    ]
     if algorithm == MULTI_OBJECTIVE_PHASE1_HEURISTIC:
         load_metric = "multi_objective_lexicographic"
-        objective_priority = [
-            "steel_quantity_sum_per_capacity",
-            "cut_length_sum_per_capacity",
-            "bevel_quantity_sum_per_capacity",
-        ]
+        objective_priority = confirmed_priority
     elif algorithm == PRIORITY_SWEEP_PHASE1_HEURISTIC:
         load_metric = "multi_objective_lexicographic"
-        objective_priority = [
-            "steel_quantity_sum_per_capacity",
-            "cut_length_sum_per_capacity",
-            "bevel_quantity_sum_per_capacity",
-        ]
+        objective_priority = confirmed_priority
     elif algorithm == LONG_CUT_PREFERRED_PHASE1_HEURISTIC:
         load_metric = "multi_objective_lexicographic"
-        objective_priority = [
-            "steel_quantity_sum_per_capacity",
-            "cut_length_sum_per_capacity",
-            "bevel_quantity_sum_per_capacity",
-        ]
+        objective_priority = confirmed_priority
     elif algorithm == PRIORITY_GREEDY_PHASE1_HEURISTIC:
         load_metric = "priority_greedy_lexicographic"
-        objective_priority = [
-            "steel_quantity_sum_per_capacity",
-            "cut_length_sum_per_capacity",
-            "bevel_quantity_sum_per_capacity",
-        ]
+        objective_priority = confirmed_priority
     else:
         load_metric = "steel_quantity_sum"
         objective_priority = ["steel_quantity_sum"]
@@ -1062,7 +1260,8 @@ def _build_summary(
         ]
         if algorithm == PRIORITY_GREEDY_PHASE1_HEURISTIC
         else [],
-        "secondary_load_metric": "wo_count",
+        "score_mode": score_mode,
+        "secondary_load_metric": "steel_quantity_sum" if score_mode == "wo_first" else "wo_count",
         "job_count": int(job_count),
         "block_count": int(block_count),
         "assigned_block_count": int(len(assignments)),
@@ -1073,7 +1272,7 @@ def _build_summary(
         "cut_length_gap": round(max(cut_values) - min(cut_values), 6) if cut_values else 0.0,
         "bevel_quantity_total": int(sum(bevel_values)),
         "bevel_quantity_gap": int(max(bevel_values) - min(bevel_values)) if bevel_values else 0,
-        "capacity_normalized_score": list(_multi_objective_load_score(bay_loads)),
+        "capacity_normalized_score": list(_multi_objective_load_score(bay_loads, score_mode=score_mode)),
         "long_cut_bay24_count": int(
             sum(int(row.get("long_cut_bay24_count", 0)) for row in bay_loads.values())
         ),
@@ -1087,14 +1286,21 @@ def _allowed_bays_for_block(
     block_jobs: Sequence[object],
     bay_ids: Tuple[str, ...],
     block_set_id: str,
+    *,
+    use_cut_bay_restriction: bool = True,
 ) -> Tuple[str, ...]:
-    """Intersect per-job Bay restrictions for one block."""
+    """W/O별 명시적 planning whitelist의 교집합을 반환한다.
+
+    `cut_bay`는 기존 NP 경로에서만 고정 Bay로 해석한다. 신규 다계열
+    planning에서는 실적 `CUT_BAY`가 계열 eligibility를 오염시키지 않도록
+    `allowed_bay_ids`만 사용한다.
+    """
 
     allowed = set(bay_ids)
     saw_restriction = False
     for job in block_jobs:
         cut_bay = _job_attr(job, "cut_bay")
-        if cut_bay not in (None, ""):
+        if use_cut_bay_restriction and cut_bay not in (None, ""):
             saw_restriction = True
             allowed &= {str(cut_bay)}
         job_allowed = tuple(str(bay_id) for bay_id in (_job_attr(job, "allowed_bay_ids") or ()))
@@ -1140,13 +1346,14 @@ def _apply_long_cut_hard_mask(
 def _project_block_labels(block_set_id: str, block_jobs: Sequence[object]) -> Tuple[str, str]:
     """Return source project/block labels for reports."""
 
+    if "::" in block_set_id:
+        parts = block_set_id.split("::")
+        if len(parts) in {2, 3} and parts[0] and parts[-1]:
+            return parts[0], parts[-1]
     first_job = block_jobs[0]
     extra = _job_attr(first_job, "extra") or {}
     project_no = str(extra.get("source_project_no") or "")
     block_no = str(extra.get("source_block_no") or "")
-    if not project_no or not block_no:
-        if "::" in block_set_id:
-            project_no, block_no = block_set_id.split("::", 1)
     return project_no, block_no
 
 

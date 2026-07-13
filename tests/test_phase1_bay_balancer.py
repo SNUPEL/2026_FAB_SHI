@@ -22,13 +22,46 @@ from Utils.phase1.phase1_bay_balancer import (
     _improve_multi_objective_assignment,
     _collect_blocks,
     _multi_objective_assignment_score,
+    _multi_objective_block_orders,
+    _multi_objective_load_score,
     _priority_sweep_load_score,
 )
+from Utils.phase1.multi_series_rules import MULTI_SERIES_RULE_PROFILE
 from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
 
 
 class Phase1BayBalancerTest(unittest.TestCase):
     """Block-level Bay assignment must stay independent from machine scheduling."""
+
+    def test_wo_first_search_orders_blocks_by_wo_count_not_steel_quantity(self) -> None:
+        steel_heavy = Phase1Block(
+            block_set_id="P1::NP::STEEL",
+            project_no="P1",
+            block_no="STEEL",
+            job_ids=("WO_S",),
+            wo_count=1,
+            steel_quantity_sum=20,
+            cut_length_sum=100.0,
+            bevel_quantity_sum=1,
+            long_cut_over_1000=0,
+            allowed_bay_ids=("22", "23"),
+        )
+        wo_heavy = Phase1Block(
+            block_set_id="P1::NP::WO",
+            project_no="P1",
+            block_no="WO",
+            job_ids=("WO_1", "WO_2", "WO_3"),
+            wo_count=3,
+            steel_quantity_sum=3,
+            cut_length_sum=90.0,
+            bevel_quantity_sum=1,
+            long_cut_over_1000=0,
+            allowed_bay_ids=("22", "23"),
+        )
+
+        orders = _multi_objective_block_orders([steel_heavy, wo_heavy], score_mode="wo_first")
+
+        self.assertEqual(orders[0][0].block_set_id, wo_heavy.block_set_id)
 
     def test_assigns_each_block_to_one_bay_using_steel_quantity_load(self) -> None:
         """The heaviest block should be placed first and steel quantity should drive loads."""
@@ -142,6 +175,73 @@ class Phase1BayBalancerTest(unittest.TestCase):
                 bay_ids=["22", "23", "24"],
                 algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
             )
+
+    def test_multi_series_profile_applies_np_masks_and_ignores_actual_cut_bay(self) -> None:
+        jobs = {
+            "WO_A": self._job(
+                "WO_A",
+                "P1::NP::CNT_BLK_1",
+                0,
+                cut_length=1000,
+                bevel_quantity=1,
+                family="NP",
+                plate_width=4600,
+                cut_bay="24",
+            ),
+        }
+
+        result = build_phase1_bay_plan(
+            jobs=jobs,
+            bay_ids=["22", "23", "24"],
+            algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+            bay_capacity_weights={"22": 4, "23": 4, "24": 3},
+            score_mode="wo_first",
+            rule_profile=MULTI_SERIES_RULE_PROFILE,
+        )
+
+        row = result["assignments"][0]
+        self.assertIn(row["assigned_bay"], {"22", "23"})
+        self.assertEqual(row["candidate_bays"], "22|23")
+        self.assertEqual(row["family"], "NP")
+        self.assertEqual(row["balancing_group"], "NP")
+        self.assertEqual(row["wide_plate_over_4500"], 1)
+        self.assertEqual(row["cnt_block"], 1)
+        self.assertEqual(result["score_mode"], "wo_first")
+
+    def test_multi_series_profile_rejects_mixed_family_inside_one_block_key(self) -> None:
+        jobs = {
+            "WO_A": self._job(
+                "WO_A", "P1::NP::B1", 1, family="NP", plate_width=3000
+            ),
+            "WO_B": self._job(
+                "WO_B", "P1::NP::B1", 1, family="FL", plate_width=3000
+            ),
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "mixed family"):
+            build_phase1_bay_plan(
+                jobs=jobs,
+                bay_ids=["22", "23", "24", "25", "trans"],
+                algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+                bay_capacity_weights={"22": 4, "23": 4, "24": 3, "25": 2, "trans": 2},
+                score_mode="wo_first",
+                rule_profile=MULTI_SERIES_RULE_PROFILE,
+            )
+
+    def test_wo_first_score_uses_capacity_normalized_wo_cut_bevel_order(self) -> None:
+        loads = {
+            "22": self._load(steel=1, cut_length=400, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
+            "23": self._load(steel=99, cut_length=400, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
+            "24": self._load(steel=5, cut_length=300, bevel_quantity=6, long_cut_bay24_count=0, capacity_weight=3),
+        }
+        loads["22"]["wo_count"] = 40
+        loads["23"]["wo_count"] = 40
+        loads["24"]["wo_count"] = 30
+
+        self.assertEqual(
+            _multi_objective_load_score(loads, score_mode="wo_first"),
+            (0.0, 0.0, 0.0),
+        )
 
     def test_steel_lpt_greedy_insertion_is_canonical_heuristic_name(self) -> None:
         """The visible heuristic name should describe sorting and insertion behavior."""
@@ -488,6 +588,9 @@ class Phase1BayBalancerTest(unittest.TestCase):
         allowed_bay_ids: tuple[str, ...] = (),
         cut_length: float | None = 100.0,
         bevel_quantity: int | None = 0,
+        family: str = "NP",
+        plate_width: float | None = None,
+        cut_bay: str | None = None,
     ) -> SimpleNamespace:
         """Create the smallest Job-like object needed by Phase 1 logic."""
 
@@ -495,9 +598,11 @@ class Phase1BayBalancerTest(unittest.TestCase):
             job_id=job_id,
             block_set_id=block_set_id,
             steel_quantity=steel_quantity,
+            family=family,
             cut_length=cut_length,
             bevel_quantity=bevel_quantity,
-            cut_bay=None,
+            plate_width=plate_width,
+            cut_bay=cut_bay,
             source_cut_bay=None,
             allowed_bay_ids=allowed_bay_ids,
             extra={

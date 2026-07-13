@@ -58,7 +58,7 @@ def check_machine_bay_consistency(context: ConstraintContext) -> ConstraintResul
 def check_block_set_same_bay(context: ConstraintContext) -> ConstraintResult:
     """동일 block_set_id는 이미 배정된 Bay와 같은 Bay에만 배정한다.
 
-    현재 block_set_id는 보통 `project_no::block_no` 형태다.
+    현재 block_set_id는 `project_no::series::block_no` 형태다.
     이미 같은 block_set_id가 Bay 22에 배정되었다면, 이후 같은 block은 Bay 23 후보가 hard fail된다.
     """
 

@@ -42,9 +42,15 @@ class ReportFormulaDataGeneratorTest(unittest.TestCase):
             seed=99,
         )[0]
         machines = {
-            "PLS21": SimpleNamespace(machine_id="PLS21", bay_id="22", enabled=True),
-            "PLS31": SimpleNamespace(machine_id="PLS31", bay_id="23", enabled=True),
-            "PLS41": SimpleNamespace(machine_id="PLS41", bay_id="24", enabled=True),
+            "PLS21": SimpleNamespace(
+                machine_id="PLS21", bay_id="22", enabled=True, eligible_families=("NP",)
+            ),
+            "PLS31": SimpleNamespace(
+                machine_id="PLS31", bay_id="23", enabled=True, eligible_families=("NP",)
+            ),
+            "PLS41": SimpleNamespace(
+                machine_id="PLS41", bay_id="24", enabled=True, eligible_families=("NP",)
+            ),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:

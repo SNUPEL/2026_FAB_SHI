@@ -63,6 +63,11 @@ from Phase1.self_labeling import (
 from Utils.config import load_config
 # LINE-BY-LINE: `Utils.data.cutting_data_loader` 모듈에서 `load_and_clean_cutting_data, write_records_csv`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.data.cutting_data_loader import load_and_clean_cutting_data, write_records_csv
+from Utils.data.cutting_start_date import (
+    audit_cutting_start_dates,
+    write_cutting_start_date_audit,
+)
+from Utils.data.multi_series_cutting_data import load_multi_series_cutting_data
 # LINE-BY-LINE: `Utils.data.cutting_scenario_builder` 모듈에서 `build_scenario_from_cutting_records`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
 # LINE-BY-LINE: `Utils.data.factory_builder` 모듈에서 `build_factory_scenario_parts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
@@ -96,6 +101,10 @@ from Utils.phase1.phase1_bay_balancer import (
     apply_phase1_plan_to_scenario,
     build_phase1_bay_plan,
     write_phase1_bay_plan,
+)
+from Utils.phase1.multi_series_planner import (
+    build_multi_series_phase1_daily_plans,
+    write_multi_series_phase1_daily_plans,
 )
 from Utils.learning.phase1_phase2_communication import (
     apply_phase1_messages_to_scenario,
@@ -452,6 +461,32 @@ def command_phase1(args: argparse.Namespace) -> None:
     print(f"- plan_json: {paths['json']}")
     print(f"- assignments_csv: {paths['assignments_csv']}")
     print(f"- bay_loads_csv: {paths['bay_loads_csv']}")
+
+
+def command_phase1_plan_multi_series(args: argparse.Namespace) -> None:
+    """신규 다계열 Excel을 검증하고 날짜 audit와 Phase 1 계획을 저장한다."""
+
+    print("[phase1-plan-multi-series]")
+    print(f"- block_xlsx: {args.block_xlsx}")
+    print(f"- wo_xlsx: {args.wo_xlsx}")
+    print(f"- output_dir: {args.output_dir}")
+    data = load_multi_series_cutting_data(args.block_xlsx, args.wo_xlsx)
+    date_audit = audit_cutting_start_dates(data.blocks.to_dict("records"))
+    audit_paths = write_cutting_start_date_audit(date_audit, args.output_dir)
+    plan = build_multi_series_phase1_daily_plans(data)
+    plan_paths = write_multi_series_phase1_daily_plans(
+        plan,
+        Path(args.output_dir) / "phase1",
+    )
+    print(f"- block_count: {len(data.blocks)}")
+    print(f"- wo_count: {len(data.work_orders)}")
+    print(f"- problem_count: {plan['problem_count']}")
+    print(f"- matched_source_date_count: {int(date_audit['MATCHED_SOURCE_DATE'].sum())}")
+    print(f"- date_audit_csv: {audit_paths['csv']}")
+    print(f"- date_audit_summary_json: {audit_paths['summary_json']}")
+    print(f"- plan_json: {plan_paths['json']}")
+    print(f"- assignments_csv: {plan_paths['assignments_csv']}")
+    print(f"- bay_loads_csv: {plan_paths['bay_loads_csv']}")
 
 
 def command_phase1_mdp_trace(args: argparse.Namespace) -> None:
@@ -3059,6 +3094,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for Phase 1 JSON/CSV outputs",
     )
     phase1_parser.set_defaults(func=command_phase1)
+
+    phase1_multi_series_parser = subparsers.add_parser(
+        "phase1-plan-multi-series",
+        help="Validate multi-series Excel data and write daily Phase 1 Bay plans",
+    )
+    phase1_multi_series_parser.add_argument(
+        "--block-xlsx",
+        required=True,
+        help="Multi-series block Excel/CSV path",
+    )
+    phase1_multi_series_parser.add_argument(
+        "--wo-xlsx",
+        required=True,
+        help="Multi-series W/O Excel/CSV path",
+    )
+    phase1_multi_series_parser.add_argument(
+        "--output-dir",
+        default="output/generated/multi_series_260711",
+        help="Directory for date audit and Phase 1 plan outputs",
+    )
+    phase1_multi_series_parser.set_defaults(func=command_phase1_plan_multi_series)
 
     phase1_mdp_trace_parser = subparsers.add_parser(
         "phase1-mdp-trace",

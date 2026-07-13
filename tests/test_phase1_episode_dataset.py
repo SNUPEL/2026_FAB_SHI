@@ -162,6 +162,7 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
                 {
                     "PROJ_NO": "P1",
                     "BLK_NO": "B1",
+                    "GYEL": "NP",
                     "LTH": 10000,
                     "THK": 13,
                     "CUT_LTH": 900.0,
@@ -172,6 +173,7 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
                 {
                     "PROJ_NO": "P2",
                     "BLK_NO": "B2",
+                    "GYEL": "NP",
                     "LTH": 11000,
                     "THK": 16,
                     "CUT_LTH": 1200.0,
@@ -195,7 +197,10 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["validation_source"], "actual_8days")
         self.assertEqual(payload["metadata"]["evaluation_input_type"], "candidate_workbook")
         self.assertEqual(payload["metadata"]["block_count"], 2)
-        self.assertEqual({job.block_set_id for job in payload["jobs"].values()}, {"P1::B1", "P2::B2"})
+        self.assertEqual(
+            {job.block_set_id for job in payload["jobs"].values()},
+            {"P1::NP::B1", "P2::NP::B2"},
+        )
         self.assertEqual({job.source_cut_bay for job in payload["jobs"].values()}, {"22", "24"})
 
     @staticmethod

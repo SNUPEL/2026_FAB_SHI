@@ -70,6 +70,29 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
         self.assertEqual(len(state.open_batch_features), len(PHASE2_OPEN_BATCH_FEATURE_NAMES))
         self.assertEqual(len(state.action_projected_features[0]), len(PHASE2_PROJECTED_FEATURE_NAMES))
         self.assertEqual(state.action_candidate_node_indices, [0, 1])
+        self.assertIn("family_np", PHASE2_WO_NODE_FEATURE_NAMES)
+        self.assertIn("eligible_family_np", PHASE2_MACHINE_NODE_FEATURE_NAMES)
+        self.assertEqual(
+            state.wo_node_features[0][PHASE2_WO_NODE_FEATURE_NAMES.index("family_np")],
+            1.0,
+        )
+        self.assertEqual(
+            state.machine_node_features[0][PHASE2_MACHINE_NODE_FEATURE_NAMES.index("eligible_family_np")],
+            1.0,
+        )
+
+    def test_machine_feasible_ratio_uses_family_eligibility(self) -> None:
+        self.env.jobs["WO_C"].family = "FL"
+
+        state = build_phase2_policy_state(
+            environment=self.env,
+            bay_id="22",
+            stage="SELECT_MACHINE",
+            actions=self._machine_actions(),
+        )
+
+        ratio_index = PHASE2_MACHINE_NODE_FEATURE_NAMES.index("feasible_remaining_wo_ratio")
+        self.assertEqual(state.machine_node_features[0][ratio_index], 2.0 / 3.0)
 
     def test_pointer_scores_are_equivariant_to_machine_and_action_permutation(self) -> None:
         torch.manual_seed(7)
@@ -136,6 +159,22 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
                 bay_id="22",
                 stage="SELECT_MACHINE",
                 actions=self._machine_actions(),
+            )
+
+    def test_state_rejects_missing_projected_action_field(self) -> None:
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
+        self.env.add_wo(batch_id, "WO_A")
+        actions = [self._wo_action("WO_B", duration=30.0, cut=700.0, bevel=4.0, wo_count=2)]
+        del actions[0]["duration_increment"]
+
+        with self.assertRaises(RuntimeError):
+            build_phase2_policy_state(
+                environment=self.env,
+                bay_id="22",
+                stage="SELECT_WO",
+                actions=actions,
+                selected_machine_id="PLS21",
+                open_batch_id=batch_id,
             )
 
     def _machine_actions(self):

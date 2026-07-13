@@ -575,7 +575,8 @@ def _project_block_labels_from_object(block_set_id: str, job: Any) -> tuple[str,
     project_no = _optional_text(extra.get("source_project_no"))
     block_no = _optional_text(extra.get("source_block_no"))
     if (not project_no or not block_no) and "::" in block_set_id:
-        project_no, block_no = block_set_id.split("::", 1)
+        parts = block_set_id.split("::")
+        project_no, block_no = parts[0], parts[-1]
     return project_no or "", block_no or ""
 
 
@@ -863,13 +864,14 @@ def _require_block_jobs(
 
 
 def _project_block_labels(block_set_id: str, block_jobs: Sequence[Mapping[str, Any]]) -> tuple[str, str]:
-    """Return project/block labels from source columns or `project::block` ID."""
+    """Return project/block labels from source columns or the canonical block ID."""
 
     first_job = block_jobs[0]
     project_no = _optional_text(first_job.get("source_project_no"))
     block_no = _optional_text(first_job.get("source_block_no"))
     if (not project_no or not block_no) and "::" in block_set_id:
-        project_no, block_no = block_set_id.split("::", 1)
+        parts = block_set_id.split("::")
+        project_no, block_no = parts[0], parts[-1]
     return project_no or "", block_no or ""
 
 

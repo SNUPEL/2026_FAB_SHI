@@ -11,16 +11,16 @@ PHASE2_METRIC_SCHEMA_VERSION = "phase2_metric_v1"
 PHASE2_RAW_SCORE_FIELD_NAMES = (
     "hard_violation_count",
     "makespan",
-    "bay_internal_wo_count_gap",
     "bay_internal_cut_length_gap",
+    "bay_internal_wo_count_gap",
     "bay_internal_bevel_quantity_gap",
     "bay_internal_occupancy_gap",
 )
 PHASE2_NORMALIZED_SCORE_FIELD_NAMES = (
     "hard_violation_count",
     "makespan",
-    "bay_internal_normalized_wo_count_gap",
     "bay_internal_normalized_cut_length_gap",
+    "bay_internal_normalized_wo_count_gap",
     "bay_internal_normalized_bevel_quantity_gap",
     "bay_internal_normalized_occupancy_gap",
 )
@@ -80,16 +80,16 @@ def calculate_phase2_schedule_metrics(
     raw_score = (
         hard_violation_count,
         makespan,
-        _sum_bay_metric(per_bay, "raw_wo_count_gap"),
         _sum_bay_metric(per_bay, "raw_cut_length_gap"),
+        _sum_bay_metric(per_bay, "raw_wo_count_gap"),
         _sum_bay_metric(per_bay, "raw_bevel_quantity_gap"),
         _sum_bay_metric(per_bay, "raw_occupancy_gap"),
     )
     normalized_score = (
         hard_violation_count,
         makespan,
-        _sum_bay_metric(per_bay, "normalized_wo_count_gap"),
         _sum_bay_metric(per_bay, "normalized_cut_length_gap"),
+        _sum_bay_metric(per_bay, "normalized_wo_count_gap"),
         _sum_bay_metric(per_bay, "normalized_bevel_quantity_gap"),
         _sum_bay_metric(per_bay, "normalized_occupancy_gap"),
     )
@@ -104,12 +104,12 @@ def calculate_phase2_schedule_metrics(
     score_details = {
         "raw_hard_violation_count": raw_score[0],
         "raw_makespan": raw_score[1],
-        "raw_bay_internal_wo_count_gap": raw_score[2],
-        "raw_bay_internal_cut_length_gap": raw_score[3],
+        "raw_bay_internal_cut_length_gap": raw_score[2],
+        "raw_bay_internal_wo_count_gap": raw_score[3],
         "raw_bay_internal_bevel_quantity_gap": raw_score[4],
         "raw_bay_internal_occupancy_gap": raw_score[5],
-        "normalized_bay_internal_wo_count_gap": normalized_score[2],
-        "normalized_bay_internal_cut_length_gap": normalized_score[3],
+        "normalized_bay_internal_cut_length_gap": normalized_score[2],
+        "normalized_bay_internal_wo_count_gap": normalized_score[3],
         "normalized_bay_internal_bevel_quantity_gap": normalized_score[4],
         "normalized_bay_internal_occupancy_gap": normalized_score[5],
     }

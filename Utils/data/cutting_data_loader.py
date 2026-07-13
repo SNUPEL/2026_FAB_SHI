@@ -29,6 +29,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 # LINE-BY-LINE: `openpyxl` 모듈에서 `load_workbook`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from openpyxl import load_workbook
 
+from Utils.data.multi_series_cutting_data import build_block_set_id
+
 
 # LINE-BY-LINE: `COLUMN_ALIASES` 변수에 `{` 결과를 저장합니다. 의미: `COLUMN_ALIASES` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
 COLUMN_ALIASES: Dict[str, Sequence[str]] = {
@@ -39,9 +41,9 @@ COLUMN_ALIASES: Dict[str, Sequence[str]] = {
     # LINE-BY-LINE: 딕셔너리 키 `work_order_no`에는 `("WK_ORD_NO", "W/O 명", "WO 명", "작업오더")` 값을 넣습니다. 의미: 현업 W/O 번호입니다. 예: `WK_ORD_NO`, 사용: report와 원본 데이터 추적.
     "work_order_no": ("WK_ORD_NO", "W/O 명", "WO 명", "작업오더"),
     # LINE-BY-LINE: 딕셔너리 키 `planned_start_date`에는 `("GYEL_ACT_STDT", "계획 착수일")` 값을 넣습니다. 의미: 계획 착수일 원본입니다. 예: `GYEL_ACT_STDT`, 사용: 계획일 기반 검증 후보.
-    "planned_start_date": ("GYEL_ACT_STDT", "계획 착수일"),
+    "planned_start_date": ("ACT_ST_DT", "GYEL_ACT_STDT", "계획 착수일"),
     # LINE-BY-LINE: 딕셔너리 키 `planned_end_date`에는 `("GYEL_ACT_EDDT", "계획 종료일")` 값을 넣습니다. 의미: 계획 종료일 원본입니다. 예: `GYEL_ACT_EDDT`, 사용: 계획일 기반 검증 후보.
-    "planned_end_date": ("GYEL_ACT_EDDT", "계획 종료일"),
+    "planned_end_date": ("ACT_ED_DT", "GYEL_ACT_EDDT", "계획 종료일"),
     # LINE-BY-LINE: 딕셔너리 키 `actual_start_datetime`에는 `("RT_CUT_ST_DTM", "실적 착수시간")` 값을 넣습니다. 의미: 실적 착수시간 원본입니다. 예: `202602260906`, 사용: actual replay 시작 시각.
     "actual_start_datetime": ("RT_CUT_ST_DTM", "실적 착수시간", "실적 착수시간(기계가 움직임)"),
     # LINE-BY-LINE: 딕셔너리 키 `actual_end_datetime`에는 `("RT_CUT_ED_DTM", "실적 종료시간")` 값을 넣습니다. 의미: 실적 종료시간 원본입니다. 예: `202602261015`, 사용: actual replay 종료 시각.
@@ -62,7 +64,7 @@ COLUMN_ALIASES: Dict[str, Sequence[str]] = {
     # LINE-BY-LINE: 딕셔너리 키 `steel_qty`에는 `("STL_QTY", "강재 수량")` 값을 넣습니다. 의미: 원본 강재 수량입니다. 예: `STL_QTY`, 사용: steel_quantity로 변환.
     "steel_qty": ("STL_QTY", "강재 수량"),
     # LINE-BY-LINE: 딕셔너리 키 `source_machine_id`에는 `("RT_EQP_NM", "장비명")` 값을 넣습니다. 의미: 실적 데이터의 원본 RT_EQP_NM입니다. 예: `PLS21`, 사용: actual replay 장비 identity 검증.
-    "source_machine_id": ("RT_EQP_NM", "장비명"),
+    "source_machine_id": ("EQP_NM", "RT_EQP_NM", "장비명"),
     # LINE-BY-LINE: 딕셔너리 키 `source_cut_bay`에는 `("CUT_BAY", "절단 베이")` 값을 넣습니다. 의미: 실적 데이터의 원본 CUT_BAY입니다. 예: `22`, 사용: actual replay 비교 기준.
     "source_cut_bay": ("CUT_BAY", "절단 베이"),
     # LINE-BY-LINE: `현재 dict`에서 반환/저장할 dict의 `tact_time` 키에 `("TACT_TIME", "택트타임")` 값을 넣습니다. 사용: 호출자가 이 key로 값을 읽습니다.
@@ -452,8 +454,10 @@ def clean_cutting_records(
         cleaned["tact_time"] = _to_float(cleaned.get("tact_time"))
         # LINE-BY-LINE: `cleaned["actual_duration_minutes"]`에 `round(actual_duration, 6)` 결과를 저장합니다. 의미/사용: `cleaned["actual_duration_minutes"]` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
         cleaned["actual_duration_minutes"] = round(actual_duration, 6)
-        # LINE-BY-LINE: `cleaned["block_set_id"]`에 `f"{cleaned['project_no']}::{cleaned['block_no']}"` 결과를 저장합니다. 의미/사용: `cleaned["block_set_id"]` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
-        cleaned["block_set_id"] = f"{cleaned['project_no']}::{cleaned['block_no']}"
+        # 다계열 데이터에서는 같은 프로젝트/블록도 계열별로 서로 다른 Bay 의사결정 단위다.
+        cleaned["block_set_id"] = build_block_set_id(
+            cleaned["project_no"], cleaned["series"], cleaned["block_no"]
+        )
         # LINE-BY-LINE: `cleaned["_actual_start_dt"]`에 `actual_start` 결과를 저장합니다. 의미/사용: `cleaned["_actual_start_dt"]` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
         cleaned["_actual_start_dt"] = actual_start
         # LINE-BY-LINE: `cleaned["_actual_end_dt"]`에 `actual_end` 결과를 저장합니다. 의미/사용: `cleaned["_actual_end_dt"]` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.

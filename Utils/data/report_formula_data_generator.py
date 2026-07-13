@@ -23,6 +23,8 @@ from typing import Dict, List, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from Utils.data.multi_series_cutting_data import build_block_set_id
+
 
 WO_COLUMNS = (
     "PROJ_NO",
@@ -223,7 +225,7 @@ def jobs_from_report_formula_wo(wo_df: pd.DataFrame, episode_id: str) -> Dict[st
     jobs: Dict[str, SimpleNamespace] = {}
     for row_index, row in wo_df.reset_index(drop=True).iterrows():
         job_id = f"{episode_id}_{str(row['WK_ORD_NO']).strip()}"
-        block_set_id = f"{str(row['PROJ_NO']).strip()}::{str(row['BLK_NO']).strip()}"
+        block_set_id = build_block_set_id(row["PROJ_NO"], row["GYEL"], row["BLK_NO"])
         tact_time = _positive_float(row["TACT_TIME"], "TACT_TIME", job_id)
         jobs[job_id] = SimpleNamespace(
             job_id=job_id,
@@ -328,9 +330,9 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
                 )
                 raise RuntimeError(f"negative {column} in {frame_name}")
 
-    grouped = wo_df.groupby(["PROJ_NO", "BLK_NO"], sort=True)
+    grouped = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)
     for _, block in block_df.iterrows():
-        key = (block["PROJ_NO"], block["BLK_NO"])
+        key = (block["PROJ_NO"], block["GYEL"], block["BLK_NO"])
         if key not in grouped.groups:
             print(f"[ERROR][report_formula_data_generator.validate_report_formula_data] cause=missing_block_wos key={key}")
             raise RuntimeError(f"missing generated W/O rows for block {key}")

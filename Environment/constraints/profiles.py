@@ -35,7 +35,7 @@ PHASE2_DEFAULT_HARD_ENABLED = {
     "machine_single_processing": True,
     "batch_wo_count_limit": True,
     "batch_length_sum_limit": True,
-    "family_eligibility": False,
+    "family_eligibility": True,
     "thickness_range": False,
     "table_length_limit": False,
 }

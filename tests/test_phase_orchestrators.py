@@ -622,7 +622,7 @@ class PhaseOrchestratorTest(unittest.TestCase):
                     (row["machine_id"], row["job_ids"], row["batch_duration"])
                     for row in candidate.batches
                 ]
-                self.assertEqual(candidate.score_tuple, (0, 90.0, 0.0, 600.0, 5.0, 60.0))
+                self.assertEqual(candidate.score_tuple, (0, 90.0, 600.0, 0.0, 5.0, 60.0))
                 self.assertEqual(actual_batches, expected_batches)
 
     def test_phase2_merged_training_writes_metrics_and_checkpoint(self) -> None:

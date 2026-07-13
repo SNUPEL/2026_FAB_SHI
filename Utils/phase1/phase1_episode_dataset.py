@@ -34,6 +34,8 @@ import numpy as np
 # LINE-BY-LINE: Excel/CSV 로딩과 DataFrame 변환에 사용합니다.
 import pandas as pd
 
+from Utils.data.multi_series_cutting_data import build_block_set_id
+
 # LINE-BY-LINE: block-only synthetic row 생성과 필수 컬럼 검증 함수를 재사용합니다.
 from Utils.phase1.phase1_block_data_generator import (
     HARD_CASE_MODE_CUT_SHUFFLE,
@@ -410,7 +412,10 @@ def build_phase1_actual_workday_jobs(
             )
             raise RuntimeError(f"no_rows_after_gyel_filter: {gyel}")
 
-    df["__block_key"] = df["PROJ_NO"].astype(str) + "::" + df["BLK_NO"].astype(str)
+    df["__block_key"] = df.apply(
+        lambda row: build_block_set_id(row["PROJ_NO"], row["GYEL"], row["BLK_NO"]),
+        axis=1,
+    )
     df["__cut_bay"] = df["CUT_BAY"].map(_normalize_bay_value)
     outside = df[~df["__cut_bay"].isin(allowed_bays)]
     outside_blocks = set(outside["__block_key"])
@@ -586,10 +591,13 @@ def _jobs_from_episode_blocks(blocks: pd.DataFrame, episode_id: str) -> Dict[str
     jobs: Dict[str, SimpleNamespace] = {}
     for row_index, row in blocks.reset_index(drop=True).iterrows():
         block_no = str(row.get("BLK_NO") or row.get("BLK_ID") or f"BLK_{row_index + 1:05d}")
-        block_set_id = f"{episode_id}::{block_no}_{row_index + 1:05d}"
+        series = str(row["GYEL"]).strip()
+        synthetic_block_no = f"{block_no}_{row_index + 1:05d}"
+        block_set_id = build_block_set_id(episode_id, series, synthetic_block_no)
         job_id = f"{episode_id}_JOB_{row_index + 1:05d}"
         jobs[job_id] = SimpleNamespace(
             job_id=job_id,
+            family=series,
             block_set_id=block_set_id,
             steel_quantity=int(row["STL_QTY"]),
             plate_length=float(row["LTH"]),
@@ -602,6 +610,7 @@ def _jobs_from_episode_blocks(blocks: pd.DataFrame, episode_id: str) -> Dict[str
             extra={
                 "source_project_no": episode_id,
                 "source_block_no": block_no,
+                "source_series": series,
                 "source_wk_ord_no": job_id,
             },
         )
@@ -614,7 +623,7 @@ def _jobs_from_episode_blocks(blocks: pd.DataFrame, episode_id: str) -> Dict[str
 def _jobs_from_candidate_block_sheet(frame: pd.DataFrame, workday: str, bay_ids: Sequence[str]) -> Dict[str, SimpleNamespace]:
     """Convert one `{workday}_BLK` sheet to one Job-like object per block."""
 
-    required = {"PROJ_NO", "BLK_NO", "LTH", "THK", "CUT_LTH", "STL_QTY", "BV_QTY", "CUT_BAY"}
+    required = {"PROJ_NO", "GYEL", "BLK_NO", "LTH", "THK", "CUT_LTH", "STL_QTY", "BV_QTY", "CUT_BAY"}
     missing = sorted(required - set(frame.columns))
     if missing:
         print(
@@ -627,8 +636,9 @@ def _jobs_from_candidate_block_sheet(frame: pd.DataFrame, workday: str, bay_ids:
     seen_blocks: set[str] = set()
     for row_index, row in frame.reset_index(drop=True).iterrows():
         project_no = _required_cell_text(row["PROJ_NO"], "PROJ_NO", workday, row_index)
+        series = _required_cell_text(row["GYEL"], "GYEL", workday, row_index)
         block_no = _required_cell_text(row["BLK_NO"], "BLK_NO", workday, row_index)
-        block_set_id = f"{project_no}::{block_no}"
+        block_set_id = build_block_set_id(project_no, series, block_no)
         if block_set_id in seen_blocks:
             print(
                 "[ERROR][phase1_episode_dataset._jobs_from_candidate_block_sheet] "
@@ -648,6 +658,7 @@ def _jobs_from_candidate_block_sheet(frame: pd.DataFrame, workday: str, bay_ids:
         job_id = f"{workday}_BLK_{row_index + 1:05d}"
         jobs[job_id] = SimpleNamespace(
             job_id=job_id,
+            family=series,
             block_set_id=block_set_id,
             steel_quantity=_required_int(row["STL_QTY"], "STL_QTY", workday, row_index),
             plate_length=_required_float(row["LTH"], "LTH", workday, row_index),
@@ -660,6 +671,7 @@ def _jobs_from_candidate_block_sheet(frame: pd.DataFrame, workday: str, bay_ids:
             extra={
                 "source_project_no": project_no,
                 "source_block_no": block_no,
+                "source_series": series,
                 "source_wk_ord_no": job_id,
                 "source_workday": workday,
                 "evaluation_input_type": "candidate_workbook",
@@ -856,7 +868,7 @@ def _jobs_from_actual_workday_rows(rows: pd.DataFrame, workday: str) -> Dict[str
     """Convert W/O rows from one actual workday into Phase 1 Job-like rows."""
 
     jobs: Dict[str, SimpleNamespace] = {}
-    for index, row in rows.sort_values(["PROJ_NO", "BLK_NO", "WK_ORD_NO"]).reset_index(drop=True).iterrows():
+    for index, row in rows.sort_values(["PROJ_NO", "GYEL", "BLK_NO", "WK_ORD_NO"]).reset_index(drop=True).iterrows():
         job_id = str(row["WK_ORD_NO"]).strip()
         if not job_id:
             print(
@@ -871,10 +883,12 @@ def _jobs_from_actual_workday_rows(rows: pd.DataFrame, workday: str) -> Dict[str
             )
             raise RuntimeError(f"duplicate_wk_ord_no: {job_id}")
         project_no = str(row["PROJ_NO"]).strip()
+        series = str(row["GYEL"]).strip()
         block_no = str(row["BLK_NO"]).strip()
-        block_set_id = f"{project_no}::{block_no}"
+        block_set_id = build_block_set_id(project_no, series, block_no)
         jobs[job_id] = SimpleNamespace(
             job_id=job_id,
+            family=series,
             block_set_id=block_set_id,
             steel_quantity=int(row["STL_QTY"]),
             plate_length=float(row["LTH"]),
@@ -887,6 +901,7 @@ def _jobs_from_actual_workday_rows(rows: pd.DataFrame, workday: str) -> Dict[str
             extra={
                 "source_project_no": project_no,
                 "source_block_no": block_no,
+                "source_series": series,
                 "source_wk_ord_no": job_id,
                 "source_workday": workday,
             },

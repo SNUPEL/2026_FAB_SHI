@@ -70,8 +70,8 @@ def evaluate_phase2_schedule(
         "per_bay": per_bay,
         "diagnostics": diagnostics,
         "machine_load_score": {
-            "bay_internal_wo_count_gap": selected_score[2],
-            "bay_internal_cut_length_gap": selected_score[3],
+            "bay_internal_cut_length_gap": selected_score[2],
+            "bay_internal_wo_count_gap": selected_score[3],
             "bay_internal_bevel_quantity_gap": selected_score[4],
             "bay_internal_occupancy_gap": selected_score[5],
             "bay_internal_individual_tact_sum_gap": round(

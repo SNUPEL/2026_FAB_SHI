@@ -38,16 +38,34 @@
 
 현재 구조는 2단계로 정리합니다.
 
-- Phase 1: 같은 블록의 모든 W/O를 하나의 절단 Bay에 배정
+- Phase 1: 같은 `PROJ_NO+GYEL+BLK_NO`의 모든 W/O를 하나의 절단 Bay에 배정
 - Phase 2: Phase 1 결과를 받아 `SELECT_MACHINE -> SELECT_WO 반복 -> batch 자동 close`로 batch와 설비를 함께 결정
 
-Phase 2의 1순위 목적은 전체 `makespan` 최소화입니다. 2순위 이후에 Bay 내부 설비별 W/O 수, 절단장, 베벨수량, 점유시간 부하평준화를 봅니다. 순차 선택이 이후의 batch 구성과 machine 배정 가능성을 바꾸므로 MDP/RL로 정의합니다. 다만 setup time이 꺼진 현재 조건에서는 최종 batch 구성과 machine 배정이 같을 때 단순한 batch 투입 순서 교환만으로 목적값이 달라지지는 않습니다.
+Phase 2의 1순위 목적은 전체 `makespan` 최소화입니다. 2순위 이후에 Bay 내부 설비별 절단장, W/O 수, 베벨수량을 사전식으로 평준화하고 점유시간 gap은 진단값으로 남깁니다. 순차 선택이 이후의 batch 구성과 machine 배정 가능성을 바꾸므로 MDP/RL로 정의합니다. 다만 setup time이 꺼진 현재 조건에서는 최종 batch 구성과 machine 배정이 같을 때 단순한 batch 투입 순서 교환만으로 목적값이 달라지지는 않습니다.
 
 상세 진행 상태와 다음 작업은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)를 기준으로 봅니다.
 
 Phase 1 학습/MDP 구성은 [Phase1_MDP_RL_구성.md](Phase1_MDP_RL_구성.md)에 정리되어 있습니다.
 
 ### 현재 실행 명령
+
+신규 다계열 Excel의 날짜 audit와 Phase 1 계획 생성에는 한국 법정·대체
+공휴일 계산용 `holidays` 패키지가 필요합니다. 누락 시 기본 달력으로 대체하지
+않고 실행이 중단됩니다.
+
+```bash
+python -m pip install holidays
+```
+
+신규 NP/FN/FL/NC 데이터 검증 및 일별 Phase 1 계획 생성:
+
+```bash
+python main.py phase1-plan-multi-series --block-xlsx "변경사항/절단블록_데이터.xlsx" --wo-xlsx "변경사항/절단WO_데이터.xlsx" --output-dir output/generated/multi_series_260711
+```
+
+이 명령은 계열별 `TACT_TIME`을 사용하지 않으므로 Phase 1까지 실행할 수
+있습니다. 마스킹 해제된 실제 EQP 매핑과 FN/FL/NC `TACT_TIME` 산식이 오기
+전에는 다계열 Phase 2 actual machine 계획을 실행 완료로 보지 않습니다.
 
 Phase 1 단독 학습:
 
@@ -87,6 +105,11 @@ python scripts/evaluate_phase2_candidate_workbook.py --config config_np_100.yaml
 
 Phase 2 checkpoint에는 feature schema, score mode, batch limit, action pool, heuristic bank, sampling 수, Phase 1 Bay 용량비/장척 mask, constraint profile을 포함한 단일 `run_spec`이 저장됩니다. 재개·actual 평가·full-flow는 이 값이 하나라도 다르거나 RunSpec/model/optimizer state가 누락되면 자동 보정하지 않고 실패합니다. Frozen feedback으로 학습한 Phase 1 checkpoint도 원본 Phase 2 checkpoint SHA256과 RunSpec이 정확히 같은 full-flow에서만 사용할 수 있습니다.
 
+Phase 2 state는 W/O 계열 one-hot과 설비별 eligible-family one-hot을 포함하며,
+disabled 또는 계열 비호환 `(W/O, Machine)` edge는 생성하지 않습니다. 이 feature
+schema 변경 전 Phase 2 checkpoint는 새 state와 호환되지 않으므로 신규 학습이
+필요합니다.
+
 ### 현재 Phase / Network 경계
 
 - `Environment/simulation.py`: `simulate/replay/Gym`이 사용하는 custom event-driven DES다. SimPy를 사용하지 않고 decision epoch와 machine clock을 직접 전진시킨다.
@@ -101,6 +124,11 @@ Phase 2 checkpoint에는 feature schema, score mode, batch limit, action pool, h
 ---
 
 ## 2.1 Phase 1 블록-Bay 휴리스틱 결론
+
+신규 다계열 profile의 확정 목적은 계열별 평준화 그룹 안에서 Bay 설비 수를
+분모로 사용한 `W/O 수 -> CUT_LTH -> BV_QTY` 사전식 평준화입니다. NP의
+`BTH>4500`, `CNT_BLK`, `CUT_LTH>=1000`은 Bay 22/23 hard mask입니다.
+아래 내용은 기존 NP 중간발표 실험의 강재수량 기반 비교 기록입니다.
 
 현업 확인 기준 Phase 1 목적은 블록을 Bay 22/23/24에 배정해 Bay별 부하를 평준화하는 것입니다. Bay 25가 포함된 블록은 현재 테스트/발표 범위에서 제외합니다.
 

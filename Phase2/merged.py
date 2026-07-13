@@ -51,12 +51,12 @@ PHASE2_BATCH_MACHINE_SCORE_MODES = ("raw", "normalized")
 PHASE2_BATCH_MACHINE_SCORE_DETAIL_FIELD_NAMES = [
     "raw_hard_violation_count",
     "raw_makespan",
-    "raw_bay_internal_wo_count_gap",
     "raw_bay_internal_cut_length_gap",
+    "raw_bay_internal_wo_count_gap",
     "raw_bay_internal_bevel_quantity_gap",
     "raw_bay_internal_occupancy_gap",
-    "normalized_bay_internal_wo_count_gap",
     "normalized_bay_internal_cut_length_gap",
+    "normalized_bay_internal_wo_count_gap",
     "normalized_bay_internal_bevel_quantity_gap",
     "normalized_bay_internal_occupancy_gap",
 ]

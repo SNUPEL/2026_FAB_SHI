@@ -7,9 +7,10 @@ import math
 from typing import Any, Dict, Mapping, Sequence
 
 from Environment.hierarchical import CommonHierarchicalEnvironment, OpenBatchState
+from Utils.data.multi_series_cutting_data import SUPPORTED_SERIES
 
 
-PHASE2_STATE_SCHEMA_VERSION = "phase2_set_pointer_v1"
+PHASE2_STATE_SCHEMA_VERSION = "phase2_set_pointer_v2_family"
 PHASE2_SET_POINTER_POLICY_TYPE = "phase2_set_pointer"
 PHASE2_BAY_CONTEXT_FEATURE_NAMES = (
     "stage_select_machine",
@@ -34,6 +35,10 @@ PHASE2_MACHINE_NODE_FEATURE_NAMES = (
     "batch_to_expected_ratio",
     "feasible_remaining_wo_ratio",
     "is_selected_machine",
+    "eligible_family_np",
+    "eligible_family_fn",
+    "eligible_family_fl",
+    "eligible_family_nc",
 )
 PHASE2_WO_NODE_FEATURE_NAMES = (
     "tact_ratio",
@@ -41,6 +46,10 @@ PHASE2_WO_NODE_FEATURE_NAMES = (
     "cut_ratio",
     "bevel_ratio",
     "is_in_open_batch",
+    "family_np",
+    "family_fn",
+    "family_fl",
+    "family_nc",
 )
 PHASE2_OPEN_BATCH_FEATURE_NAMES = (
     "wo_count_ratio",
@@ -170,8 +179,9 @@ def build_phase2_policy_state(
         if selected_machine_id is not None and machine_id == str(selected_machine_id):
             selected_machine_index = index
         load = view.machine_loads[machine_id]
+        machine = view.machines[machine_id]
         feasible_count = sum(
-            1 for job in view.jobs.values() if _job_allows_machine(job, machine_id)
+            1 for job in view.jobs.values() if _job_allows_machine(job, machine, machine_id)
         )
         machine_features.append(
             [
@@ -182,6 +192,7 @@ def build_phase2_policy_state(
                 _machine_load_number(load, "batch_count", machine_id) / max(1.0, target["batch"]),
                 feasible_count / max(1.0, float(len(view.jobs))),
                 1.0 if machine_id == str(selected_machine_id) else 0.0,
+                *_machine_family_flags(machine, machine_id),
             ]
         )
     if normalized_stage == "SELECT_WO" and selected_machine_index < 0:
@@ -200,6 +211,7 @@ def build_phase2_policy_state(
             _number_field(view.jobs[job_id], "cut_length", job_id) / totals["cut"],
             _number_field(view.jobs[job_id], "bevel_quantity", job_id) / max(1.0, totals["bevel"]),
             1.0 if job_id in open_job_ids else 0.0,
+            *_job_family_flags(view.jobs[job_id], job_id),
         ]
         for job_id in wo_ids
     ]
@@ -278,15 +290,27 @@ def _projected_action_features(
 ) -> list[float]:
     projected_loads = {key: dict(value) for key, value in machine_loads.items()}
     projected_clock = {key: float(value) for key, value in machine_available_at.items()}
-    if str(action["action_type"]) == "select_wo":
+    action_type = str(_required_field(action, "action_type", machine_id))
+    if action_type not in {"select_machine", "select_wo"}:
+        print(
+            "[ERROR][Phase2.state._projected_action_features] "
+            f"cause=unknown_action_type machine_id={machine_id} action_type={action_type}"
+        )
+        raise RuntimeError(f"unknown Phase 2 action type: {action_type}")
+    if action_type == "select_wo":
         projected_loads[machine_id]["wo_count"] += int(action["wo_count"])
         projected_loads[machine_id]["cut_length_sum"] += float(action["cut_length_sum"])
         projected_loads[machine_id]["bevel_quantity_sum"] += float(action["bevel_quantity_sum"])
         projected_clock[machine_id] = float(action["projected_finish_time"])
     gaps = _machine_gaps(projected_loads, projected_clock)
     time_scale = max(1.0, totals["tact"])
+    duration_increment = (
+        _number_field(action, "duration_increment", machine_id)
+        if action_type == "select_wo"
+        else 0.0
+    )
     return [
-        float(action.get("duration_increment", 0.0)) / time_scale,
+        duration_increment / time_scale,
         float(action["projected_finish_time"]) / time_scale,
         float(action["projected_makespan"]) / time_scale,
         gaps["wo"],
@@ -362,10 +386,69 @@ def _job_totals(jobs: Mapping[str, object]) -> Dict[str, float]:
     }
 
 
-def _job_allows_machine(job: object, machine_id: str) -> bool:
+def _job_allows_machine(job: object, machine: object, machine_id: str) -> bool:
+    if not _required_bool_field(machine, "enabled", machine_id):
+        return False
     allowed = tuple(str(value) for value in (_optional_field(job, "allowed_machine_ids") or ()))
     prohibited = tuple(str(value) for value in (_optional_field(job, "prohibited_machine_ids") or ()))
-    return (not allowed or machine_id in allowed) and machine_id not in prohibited
+    family = _required_family(job, str(_required_field(job, "job_id", machine_id)))
+    eligible_families = _required_eligible_families(machine, machine_id)
+    return (
+        (not allowed or machine_id in allowed)
+        and machine_id not in prohibited
+        and family in eligible_families
+    )
+
+
+def _job_family_flags(job: object, job_id: str) -> list[float]:
+    family = _required_family(job, job_id)
+    return [1.0 if family == value else 0.0 for value in SUPPORTED_SERIES]
+
+
+def _machine_family_flags(machine: object, machine_id: str) -> list[float]:
+    eligible = _required_eligible_families(machine, machine_id)
+    return [1.0 if family in eligible else 0.0 for family in SUPPORTED_SERIES]
+
+
+def _required_family(job: object, job_id: str) -> str:
+    family = str(_required_field(job, "family", job_id)).strip().upper()
+    if family not in SUPPORTED_SERIES:
+        print(
+            "[ERROR][Phase2.state._required_family] "
+            f"cause=unsupported_family job_id={job_id} family={family}"
+        )
+        raise RuntimeError(f"unsupported Phase 2 family: {family}")
+    return family
+
+
+def _required_eligible_families(machine: object, machine_id: str) -> frozenset[str]:
+    raw_values = _required_field(machine, "eligible_families", machine_id)
+    if isinstance(raw_values, str) or not isinstance(raw_values, Sequence):
+        print(
+            "[ERROR][Phase2.state._required_eligible_families] "
+            f"cause=invalid_type machine_id={machine_id} value={raw_values}"
+        )
+        raise RuntimeError(f"invalid eligible_families for {machine_id}")
+    values = frozenset(str(value).strip().upper() for value in raw_values if str(value).strip())
+    unknown = sorted(values - set(SUPPORTED_SERIES))
+    if not values or unknown:
+        print(
+            "[ERROR][Phase2.state._required_eligible_families] "
+            f"cause=invalid_values machine_id={machine_id} values={sorted(values)} unknown={unknown}"
+        )
+        raise RuntimeError(f"invalid eligible_families for {machine_id}")
+    return values
+
+
+def _required_bool_field(value: object, name: str, key: str) -> bool:
+    result = _required_field(value, name, key)
+    if not isinstance(result, bool):
+        print(
+            "[ERROR][Phase2.state._required_bool_field] "
+            f"cause=not_boolean field={name} key={key} value={result}"
+        )
+        raise RuntimeError(f"non-boolean {name} for {key}")
+    return result
 
 
 def _processing_time(job: object, job_id: str) -> float:

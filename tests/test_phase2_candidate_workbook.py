@@ -37,6 +37,10 @@ class Phase2CandidateWorkbookTest(unittest.TestCase):
         self.assertEqual(problem["candidate_block_count"], 2)
         self.assertEqual(problem["wo_count"], 3)
         self.assertEqual({job["source_wk_ord_no"] for job in problem["scenario"]["jobs"]}, {"WO_1", "WO_2", "WO_3"})
+        self.assertEqual(
+            {job["block_set_id"] for job in problem["scenario"]["jobs"]},
+            {"PROJ_A::NP::BLK_1", "PROJ_A::NP::BLK_2"},
+        )
 
     def test_missing_candidate_block_in_wo_source_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -105,6 +109,7 @@ class Phase2CandidateWorkbookTest(unittest.TestCase):
                 {
                     "PROJ_NO": project,
                     "BLK_NO": block,
+                    "GYEL": "NP",
                     "LTH": 10000,
                     "THK": 13,
                     "CUT_LTH": 100.0,

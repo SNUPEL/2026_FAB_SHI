@@ -21,8 +21,8 @@ class Phase2RunSpecTest(unittest.TestCase):
             score_fields=(
                 "hard_violation_count",
                 "makespan",
-                "bay_internal_wo_count_gap",
                 "bay_internal_cut_length_gap",
+                "bay_internal_wo_count_gap",
                 "bay_internal_bevel_quantity_gap",
                 "bay_internal_occupancy_gap",
             ),
@@ -87,8 +87,8 @@ class Phase2RunSpecTest(unittest.TestCase):
         spec["score_fields"] = [
             "hard_violation_count",
             "makespan",
-            "bay_internal_normalized_wo_count_gap",
             "bay_internal_normalized_cut_length_gap",
+            "bay_internal_normalized_wo_count_gap",
             "bay_internal_normalized_bevel_quantity_gap",
             "bay_internal_normalized_occupancy_gap",
         ]

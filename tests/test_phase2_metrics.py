@@ -32,9 +32,9 @@ class Phase2MetricContractTest(unittest.TestCase):
             hard_violation_count=0,
         )
 
-        self.assertEqual(metrics["raw_score"], (0, 500.0, 2.0, 20.0, 4.0, 10.0))
-        self.assertAlmostEqual(metrics["normalized_score"][2], 2.0 / 9.0)
-        self.assertAlmostEqual(metrics["normalized_score"][3], 20.0 / 90.0)
+        self.assertEqual(metrics["raw_score"], (0, 500.0, 20.0, 2.0, 4.0, 10.0))
+        self.assertAlmostEqual(metrics["normalized_score"][2], 20.0 / 90.0)
+        self.assertAlmostEqual(metrics["normalized_score"][3], 2.0 / 9.0)
         self.assertAlmostEqual(metrics["normalized_score"][4], 4.0 / 8.0)
         self.assertAlmostEqual(metrics["normalized_score"][5], 10.0 / 45.0)
         self.assertEqual(metrics["per_bay"]["22"]["raw_wo_count_gap"], 2.0)
@@ -51,9 +51,9 @@ class Phase2MetricContractTest(unittest.TestCase):
             hard_violation_count=0,
         )
 
-        self.assertEqual(metrics["raw_score"][2], 2.0)
+        self.assertEqual(metrics["raw_score"][3], 2.0)
         self.assertEqual(metrics["diagnostics"]["global_wo_count_gap"], 92.0)
-        self.assertNotEqual(metrics["raw_score"][2], metrics["diagnostics"]["global_wo_count_gap"])
+        self.assertNotEqual(metrics["raw_score"][3], metrics["diagnostics"]["global_wo_count_gap"])
 
     def test_individual_tact_sum_gap_is_not_batch_occupancy_gap(self) -> None:
         metrics = calculate_phase2_schedule_metrics(
@@ -103,7 +103,7 @@ class Phase2MetricContractTest(unittest.TestCase):
             hard_violation_count=0,
         )
 
-        self.assertEqual(result["score_tuple"], (0, 500.0, 2.0, 20.0, 4.0, 10.0))
+        self.assertEqual(result["score_tuple"], (0, 500.0, 20.0, 2.0, 4.0, 10.0))
         self.assertEqual(result["machine_load_score"]["bay_internal_wo_count_gap"], 2.0)
         self.assertEqual(result["machine_load_score"]["diagnostic_global_wo_count_gap"], 92.0)
         self.assertEqual(result["machine_load_score"]["bay_internal_occupancy_gap"], 10.0)

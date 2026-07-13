@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Mapping, Sequence
 import pandas as pd
 
 from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
+from Utils.data.multi_series_cutting_data import build_block_set_id
 from Utils.phase1.phase1_episode_dataset import build_phase1_candidate_workbook_jobs
 
 
@@ -77,7 +78,10 @@ def load_phase2_candidate_workbook_problems(
     _require_columns(raw_wo, PHASE2_CANDIDATE_WO_REQUIRED_COLUMNS, source)
     raw_wo = raw_wo.copy()
     raw_wo["__source_row_index"] = raw_wo.index.astype(int) + 2
-    raw_wo["__block_key"] = raw_wo["PROJ_NO"].map(_required_text_cell) + "::" + raw_wo["BLK_NO"].map(_required_text_cell)
+    raw_wo["__block_key"] = raw_wo.apply(
+        lambda row: build_block_set_id(row["PROJ_NO"], row["GYEL"], row["BLK_NO"]),
+        axis=1,
+    )
     raw_wo["__cut_bay"] = raw_wo["CUT_BAY"].map(_normalize_bay)
 
     filtered_by_gyel = raw_wo[raw_wo["GYEL"].astype(str).str.strip().eq(str(gyel))].copy()
@@ -214,10 +218,11 @@ def _records_from_wo_subset(subset: pd.DataFrame, workday: str) -> List[Dict[str
     """Convert strict W/O rows to canonical records consumed by scenario builder."""
 
     records: List[Dict[str, Any]] = []
-    ordered = subset.sort_values(["PROJ_NO", "BLK_NO", "WK_ORD_NO"]).reset_index(drop=True)
+    ordered = subset.sort_values(["PROJ_NO", "GYEL", "BLK_NO", "WK_ORD_NO"]).reset_index(drop=True)
     for row_index, row in ordered.iterrows():
         row_key = f"{workday}:row{row_index + 1}"
         project_no = _required_text(row["PROJ_NO"], "PROJ_NO", row_key)
+        series = _required_text(row["GYEL"], "GYEL", row_key)
         block_no = _required_text(row["BLK_NO"], "BLK_NO", row_key)
         work_order_no = _required_text(row["WK_ORD_NO"], "WK_ORD_NO", row_key)
         source_cut_bay = _normalize_bay(row["CUT_BAY"])
@@ -230,7 +235,7 @@ def _records_from_wo_subset(subset: pd.DataFrame, workday: str) -> List[Dict[str
                 "planned_end_date": _optional_text(row["GYEL_ACT_EDDT"]),
                 "actual_start_datetime": _optional_text(row["RT_CUT_ST_DTM"]),
                 "actual_end_datetime": _optional_text(row["RT_CUT_ED_DTM"]),
-                "series": _required_text(row["GYEL"], "GYEL", row_key),
+                "series": series,
                 "length": _required_positive_float(row["LTH"], "LTH", row_key),
                 "thickness": _required_positive_float(row["THK"], "THK", row_key),
                 "cut_length": _required_non_negative_float(row["CUT_LTH"], "CUT_LTH", row_key),
@@ -244,7 +249,7 @@ def _records_from_wo_subset(subset: pd.DataFrame, workday: str) -> List[Dict[str
                 "downstream_date": _optional_text(row["ASS_ST_DT"]),
                 "part_qty": _required_non_negative_int(row["PTLST_QTY"], "PTLST_QTY", row_key),
                 "source_row_index": int(row["__source_row_index"]),
-                "block_set_id": f"{project_no}::{block_no}",
+                "block_set_id": build_block_set_id(project_no, series, block_no),
             }
         )
     return records
