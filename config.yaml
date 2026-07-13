@@ -81,10 +81,6 @@ factory:
           machine_ids:
             - PLS52
 
-# 현재는 cpu 기준으로 동작합니다.
-# GPU가 있는 환경이면 cuda로 바꿀 수 있습니다.
-device: cpu
-
 simulation:
   # 시작 날짜.
   # 날짜별 override를 쓰려면 이 값이 기준이 됩니다.
@@ -199,11 +195,6 @@ agent:
   # 휴리스틱 기본 규칙
   default_heuristic: batch_fill_spt
 
-network:
-  # 후보 action graph를 인코딩하는 간단 GNN + MLP 구조입니다.
-  hidden_dim: 128
-  num_gnn_layers: 2
-
 constraints:
   # category는 "사람이 이해하기 쉬운 큰 분류"입니다.
   # false로 두면 해당 분류 전체를 꺼버립니다.
@@ -313,34 +304,3 @@ reward:
   priority_bonus_weight: 0.02
   # soft constraint penalty를 reward에 얼마나 크게 반영할지
   soft_penalty_weight: 1.0
-
-train:
-  episodes: 10
-  # 후보:
-  # - reinforce
-  # - ppo
-  # - self_labeling
-  algorithm: ppo
-
-algorithm:
-  reinforce:
-    lr: 0.0005
-    gamma: 0.99
-    entropy_coef: 0.001
-
-  ppo:
-    lr: 0.0003
-    gamma: 0.99
-    clip_eps: 0.2
-    update_epochs: 4
-    value_coef: 0.5
-    entropy_coef: 0.001
-
-  self_labeling:
-    lr: 0.0005
-    rollout_samples: 4
-    imitation_epochs: 3
-    sample_temperature: 1.0
-
-eval:
-  save_summary: false

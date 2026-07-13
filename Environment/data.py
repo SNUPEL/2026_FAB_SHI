@@ -4,7 +4,7 @@
 대신 환경이 주고받는 핵심 객체의 필드 구조를 한 곳에 모아 둔다.
 
 전체 흐름:
-1. `Utils/cutting_scenario_builder.py`가 Excel/CSV row를 scenario dict로 만든다.
+1. `Utils/data/cutting_scenario_builder.py`가 Excel/CSV row를 scenario dict로 만든다.
 2. `Environment/environment.py`가 scenario dict를 이 파일의 dataclass로 변환한다.
 3. `Environment/simulation.py`가 dataclass를 읽어 후보 생성, 제약 평가, event 생성을 수행한다.
 

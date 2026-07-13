@@ -7,8 +7,6 @@
   python3 main.py playback --config config_np_100.yaml
   python3 main.py pygame-viewer --event-log output/share/html_viewer_package/clean_100/generated/balanced_batch/event_log.json --layout output/share/html_viewer_package/clean_100/generated/balanced_batch/factory_layout.json --schedule output/share/html_viewer_package/clean_100/generated/balanced_batch/job_schedule.csv --metrics output/share/html_viewer_package/clean_100/generated/balanced_batch/metrics.json
   python3 main.py trace --config config.yaml
-  python3 main.py train --config config.yaml
-  python3 main.py eval --config config.yaml
 """
 
 # LINE-BY-LINE: Windows conda에서 pandas/numpy와 torch가 서로 다른 Intel OpenMP runtime을 초기화하면
@@ -31,39 +29,65 @@ import json
 from collections import Counter, defaultdict
 # LINE-BY-LINE: `pathlib` 모듈에서 `Path`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
 
 # LINE-BY-LINE: `Agent.heuristics` 모듈에서 `select_action_by_rule`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Agent.heuristics import select_action_by_rule
 # LINE-BY-LINE: `Environment.environment` 모듈에서 `CuttingShopEnvironment`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Environment.environment import CuttingShopEnvironment
 from Environment.gym_wrapper import GYMNASIUM_AVAILABLE, run_hierarchical_trace_export, run_wrapper_equivalence
-from Train.algorithm.phase1_imitation import train_phase1_pointer_imitation
-from Train.algorithm.phase1_pair_self_labeling import train_phase1_pair_self_labeling
-from Train.algorithm.phase1_self_labeling import PHASE1_SELF_LABEL_HEURISTIC_BANK, train_phase1_pointer_self_labeling
-# LINE-BY-LINE: `Train.runner` 모듈에서 `run_eval, run_train`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Train.runner import run_eval, run_train
+from Environment.constraints.profiles import load_phase_constraint_profile
+from Phase1.orchestrator import candidate_to_phase1_plan
+from Phase2.orchestrator import run_phase2_full_graph_workflow, write_phase2_workflow_outputs
+from Phase2.feedback import (
+    build_frozen_phase2_schedule_feedback_scorer,
+    build_phase2_feedback_contract,
+)
+from Phase2.merged import (
+    PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK,
+    PHASE2_BATCH_MACHINE_NORMALIZED_SCORE_FIELD_NAMES,
+    PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES,
+    train_phase2_batch_machine_self_labeling,
+)
+from Phase2.run_spec import build_phase2_run_spec, require_matching_phase2_run_spec
+from Phase1.imitation import train_phase1_pointer_imitation
+from Phase1.pair_self_labeling import run_phase1_pair_policy_rollout, train_phase1_pair_self_labeling
+from Phase1.self_labeling import (
+    PHASE1_SELF_LABEL_HEURISTIC_BANK,
+    PPB_LCP6_HEURISTIC_BANK,
+    _score_bay_loads,
+    run_phase1_heuristic_candidate,
+    train_phase1_pointer_self_labeling,
+)
 # LINE-BY-LINE: `Utils.config` 모듈에서 `load_config`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.config import load_config
-# LINE-BY-LINE: `Utils.cutting_data_loader` 모듈에서 `load_and_clean_cutting_data, write_records_csv`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.cutting_data_loader import load_and_clean_cutting_data, write_records_csv
-# LINE-BY-LINE: `Utils.cutting_scenario_builder` 모듈에서 `build_scenario_from_cutting_records`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.cutting_scenario_builder import build_scenario_from_cutting_records
-# LINE-BY-LINE: `Utils.factory_builder` 모듈에서 `build_factory_scenario_parts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.factory_builder import build_factory_scenario_parts
-# LINE-BY-LINE: `Utils.io` 모듈에서 scenario loader를 가져옵니다. `load_scenario`는 명시 YAML용, `load_scenario_for_config`는 config 기반 원본 데이터 로딩용입니다.
-from Utils.io import load_scenario, load_scenario_for_config
-from Utils.learning_data_builder import build_learning_data_package
-from Utils.phase1_block_data_generator import (
+# LINE-BY-LINE: `Utils.data.cutting_data_loader` 모듈에서 `load_and_clean_cutting_data, write_records_csv`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.data.cutting_data_loader import load_and_clean_cutting_data, write_records_csv
+# LINE-BY-LINE: `Utils.data.cutting_scenario_builder` 모듈에서 `build_scenario_from_cutting_records`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
+# LINE-BY-LINE: `Utils.data.factory_builder` 모듈에서 `build_factory_scenario_parts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.data.factory_builder import build_factory_scenario_parts
+# LINE-BY-LINE: `Utils.data.io` 모듈에서 scenario loader를 가져옵니다. `load_scenario`는 명시 YAML용, `load_scenario_for_config`는 config 기반 원본 데이터 로딩용입니다.
+from Utils.data.io import load_scenario, load_scenario_for_config
+from Utils.learning.learning_data_builder import build_learning_data_package
+from Utils.learning.phase_agent_checkpoints import (
+    load_phase1_feedback_contract,
+    load_phase1_pair_pointer_checkpoint,
+    load_phase2_checkpoint_run_spec,
+    load_phase2_set_pointer_checkpoint,
+)
+from Utils.phase1.phase1_block_data_generator import (
     load_phase1_actual_blocks,
     write_phase1_block_generation_package,
 )
-from Utils.phase1_episode_dataset import (
+from Utils.phase1.phase1_episode_dataset import (
     build_phase1_actual_workday_jobs,
+    build_phase1_candidate_workbook_jobs,
     build_phase1_episode_jobs,
     jobs_from_phase1_episode_blocks,
     write_phase1_episode_dataset,
 )
-from Utils.phase1_bay_balancer import (
+from Utils.phase1.phase1_bay_balancer import (
     CANONICAL_PHASE1_HEURISTIC,
     LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
     MULTI_OBJECTIVE_PHASE1_HEURISTIC,
@@ -73,30 +97,31 @@ from Utils.phase1_bay_balancer import (
     build_phase1_bay_plan,
     write_phase1_bay_plan,
 )
-from Utils.phase1_phase2_communication import (
-    DEFAULT_BATCH_MAX_LENGTH_SUM,
-    DEFAULT_BATCH_MAX_WO_COUNT,
-    DEFAULT_WIDE_BTH_THRESHOLD,
+from Utils.learning.phase1_phase2_communication import (
     apply_phase1_messages_to_scenario,
     load_communication_jsonl,
-    score_phase1_assignments_with_phase2_feedback,
     write_phase1_phase2_communication_package,
 )
-from Utils.phase1_mdp import write_phase1_mdp_trace_package
-# LINE-BY-LINE: `Utils.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
-# LINE-BY-LINE: `Utils.scenario_generator` 모듈에서 `generate_scenario_from_template, save_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.scenario_generator import generate_scenario_from_template, save_scenario
+from Utils.data.phase2_candidate_workbook import load_phase2_candidate_workbook_problems
+from Utils.phase1.phase1_mdp import write_phase1_mdp_trace_package
+from Utils.data.report_formula_data_generator import (
+    build_report_formula_episode_jobs,
+    scenario_jobs_from_report_formula_jobs,
+)
+# LINE-BY-LINE: `Utils.reporting.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.reporting.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
+# LINE-BY-LINE: `Utils.data.scenario_generator` 모듈에서 `generate_scenario_from_template, save_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.data.scenario_generator import generate_scenario_from_template, save_scenario
 # 회사 송부용 정적 HTML 패키지와 휴리스틱 baseline 비교표를 생성하는 helper입니다.
-from Utils.share_report_builder import build_html_package, parse_csv_argument
+from Utils.reporting.share_report_builder import build_html_package, parse_csv_argument
 # Pygame 로컬 공장 playback viewer입니다. `--dry-run`으로 GUI 없이 입력 검증도 가능합니다.
-from Utils.pygame_factory_viewer import run_pygame_comparison_from_paths, run_pygame_viewer_from_paths
-# LINE-BY-LINE: `Utils.tact_gap_analysis` 모듈에서 `build_tact_gap_analysis`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.tact_gap_analysis import build_tact_gap_analysis
-# LINE-BY-LINE: `Utils.tact_time` 모듈에서 `build_tact_time_analysis_from_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.tact_time import build_tact_time_analysis_from_scenario
-# LINE-BY-LINE: `Utils.test_data_selection` 모듈에서 `select_actual_day_test_data, select_actual_start_range_test_data`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
-from Utils.test_data_selection import select_actual_day_test_data, select_actual_start_range_test_data
+from Utils.reporting.pygame_factory_viewer import run_pygame_comparison_from_paths, run_pygame_viewer_from_paths
+# LINE-BY-LINE: `Utils.reporting.tact_gap_analysis` 모듈에서 `build_tact_gap_analysis`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.reporting.tact_gap_analysis import build_tact_gap_analysis
+# LINE-BY-LINE: `Utils.reporting.tact_time` 모듈에서 `build_tact_time_analysis_from_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.reporting.tact_time import build_tact_time_analysis_from_scenario
+# LINE-BY-LINE: `Utils.data.test_data_selection` 모듈에서 `select_actual_day_test_data, select_actual_start_range_test_data`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
+from Utils.data.test_data_selection import select_actual_day_test_data, select_actual_start_range_test_data
 
 
 # LINE-BY-LINE: `build_environment(config_path: str, scenario_path: str | None = None)` 함수를 정의합니다. 반환 타입: `CuttingShopEnvironment`. 사용: CLI 명령에서 사용자가 실행한 subcommand를 처리합니다.
@@ -353,6 +378,26 @@ def _phase1_bay_ids_from_env(env: CuttingShopEnvironment, requested_bay_ids: str
     return selected_bay_ids
 
 
+def _phase1_bay_capacity_weights_from_env(env: CuttingShopEnvironment, bay_ids: Sequence[str]) -> dict[str, float]:
+    """Return enabled machine counts per selected Bay for Phase 1 load normalization."""
+
+    selected = {str(bay_id) for bay_id in bay_ids}
+    weights = {str(bay_id): 0.0 for bay_id in bay_ids}
+    for machine in env.machines.values():
+        bay_id = str(machine.bay_id)
+        if not machine.enabled or bay_id not in selected:
+            continue
+        weights[bay_id] += 1.0
+    missing = [bay_id for bay_id, weight in weights.items() if weight <= 0]
+    if missing:
+        print(
+            "[ERROR][main._phase1_bay_capacity_weights_from_env] "
+            f"cause=no_enabled_machine_in_selected_bay bay_ids={missing}"
+        )
+        raise RuntimeError(f"Phase 1 selected Bays have no enabled machines: {missing}")
+    return weights
+
+
 def command_phase1(args: argparse.Namespace) -> None:
     """Run Phase 1 only: block-level cutting Bay assignment."""
 
@@ -371,6 +416,7 @@ def command_phase1(args: argparse.Namespace) -> None:
 
     env = build_environment(args.config)
     bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
+    bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, bay_ids)
     output_dir = args.output_dir
     if output_dir is None:
         output_dir = str(Path("output") / f"phase1_{Path(args.config).stem}_{args.algorithm}")
@@ -379,11 +425,13 @@ def command_phase1(args: argparse.Namespace) -> None:
         jobs=env.jobs,
         bay_ids=bay_ids,
         algorithm=args.algorithm,
+        bay_capacity_weights=bay_capacity_weights,
     )
     paths = write_phase1_bay_plan(plan, output_dir)
     summary = plan["summary"]
 
     print(f"- resolved_bay_ids: {bay_ids}")
+    print(f"- bay_capacity_weights: {bay_capacity_weights}")
     print(f"- output_dir: {output_dir}")
     print(f"- job_count: {summary['job_count']}")
     print(f"- block_count: {summary['block_count']}")
@@ -455,6 +503,9 @@ def command_phase1_train_imitation(args: argparse.Namespace) -> None:
     )
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- metrics_csv: {summary['metrics_csv']}")
+    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
+    print(f"- best_assignment_csv: {summary['best_assignment_csv']}")
+    print(f"- best_machine_load_csv: {summary['best_machine_load_csv']}")
     print(f"- summary_json: {summary['summary_json']}")
     print(f"- final_loss: {summary['final_loss']}")
     print(f"- final_accuracy: {summary['final_accuracy']}")
@@ -489,6 +540,8 @@ def command_phase1_train_self_labeling(args: argparse.Namespace) -> None:
     ]
     if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
         heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
+    if str(args.heuristic_algorithms).strip().lower() in {"business6", "all6", "ppb_lcp6"}:
+        heuristic_algorithms = list(PPB_LCP6_HEURISTIC_BANK)
     fixed_jobs = None
     episode_jobs = None
     episode_metadata = None
@@ -552,21 +605,51 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- min_blocks: {args.min_blocks}")
     print(f"- max_blocks: {args.max_blocks}")
     print(f"- noise_ratio: {args.noise_ratio}")
+    print(f"- hard_case_ratio: {args.hard_case_ratio}")
+    print(f"- hard_case_mode: {args.hard_case_mode}")
+    print(f"- hard_case_target_corr: {args.hard_case_target_corr}")
+    print(f"- hard_case_max_attempts: {args.hard_case_max_attempts}")
     print(f"- requested_bay_ids: {args.bay_ids}")
     print(f"- output_dir: {args.output_dir}")
     print(f"- episodes: {args.episodes}")
     print(f"- rollout_samples: {args.rollout_samples}")
+    validation_rollout_samples = (
+        args.rollout_samples
+        if args.validation_rollout_samples is None
+        else args.validation_rollout_samples
+    )
+    print(f"- rollout_samples_validation: {validation_rollout_samples}")
+    validation_hard_case_ratio = (
+        args.hard_case_ratio
+        if args.validation_hard_case_ratio is None
+        else args.validation_hard_case_ratio
+    )
+    print(f"- validation_hard_case_ratio: {validation_hard_case_ratio}")
     print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
     print(f"- score_mode: {args.score_mode}")
-    print(f"- actual_validation_wo_xlsx: {args.actual_validation_wo_xlsx}")
+    print(f"- actual_validation_candidate_xlsx: {args.actual_validation_candidate_xlsx}")
     print(f"- actual_validation_workdays: {args.actual_validation_workdays}")
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
+    print(f"- device: {args.device}")
     print(f"- enable_phase2_feedback_score: {args.enable_phase2_feedback_score}")
-    print(f"- phase2_wide_bth_threshold: {args.phase2_wide_bth_threshold}")
-    print(f"- phase2_batch_max_wo_count: {args.phase2_batch_max_wo_count}")
-    print(f"- phase2_batch_max_length_sum: {args.phase2_batch_max_length_sum}")
+    print(f"- phase2_feedback_checkpoint: {args.phase2_feedback_checkpoint}")
     env = build_environment(args.config)
+    config = load_config(args.config)
     bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
+    bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, bay_ids)
+    phase2_feedback_checkpoint = _optional_non_empty_cli_value(
+        args.phase2_feedback_checkpoint,
+        "phase2_feedback_checkpoint",
+    )
+    if args.enable_phase2_feedback_score != (phase2_feedback_checkpoint is not None):
+        print(
+            "[ERROR][main.command_phase1_train_pair_self_labeling] "
+            f"cause=feedback_flag_checkpoint_mismatch enabled={args.enable_phase2_feedback_score} "
+            f"checkpoint={phase2_feedback_checkpoint or ''}"
+        )
+        raise RuntimeError(
+            "--enable-phase2-feedback-score and --phase2-feedback-checkpoint must be used together"
+        )
     heuristic_algorithms = [
         item.strip()
         for item in str(args.heuristic_algorithms).split(",")
@@ -574,10 +657,40 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     ]
     if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
         heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
-    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+    if str(args.heuristic_algorithms).strip().lower() in {"business6", "all6", "ppb_lcp6"}:
+        heuristic_algorithms = list(PPB_LCP6_HEURISTIC_BANK)
+    actual_blocks = (
+        None
+        if args.enable_phase2_feedback_score
+        else load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
+    )
 
     def episode_factory(episode: int):
         episode_id = f"EP{episode:05d}"
+        if args.enable_phase2_feedback_score:
+            spec = build_report_formula_episode_jobs(
+                episode_count=1,
+                min_blocks=args.min_blocks,
+                max_blocks=args.max_blocks,
+                seed=args.seed + episode * 1_000_003,
+                gyel=args.gyel,
+            )[0]
+            return {
+                "jobs": spec["jobs"],
+                "metadata": {
+                    "episode_id": episode_id,
+                    "problem_id": episode_id,
+                    "block_count": spec["block_count"],
+                    "job_count": spec["job_count"],
+                    "seed": spec["seed"],
+                    "case_type": "report_formula_wo",
+                    "hard_case_mode": "none",
+                    "hard_case_ratio": 0.0,
+                },
+            }
+        if actual_blocks is None:
+            print("[ERROR][main.episode_factory] cause=missing_phase1_actual_blocks")
+            raise RuntimeError("Phase 1 block bootstrap source is missing")
         specs = build_phase1_episode_jobs(
             actual_blocks=actual_blocks,
             episode_count=1,
@@ -585,6 +698,10 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
             max_blocks=args.max_blocks,
             seed=args.seed + episode - 1,
             noise_ratio=args.noise_ratio,
+            hard_case_ratio=args.hard_case_ratio,
+            hard_case_mode=args.hard_case_mode,
+            hard_case_target_corr=args.hard_case_target_corr,
+            hard_case_max_attempts=args.hard_case_max_attempts,
             verbose=False,
         )
         spec = specs[0]
@@ -595,11 +712,42 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
                 "problem_id": episode_id,
                 "block_count": spec["block_count"],
                 "seed": spec["seed"],
+                "case_type": spec.get("case_type", "normal"),
+                "hard_case_mode": spec.get("hard_case_mode", "none"),
+                "hard_case_ratio": spec.get("hard_case_ratio", args.hard_case_ratio),
+                "hard_case_corr_steel_cut_before": spec.get("hard_case_corr_steel_cut_before"),
+                "hard_case_corr_steel_cut_after": spec.get("hard_case_corr_steel_cut_after"),
             },
         }
 
     def synthetic_validation_episode_factory(validation_episode: int):
         episode_id = f"VAL{validation_episode:05d}"
+        if args.enable_phase2_feedback_score:
+            spec = build_report_formula_episode_jobs(
+                episode_count=1,
+                min_blocks=args.min_blocks,
+                max_blocks=args.max_blocks,
+                seed=args.seed + 10_000_000 + validation_episode * 1_000_003,
+                gyel=args.gyel,
+            )[0]
+            return {
+                "jobs": spec["jobs"],
+                "metadata": {
+                    "episode_id": episode_id,
+                    "problem_id": episode_id,
+                    "block_count": spec["block_count"],
+                    "job_count": spec["job_count"],
+                    "seed": spec["seed"],
+                    "case_type": "report_formula_wo",
+                    "hard_case_mode": "none",
+                    "hard_case_ratio": 0.0,
+                    "validation_source": "synthetic",
+                    "evaluation_input_type": "report_formula_wo",
+                },
+            }
+        if actual_blocks is None:
+            print("[ERROR][main.synthetic_validation_episode_factory] cause=missing_phase1_actual_blocks")
+            raise RuntimeError("Phase 1 validation block bootstrap source is missing")
         specs = build_phase1_episode_jobs(
             actual_blocks=actual_blocks,
             episode_count=1,
@@ -607,6 +755,10 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
             max_blocks=args.max_blocks,
             seed=args.seed + 10_000_000 + validation_episode - 1,
             noise_ratio=args.noise_ratio,
+            hard_case_ratio=validation_hard_case_ratio,
+            hard_case_mode=args.hard_case_mode,
+            hard_case_target_corr=args.hard_case_target_corr,
+            hard_case_max_attempts=args.hard_case_max_attempts,
             verbose=False,
         )
         spec = specs[0]
@@ -617,7 +769,13 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
                 "problem_id": episode_id,
                 "block_count": spec["block_count"],
                 "seed": spec["seed"],
+                "case_type": spec.get("case_type", "normal"),
+                "hard_case_mode": spec.get("hard_case_mode", "none"),
+                "hard_case_ratio": spec.get("hard_case_ratio", validation_hard_case_ratio),
+                "hard_case_corr_steel_cut_before": spec.get("hard_case_corr_steel_cut_before"),
+                "hard_case_corr_steel_cut_after": spec.get("hard_case_corr_steel_cut_after"),
                 "validation_source": "synthetic",
+                "evaluation_input_type": "synthetic_generated",
             },
         }
 
@@ -628,12 +786,43 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     ]
     actual_validation_payloads = []
     if actual_validation_workdays:
-        actual_validation_payloads = build_phase1_actual_workday_jobs(
-            source_path=args.actual_validation_wo_xlsx,
-            workdays=actual_validation_workdays,
-            bay_ids=bay_ids,
-            gyel=args.gyel,
-        )
+        if args.enable_phase2_feedback_score:
+            source_data_path = config.get("paths", {}).get("source_data_path")
+            if not source_data_path:
+                print(
+                    "[ERROR][main.command_phase1_train_pair_self_labeling] "
+                    "cause=missing_source_data_path_for_actual_feedback_validation"
+                )
+                raise RuntimeError("Phase 2 feedback actual validation requires paths.source_data_path")
+            phase2_actual_payloads = load_phase2_candidate_workbook_problems(
+                wo_path=source_data_path,
+                candidate_path=args.actual_validation_candidate_xlsx,
+                workdays=actual_validation_workdays,
+                bay_ids=bay_ids,
+                gyel=args.gyel,
+                factory_config=config.get("factory"),
+            )
+            actual_validation_payloads = [
+                {
+                    "jobs": _scenario_jobs_by_id(payload["scenario"]),
+                    "metadata": {
+                        **dict(payload.get("phase1_metadata", {})),
+                        "problem_id": payload["problem_id"],
+                        "episode_id": payload["problem_id"],
+                        "block_count": payload["candidate_block_count"],
+                        "job_count": payload["wo_count"],
+                        "validation_source": "actual_8days",
+                        "evaluation_input_type": "candidate_workbook_wo_expanded",
+                    },
+                }
+                for payload in phase2_actual_payloads
+            ]
+        else:
+            actual_validation_payloads = build_phase1_candidate_workbook_jobs(
+                candidate_path=args.actual_validation_candidate_xlsx,
+                workdays=actual_validation_workdays,
+                bay_ids=bay_ids,
+            )
     total_validation_episodes = args.validation_episodes + len(actual_validation_payloads)
 
     def validation_episode_factory(validation_episode: int):
@@ -644,23 +833,43 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         return {"jobs": payload["jobs"], "metadata": payload["metadata"]}
 
     phase2_feedback_scorer = None
+    phase2_feedback_contract = None
     if args.enable_phase2_feedback_score:
-        enabled_machines = [machine for machine in env.machines.values() if machine.enabled]
+        enabled_machines = {
+            machine_id: machine
+            for machine_id, machine in env.machines.items()
+            if machine.enabled and str(machine.bay_id) in set(bay_ids)
+        }
         if not enabled_machines:
             print("[ERROR][main.command_phase1_train_pair_self_labeling] cause=no_enabled_machines_for_phase2_feedback")
             raise RuntimeError("Phase 2 feedback scoring requires at least one enabled machine")
-
-        def phase2_feedback_scorer(candidate, jobs, candidate_bay_ids):
-            return score_phase1_assignments_with_phase2_feedback(
-                assignments=candidate.assignments,
-                jobs=jobs,
-                bay_ids=candidate_bay_ids,
-                machines=enabled_machines,
-                algorithm=str(candidate.source),
-                wide_bth_threshold=args.phase2_wide_bth_threshold,
-                batch_max_wo_count=args.phase2_batch_max_wo_count,
-                batch_max_length_sum=args.phase2_batch_max_length_sum,
+        phase2_constraint_profile = load_phase_constraint_profile(config, "phase2")
+        phase2_feedback_model = load_phase2_set_pointer_checkpoint(
+            phase2_feedback_checkpoint,
+            context="phase1_feedback",
+        )
+        phase2_feedback_run_spec = load_phase2_checkpoint_run_spec(
+            phase2_feedback_checkpoint,
+            context="phase1_feedback",
+        )
+        if not bool(phase2_feedback_run_spec["phase1_long_cut_hard_mask"]):
+            print(
+                "[ERROR][main.command_phase1_train_pair_self_labeling] "
+                "cause=phase1_long_cut_mask_mismatch training=True checkpoint=False"
             )
+            raise RuntimeError(
+                "Phase 1 feedback training uses the long-cut hard mask, but the Phase 2 RunSpec does not"
+            )
+        phase2_feedback_scorer = build_frozen_phase2_schedule_feedback_scorer(
+            model=phase2_feedback_model,
+            machines=enabled_machines,
+            run_spec=phase2_feedback_run_spec,
+            constraint_profile=phase2_constraint_profile,
+        )
+        phase2_feedback_contract = build_phase2_feedback_contract(
+            phase2_feedback_checkpoint,
+            phase2_feedback_run_spec,
+        )
 
     summary = train_phase1_pair_self_labeling(
         episode_jobs=None,
@@ -679,11 +888,18 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         checkpoint_every=args.checkpoint_every,
         validation_every=args.validation_every,
         validation_episodes=total_validation_episodes,
-        validation_episode_factory=validation_episode_factory,
+        validation_episode_factory=(
+            validation_episode_factory if total_validation_episodes > 0 else None
+        ),
+        validation_rollout_samples=validation_rollout_samples,
         resume_checkpoint=args.resume_checkpoint,
         phase2_feedback_scorer=phase2_feedback_scorer,
+        phase2_feedback_contract=phase2_feedback_contract,
+        bay_capacity_weights=bay_capacity_weights,
+        device=args.device,
     )
     print(f"- resolved_bay_ids: {bay_ids}")
+    print(f"- bay_capacity_weights: {bay_capacity_weights}")
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
     print(f"- metrics_csv: {summary['metrics_csv']}")
@@ -694,7 +910,6 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- validation_steel_gap_png: {summary.get('validation_steel_gap_png', '')}")
     print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
     print(f"- validation_bevel_gap_png: {summary.get('validation_bevel_gap_png', '')}")
-    print(f"- validation_long_cut_png: {summary.get('validation_long_cut_png', '')}")
     print(f"- validation_best_source_counts_png: {summary.get('validation_best_source_counts_png', '')}")
     print(f"- validation_agent_rank_png: {summary.get('validation_agent_rank_png', '')}")
     print(f"- actual_validation_problem_count: {len(actual_validation_payloads)}")
@@ -735,6 +950,938 @@ def command_phase1_build_episode_dataset(args: argparse.Namespace) -> None:
     print(f"- test_action_table_jsonl: {paths['test_action_table_jsonl']}")
     print(f"- manifest_json: {paths['manifest_json']}")
     print(f"- episode_summary_csv: {paths['episode_summary_csv']}")
+
+
+def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -> None:
+    """Train merged Phase 2 policy that selects W/O batch and machine together."""
+
+    print("[phase2-train-batch-machine-self-labeling-cli]")
+    print(f"- config: {args.config}")
+    print(f"- scenario_path_override: {args.scenario_path}")
+    print(f"- phase1_heuristic: {args.phase1_heuristic}")
+    print(f"- phase1_checkpoint: {args.phase1_checkpoint}")
+    print(f"- phase1_samples: {args.phase1_samples}")
+    print(f"- phase1_temperature: {args.phase1_temperature}")
+    print(f"- phase1_bay_ids: {args.phase1_bay_ids}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- episodes: {args.episodes}")
+    print(f"- hidden_dim: {args.hidden_dim}")
+    print(f"- lr: {args.lr}")
+    print(f"- seed: {args.seed}")
+    print(f"- device: {args.device}")
+    print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
+    print(f"- phase2_score_mode: {args.phase2_score_mode}")
+    print(f"- rollout_samples: {args.rollout_samples}")
+    validation_rollout_samples = (
+        args.rollout_samples
+        if args.validation_rollout_samples is None
+        else args.validation_rollout_samples
+    )
+    print(f"- rollout_samples_validation: {validation_rollout_samples}")
+    print(f"- validation_every: {args.validation_every}")
+    print(f"- validation_episodes: {args.validation_episodes}")
+    print(f"- checkpoint_every: {args.checkpoint_every}")
+    print(f"- resume_checkpoint: {args.resume_checkpoint}")
+    print(f"- action_pool_limit: {args.action_pool_limit}")
+    print(f"- synthetic_source: {args.synthetic_source}")
+    print(f"- synthetic_block_range: {args.min_blocks}..{args.max_blocks}")
+
+    env = build_environment(args.config, scenario_path=args.scenario_path)
+    phase2_constraint_profile = load_phase_constraint_profile(load_config(args.config), "phase2")
+    enabled_machines = {
+        machine_id: machine
+        for machine_id, machine in env.machines.items()
+        if machine.enabled
+    }
+    if not enabled_machines:
+        print("[ERROR][main.command_phase2_train_batch_machine_self_labeling] cause=no_enabled_machines")
+        raise RuntimeError("Phase 2 training requires at least one enabled machine")
+    requested_phase1_heuristic = _optional_non_empty_cli_value(args.phase1_heuristic, "phase1_heuristic")
+    phase1_checkpoint = _optional_non_empty_cli_value(args.phase1_checkpoint, "phase1_checkpoint")
+    if requested_phase1_heuristic is not None and phase1_checkpoint is not None:
+        print(
+            "[ERROR][main.command_phase2_train_batch_machine_self_labeling] "
+            f"cause=conflicting_phase1_sources phase1_heuristic={requested_phase1_heuristic} "
+            f"phase1_checkpoint={phase1_checkpoint}"
+        )
+        raise RuntimeError("use either --phase1-heuristic or --phase1-checkpoint, not both")
+    phase1_heuristic = requested_phase1_heuristic if phase1_checkpoint is None else None
+    if phase1_heuristic is None and phase1_checkpoint is None:
+        phase1_heuristic = "bevel_first_balanced"
+    phase1_bay_ids = _resolve_phase1_training_bay_ids(args.phase1_bay_ids, enabled_machines)
+    training_machines = _filter_machines_by_bay_ids(enabled_machines, phase1_bay_ids)
+    phase1_bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, phase1_bay_ids)
+    phase1_assignment_builder = None
+    if phase1_checkpoint is not None:
+        phase1_assignment_builder = _phase1_agent_assignment_builder(
+            checkpoint=phase1_checkpoint,
+            bay_ids=phase1_bay_ids,
+            sample_count=args.phase1_samples,
+            temperature=args.phase1_temperature,
+            seed=args.seed,
+            score_mode=args.phase1_score_mode,
+            long_cut_hard_mask=not args.phase1_no_long_cut_hard_mask,
+            bay_capacity_weights=phase1_bay_capacity_weights,
+        )
+    print(f"- resolved_phase1_mode: {'checkpoint' if phase1_checkpoint is not None else 'heuristic'}")
+    print(f"- resolved_phase1_heuristic: {phase1_heuristic or ''}")
+    print(f"- resolved_phase1_bay_ids: {phase1_bay_ids}")
+    print(f"- phase1_bay_capacity_weights: {phase1_bay_capacity_weights}")
+    print(
+        "- phase2_hard_constraints: "
+        + ",".join(name for name, enabled in phase2_constraint_profile.hard_enabled.items() if enabled)
+    )
+    training_jobs = env.jobs
+    episode_jobs = None
+    episode_job_factory = None
+    validation_episode_jobs = None
+    validation_episode_job_factory = None
+    if args.synthetic_source == "report_formula":
+        def episode_job_factory(episode: int):
+            spec = build_report_formula_episode_jobs(
+                episode_count=1,
+                min_blocks=args.min_blocks,
+                max_blocks=args.max_blocks,
+                seed=args.seed + episode * 1_000_003,
+                gyel=args.gyel,
+            )[0]
+            return spec["jobs"]
+
+        if args.validation_episodes > 0:
+            def validation_episode_job_factory(validation_episode: int):
+                spec = build_report_formula_episode_jobs(
+                    episode_count=1,
+                    min_blocks=args.min_blocks,
+                    max_blocks=args.max_blocks,
+                    seed=args.seed + 10_000_000 + validation_episode * 1_000_003,
+                    gyel=args.gyel,
+                )[0]
+                return spec["jobs"]
+    elif args.synthetic_source != "config":
+        print(
+            "[ERROR][main.command_phase2_train_batch_machine_self_labeling] "
+            f"cause=unknown_synthetic_source value={args.synthetic_source}"
+        )
+        raise RuntimeError(f"unknown synthetic source: {args.synthetic_source}")
+
+    summary = train_phase2_batch_machine_self_labeling(
+        jobs=training_jobs,
+        machines=training_machines,
+        phase1_assignments={},
+        output_dir=args.output_dir,
+        episodes=args.episodes,
+        lr=args.lr,
+        hidden_dim=args.hidden_dim,
+        seed=args.seed,
+        heuristic_algorithms=tuple(parse_csv_argument(args.heuristic_algorithms, default=())),
+        rollout_samples=args.rollout_samples,
+        validation_rollout_samples=validation_rollout_samples,
+        validation_every=args.validation_every,
+        validation_episodes=args.validation_episodes,
+        checkpoint_every=args.checkpoint_every,
+        max_wo_count=args.max_wo_count,
+        max_length_sum=args.max_length_sum,
+        action_pool_limit=args.action_pool_limit,
+        episode_jobs=episode_jobs,
+        episode_job_factory=episode_job_factory,
+        validation_episode_jobs=validation_episode_jobs,
+        validation_episode_job_factory=validation_episode_job_factory,
+        phase1_heuristic=phase1_heuristic,
+        phase1_bay_ids=phase1_bay_ids,
+        phase1_assignment_builder=phase1_assignment_builder,
+        phase1_bay_capacity_weights=phase1_bay_capacity_weights,
+        phase1_long_cut_hard_mask=not args.phase1_no_long_cut_hard_mask,
+        device=args.device,
+        write_candidate_summary=args.write_candidate_summary,
+        score_mode=args.phase2_score_mode,
+        resume_checkpoint=args.resume_checkpoint,
+        constraint_profile=phase2_constraint_profile,
+    )
+    print(f"- job_count: {summary['job_count']}")
+    print(f"- machine_count: {summary['machine_count']}")
+    print(f"- feature_schema_version: {summary['feature_schema_version']}")
+    print(f"- feature_group_dims: {summary['feature_group_dims']}")
+    print(f"- score_fields: {summary['score_fields']}")
+    print(f"- score_mode: {summary['score_mode']}")
+    print(f"- start_episode: {summary['start_episode']}")
+    print(f"- resumed_from_episode: {summary['resumed_from_episode']}")
+    print(f"- resume_checkpoint: {summary['resume_checkpoint']}")
+    print(f"- checkpoint_path: {summary['checkpoint_path']}")
+    print(f"- checkpoint_dir: {summary['checkpoint_dir']}")
+    print(f"- metrics_csv: {summary['metrics_csv']}")
+    print(f"- subproblem_metrics_csv: {summary['subproblem_metrics_csv']}")
+    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
+    print(f"- write_candidate_summary: {summary['write_candidate_summary']}")
+    print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
+    print(f"- validation_candidate_summary_csv: {summary['validation_candidate_summary_csv']}")
+    print(f"- validation_hard_violation_png: {summary.get('validation_hard_violation_png', '')}")
+    print(f"- validation_makespan_png: {summary.get('validation_makespan_png', '')}")
+    print(f"- validation_wo_gap_png: {summary.get('validation_wo_gap_png', '')}")
+    print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
+    print(f"- validation_bevel_gap_png: {summary.get('validation_bevel_gap_png', '')}")
+    print(f"- validation_occupancy_gap_png: {summary.get('validation_occupancy_gap_png', '')}")
+    print(f"- validation_best_source_counts_png: {summary.get('validation_best_source_counts_png', '')}")
+    print(f"- validation_policy_rank_png: {summary.get('validation_policy_rank_png', '')}")
+    print(f"- best_assignment_csv: {summary['best_assignment_csv']}")
+    print(f"- best_batches_csv: {summary['best_batches_csv']}")
+    print(f"- best_timeline_csv: {summary['best_timeline_csv']}")
+    print(f"- summary_json: {summary['summary_json']}")
+
+
+def command_phase2_run_full_workflow(args: argparse.Namespace) -> None:
+    """Run merged Phase 2 batch-machine workflow, then export CSVs."""
+
+    print("[phase2-run-full-workflow-cli]")
+    print(f"- config: {args.config}")
+    print(f"- scenario_path_override: {args.scenario_path}")
+    print(f"- phase1_plan: {args.phase1_plan}")
+    print(f"- phase1_checkpoint: {args.phase1_checkpoint}")
+    print(f"- phase1_heuristic: {args.phase1_heuristic}")
+    print(f"- phase1_bay_ids: {args.phase1_bay_ids}")
+    print(f"- phase1_samples: {args.phase1_samples}")
+    print(f"- assignment_mode: {args.assignment_mode}")
+    print(f"- batch_machine_heuristic: {args.batch_machine_heuristic}")
+    print(f"- batch_machine_checkpoint: {args.batch_machine_checkpoint}")
+    print(f"- output_dir: {args.output_dir}")
+    print(f"- synthetic_source: {args.synthetic_source}")
+    print(f"- synthetic_blocks: {args.synthetic_blocks}")
+
+    config = load_config(args.config)
+    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
+    if args.synthetic_source == "report_formula":
+        scenario = _replace_scenario_jobs_with_report_formula(
+            scenario=scenario,
+            block_count=args.synthetic_blocks,
+            seed=args.seed,
+            gyel=args.gyel,
+        )
+    elif args.synthetic_source != "config":
+        print(
+            "[ERROR][main.command_phase2_run_full_workflow] "
+            f"cause=unknown_synthetic_source value={args.synthetic_source}"
+        )
+        raise RuntimeError(f"unknown synthetic source: {args.synthetic_source}")
+    phase2_constraint_profile = load_phase_constraint_profile(config, "phase2")
+    batch_machine_heuristic = _optional_non_empty_cli_value(
+        args.batch_machine_heuristic,
+        "batch_machine_heuristic",
+    )
+    checkpoint_path = _optional_non_empty_cli_value(
+        args.batch_machine_checkpoint,
+        "batch_machine_checkpoint",
+    )
+    if checkpoint_path is not None and batch_machine_heuristic is not None:
+        print(
+            "[ERROR][main.command_phase2_run_full_workflow] "
+            f"cause=checkpoint_heuristic_conflict checkpoint={checkpoint_path} "
+            f"heuristic={batch_machine_heuristic}"
+        )
+        raise RuntimeError("Choose either a Phase 2 checkpoint or heuristic, not both")
+    if checkpoint_path is None and batch_machine_heuristic is None:
+        batch_machine_heuristic = "min_makespan"
+    batch_machine_model = _load_phase2_full_flow_model(
+        checkpoint=checkpoint_path,
+        context="phase2_batch_machine",
+        conflicting_heuristic=batch_machine_heuristic,
+    )
+    checkpoint_run_spec = (
+        load_phase2_checkpoint_run_spec(checkpoint_path, context="phase2_batch_machine")
+        if checkpoint_path is not None
+        else None
+    )
+    requested_bay_ids = (
+        parse_csv_argument(args.phase1_bay_ids, default=())
+        if hasattr(args, "phase1_bay_ids")
+        else tuple(checkpoint_run_spec["phase1_bay_capacity_weights"])
+        if checkpoint_run_spec is not None
+        else ("22", "23", "24")
+    )
+    if not requested_bay_ids:
+        print("[ERROR][main.command_phase2_run_full_workflow] cause=no_phase1_bay_ids")
+        raise RuntimeError("full-flow requires Phase 1 Bay IDs")
+    if checkpoint_run_spec is not None and set(requested_bay_ids) != set(
+        checkpoint_run_spec["phase1_bay_capacity_weights"]
+    ):
+        print(
+            "[ERROR][main.command_phase2_run_full_workflow] "
+            f"cause=phase1_bay_id_mismatch checkpoint={sorted(checkpoint_run_spec['phase1_bay_capacity_weights'])} "
+            f"requested={sorted(requested_bay_ids)}"
+        )
+        raise RuntimeError("Phase 1 Bay IDs differ from the Phase 2 checkpoint RunSpec")
+    phase1_bay_capacity_weights = _phase1_bay_capacity_weights_from_scenario(
+        scenario,
+        requested_bay_ids,
+    )
+    phase1_long_cut_hard_mask = (
+        bool(checkpoint_run_spec["phase1_long_cut_hard_mask"])
+        if checkpoint_run_spec is not None and not args.phase1_no_long_cut_hard_mask
+        else not args.phase1_no_long_cut_hard_mask
+    )
+    effective_run_spec = _resolve_phase2_full_flow_run_spec(
+        args=args,
+        checkpoint_spec=checkpoint_run_spec,
+        constraint_profile=phase2_constraint_profile,
+        phase1_bay_capacity_weights=phase1_bay_capacity_weights,
+        phase1_long_cut_hard_mask=phase1_long_cut_hard_mask,
+        heuristic=batch_machine_heuristic,
+    )
+    phase1_checkpoint_path = _optional_non_empty_cli_value(
+        args.phase1_checkpoint,
+        "phase1_checkpoint",
+    )
+    if phase1_checkpoint_path is not None:
+        phase1_feedback_contract = load_phase1_feedback_contract(phase1_checkpoint_path)
+        if phase1_feedback_contract is not None:
+            if checkpoint_path is None or checkpoint_run_spec is None:
+                print(
+                    "[ERROR][main.command_phase2_run_full_workflow] "
+                    "cause=feedback_trained_phase1_without_phase2_checkpoint"
+                )
+                raise RuntimeError(
+                    "feedback-trained Phase 1 requires the exact Phase 2 checkpoint in full-flow"
+                )
+            selected_phase2_contract = build_phase2_feedback_contract(
+                checkpoint_path,
+                checkpoint_run_spec,
+            )
+            _require_matching_phase1_feedback_contract(
+                phase1_feedback_contract,
+                selected_phase2_contract,
+            )
+    phase1_plan = _load_or_build_phase1_plan_for_full_flow(
+        args,
+        scenario,
+        bay_ids=requested_bay_ids,
+        bay_capacity_weights=phase1_bay_capacity_weights,
+        long_cut_hard_mask=phase1_long_cut_hard_mask,
+    )
+    print(f"- resolved_phase1_bay_ids: {requested_bay_ids}")
+    print(f"- phase1_bay_capacity_weights: {phase1_bay_capacity_weights}")
+    print(f"- phase1_long_cut_hard_mask: {phase1_long_cut_hard_mask}")
+    print(f"- phase2_score_mode: {effective_run_spec['score_mode']}")
+    print(f"- action_pool_limit: {effective_run_spec['action_pool_limit']}")
+    print(f"- max_wo_count: {effective_run_spec['max_wo_count']}")
+    print(f"- max_length_sum: {effective_run_spec['max_length_sum']}")
+    print(f"- rollout_samples: {effective_run_spec['validation_rollout_samples']}")
+    result = run_phase2_full_graph_workflow(
+        scenario=scenario,
+        phase1_plan=phase1_plan,
+        assignment_mode=args.assignment_mode,
+        model=batch_machine_model,
+        max_wo_count=int(effective_run_spec["max_wo_count"]),
+        max_length_sum=float(effective_run_spec["max_length_sum"]),
+        batch_machine_heuristic=batch_machine_heuristic,
+        score_mode=str(effective_run_spec["score_mode"]),
+        action_pool_limit=effective_run_spec["action_pool_limit"],
+        constraint_profile=phase2_constraint_profile,
+        effective_run_spec=effective_run_spec,
+        rollout_samples=(
+            int(effective_run_spec["validation_rollout_samples"])
+            if batch_machine_model is not None
+            else 0
+        ),
+        seed=args.seed,
+    )
+    outputs = write_phase2_workflow_outputs(result, args.output_dir)
+    print(f"- assignment_csv: {outputs['assignment_csv']}")
+    print(f"- machine_load_csv: {outputs['machine_load_csv']}")
+    print(f"- batch_csv: {outputs['batch_csv']}")
+    print(f"- timeline_csv: {outputs['timeline_csv']}")
+    print(f"- makespan_csv: {outputs['makespan_csv']}")
+    print(f"- bay_metric_csv: {outputs['bay_metric_csv']}")
+    print(f"- constraint_audit_csv: {outputs['constraint_audit_csv']}")
+    print(f"- constraint_violation_count: {outputs['constraint_violation_count']}")
+    print(f"- event_log_json: {outputs['event_log_json']}")
+    print(f"- event_count: {outputs['event_count']}")
+    print(f"- report_json: {outputs['report_json']}")
+
+
+def _phase1_assignments_from_plan(plan: dict) -> dict[str, str]:
+    assignments = plan.get("assignments")
+    if not isinstance(assignments, list) or not assignments:
+        print(
+            "[ERROR][main._phase1_assignments_from_plan] "
+            f"cause=no_assignments rows_type={type(assignments).__name__}"
+        )
+        raise RuntimeError("Phase 1 plan has no assignments")
+    result = {}
+    for index, row in enumerate(assignments):
+        block_set_id = str(row.get("block_set_id") or "").strip()
+        assigned_bay = str(row.get("assigned_bay") or "").strip()
+        if not block_set_id or not assigned_bay:
+            print(
+                "[ERROR][main._phase1_assignments_from_plan] "
+                f"cause=invalid_assignment index={index} row={row}"
+            )
+            raise RuntimeError(f"invalid Phase 1 assignment at index={index}")
+        if block_set_id in result and result[block_set_id] != assigned_bay:
+            print(
+                "[ERROR][main._phase1_assignments_from_plan] "
+                f"cause=conflicting_assignment block_set_id={block_set_id} "
+                f"old={result[block_set_id]} new={assigned_bay}"
+            )
+            raise RuntimeError(f"conflicting Phase 1 assignment: {block_set_id}")
+        result[block_set_id] = assigned_bay
+    return result
+
+
+def _optional_non_empty_cli_value(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        print(f"[ERROR][main._optional_non_empty_cli_value] cause=empty_value name={name}")
+        raise RuntimeError(f"{name} must not be empty")
+    return stripped
+
+
+def _parse_optional_positive_int(value: str) -> int | None:
+    """Parse CLI positive int, allowing explicit None/all for unlimited mode."""
+
+    normalized = str(value).strip().lower()
+    if normalized in {"none", "all", "full"}:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        print(f"[ERROR][main._parse_optional_positive_int] cause=invalid_integer value={value}")
+        raise argparse.ArgumentTypeError(f"expected positive integer or None: {value}") from exc
+    if parsed <= 0:
+        print(f"[ERROR][main._parse_optional_positive_int] cause=non_positive_integer value={value}")
+        raise argparse.ArgumentTypeError(f"expected positive integer or None: {value}")
+    return parsed
+
+
+def _resolve_phase1_training_bay_ids(value: str | None, machines: Mapping[str, Any]) -> tuple[str, ...]:
+    """Phase 2 학습 중 Phase 1 heuristic을 실행할 Bay 목록을 결정한다."""
+
+    explicit = parse_csv_argument(value, default=())
+    if explicit:
+        return tuple(str(bay_id) for bay_id in explicit)
+    bay_ids = []
+    for machine_id, machine in sorted(machines.items()):
+        bay_id = machine.get("bay_id") if isinstance(machine, Mapping) else getattr(machine, "bay_id", None)
+        if bay_id in (None, ""):
+            print(
+                "[ERROR][main._resolve_phase1_training_bay_ids] "
+                f"cause=missing_machine_bay_id machine_id={machine_id}"
+            )
+            raise RuntimeError(f"missing machine bay_id: {machine_id}")
+        bay_ids.append(str(bay_id))
+    result = tuple(dict.fromkeys(bay_ids))
+    if not result:
+        print("[ERROR][main._resolve_phase1_training_bay_ids] cause=no_bay_ids")
+        raise RuntimeError("Phase 1 training bay IDs are required")
+    return result
+
+
+def _filter_machines_by_bay_ids(machines: Mapping[str, Any], bay_ids: Sequence[str]) -> dict[str, Any]:
+    """Phase 학습에서 사용하지 않는 Bay의 설비를 score와 CSV에서 제외한다."""
+
+    allowed = {str(bay_id) for bay_id in bay_ids}
+    result = {}
+    for machine_id, machine in machines.items():
+        bay_id = machine.get("bay_id") if isinstance(machine, Mapping) else getattr(machine, "bay_id", None)
+        if str(bay_id) in allowed:
+            result[str(machine_id)] = machine
+    if not result:
+        print(
+            "[ERROR][main._filter_machines_by_bay_ids] "
+            f"cause=no_machine_after_filter bay_ids={sorted(allowed)}"
+        )
+        raise RuntimeError(f"no enabled machines for selected Bay IDs: {sorted(allowed)}")
+    return result
+
+
+def _phase1_checkpoint_path(value: str) -> Path:
+    """Resolve a Phase 1 checkpoint file or output directory."""
+
+    path = Path(value)
+    if path.is_dir():
+        path = path / "phase1_pair_pointer_best.pt"
+    if not path.exists():
+        print(f"[ERROR][main._phase1_checkpoint_path] cause=missing_phase1_checkpoint path={path}")
+        raise RuntimeError(f"missing Phase 1 checkpoint: {path}")
+    return path
+
+
+def _phase1_agent_assignment_builder(
+    checkpoint: str,
+    bay_ids: Sequence[str],
+    sample_count: int,
+    temperature: float,
+    seed: int,
+    score_mode: str,
+    long_cut_hard_mask: bool,
+    bay_capacity_weights: Mapping[str, int | float],
+) -> Callable[[Mapping[str, object], int], Mapping[str, str]]:
+    """Build frozen Phase 1 agent inference used as Phase 2 upstream input."""
+
+    if sample_count <= 0:
+        print(f"[ERROR][main._phase1_agent_assignment_builder] cause=non_positive_sample_count value={sample_count}")
+        raise RuntimeError("--phase1-samples must be positive")
+    if temperature <= 0:
+        print(f"[ERROR][main._phase1_agent_assignment_builder] cause=non_positive_temperature value={temperature}")
+        raise RuntimeError("--phase1-temperature must be positive")
+    checkpoint_path = _phase1_checkpoint_path(checkpoint)
+    model = load_phase1_pair_pointer_checkpoint(checkpoint_path)
+    normalized_bay_ids = tuple(str(bay_id) for bay_id in bay_ids)
+
+    def build(jobs: Mapping[str, object], assignment_seed: int) -> Mapping[str, str]:
+        candidates = []
+        if sample_count == 1:
+            candidates.append(
+                run_phase1_pair_policy_rollout(
+                    jobs=jobs,
+                    bay_ids=normalized_bay_ids,
+                    model=model,
+                    temperature=temperature,
+                    seed=seed + assignment_seed,
+                    source="phase1_agent_greedy",
+                    selection="greedy",
+                    long_cut_hard_mask=long_cut_hard_mask,
+                    bay_capacity_weights=bay_capacity_weights,
+                )
+            )
+        else:
+            for sample_index in range(1, sample_count + 1):
+                candidates.append(
+                    run_phase1_pair_policy_rollout(
+                        jobs=jobs,
+                        bay_ids=normalized_bay_ids,
+                        model=model,
+                        temperature=temperature,
+                        seed=seed + assignment_seed * 10_000 + sample_index,
+                        source=f"phase1_agent_sample_{sample_index}",
+                        selection="sample",
+                        long_cut_hard_mask=long_cut_hard_mask,
+                        bay_capacity_weights=bay_capacity_weights,
+                    )
+                )
+        best = min(candidates, key=lambda candidate: _score_bay_loads(candidate.bay_loads, score_mode))
+        print(
+            "[CHECK][main._phase1_agent_assignment_builder] "
+            f"assignment_seed={assignment_seed} source={best.source} samples={sample_count} "
+            f"score={_score_bay_loads(best.bay_loads, score_mode)}",
+            flush=True,
+        )
+        return dict(best.assignments)
+
+    return build
+
+
+def _replace_scenario_jobs_with_report_formula(
+    scenario: Mapping[str, Any],
+    block_count: int,
+    seed: int,
+    gyel: str,
+) -> dict:
+    """Return a scenario whose jobs come from the PDF fixed formulas.
+
+    Full-flow still needs the real/configured machine layout.  Therefore this
+    helper preserves every scenario field except `jobs`, which is replaced by
+    generated W/O rows that follow the report formulas exactly.
+    """
+
+    if block_count <= 0:
+        print(
+            "[ERROR][main._replace_scenario_jobs_with_report_formula] "
+            f"cause=invalid_block_count value={block_count}"
+        )
+        raise RuntimeError("--synthetic-blocks must be positive")
+    if "machines" not in scenario:
+        print("[ERROR][main._replace_scenario_jobs_with_report_formula] cause=missing_machines")
+        raise RuntimeError("base scenario must contain machines for PDF synthetic full-flow")
+    episode = build_report_formula_episode_jobs(
+        episode_count=1,
+        min_blocks=block_count,
+        max_blocks=block_count,
+        seed=seed,
+        gyel=gyel,
+    )[0]
+    scenario_copy = dict(scenario)
+    scenario_copy["jobs"] = scenario_jobs_from_report_formula_jobs(episode["jobs"])
+    metadata = dict(scenario_copy.get("metadata") or {})
+    metadata.update(
+        {
+            "job_source": "report_formula",
+            "synthetic_block_count": block_count,
+            "synthetic_job_count": len(scenario_copy["jobs"]),
+            "synthetic_seed": seed,
+            "synthetic_gyel": gyel,
+        }
+    )
+    scenario_copy["metadata"] = metadata
+    print(
+        "[VALIDATION][main._replace_scenario_jobs_with_report_formula] "
+        f"passed=true blocks={block_count} jobs={len(scenario_copy['jobs'])} seed={seed}"
+    )
+    return scenario_copy
+
+
+def _load_or_build_phase1_plan_for_full_flow(
+    args: argparse.Namespace,
+    scenario: Mapping[str, Any],
+    *,
+    bay_ids: Sequence[str],
+    bay_capacity_weights: Mapping[str, int | float],
+    long_cut_hard_mask: bool,
+) -> dict:
+    """Load Phase 1 plan or build it from a checkpoint/heuristic for full-flow."""
+
+    phase1_plan = _optional_non_empty_cli_value(args.phase1_plan, "phase1_plan")
+    phase1_checkpoint = _optional_non_empty_cli_value(args.phase1_checkpoint, "phase1_checkpoint")
+    phase1_heuristic = _optional_non_empty_cli_value(args.phase1_heuristic, "phase1_heuristic")
+    selected_source_count = sum(bool(value) for value in (phase1_plan, phase1_checkpoint, phase1_heuristic))
+    if selected_source_count != 1:
+        print(
+            "[ERROR][main._load_or_build_phase1_plan_for_full_flow] "
+            "cause=phase1_source_cardinality "
+            f"phase1_plan={phase1_plan} phase1_checkpoint={phase1_checkpoint} "
+            f"phase1_heuristic={phase1_heuristic}"
+        )
+        raise RuntimeError("Provide exactly one of --phase1-plan, --phase1-checkpoint, or --phase1-heuristic")
+
+    if phase1_plan:
+        phase1_plan_path = Path(phase1_plan)
+        if not phase1_plan_path.exists():
+            print(
+                "[ERROR][main._load_or_build_phase1_plan_for_full_flow] "
+                f"cause=missing_phase1_plan path={phase1_plan_path}"
+            )
+            raise FileNotFoundError(f"Phase 1 plan does not exist: {phase1_plan_path}")
+        with phase1_plan_path.open("r", encoding="utf-8") as file:
+            loaded_plan = json.load(file)
+        _validate_phase1_plan_execution_contract(
+            loaded_plan,
+            bay_ids=bay_ids,
+            bay_capacity_weights=bay_capacity_weights,
+            long_cut_hard_mask=long_cut_hard_mask,
+        )
+        print(
+            "[CHECK][main._load_or_build_phase1_plan_for_full_flow] "
+            f"mode=plan_file path={phase1_plan_path}"
+        )
+        return loaded_plan
+
+    jobs = _scenario_jobs_by_id(scenario)
+    if not bay_ids:
+        print("[ERROR][main._load_or_build_phase1_plan_for_full_flow] cause=no_phase1_bay_ids")
+        raise RuntimeError("--phase1-bay-ids is required when building a Phase 1 plan")
+    if phase1_heuristic:
+        candidate = run_phase1_heuristic_candidate(
+            jobs=jobs,
+            bay_ids=bay_ids,
+            algorithm=phase1_heuristic,
+            long_cut_hard_mask=long_cut_hard_mask,
+            bay_capacity_weights=bay_capacity_weights,
+        )
+        plan = candidate_to_phase1_plan(
+            jobs=jobs,
+            bay_ids=bay_ids,
+            candidate=candidate,
+            score_mode=args.phase1_score_mode,
+            long_cut_hard_mask=long_cut_hard_mask,
+        )
+        plan_dir = Path(args.output_dir) / "phase1_heuristic_plan"
+        plan_paths = write_phase1_bay_plan(plan, plan_dir)
+        print(
+            "[CHECK][main._load_or_build_phase1_plan_for_full_flow] "
+            f"mode=heuristic source={phase1_heuristic} assignment_count={len(candidate.assignments)} "
+            f"plan_json={plan_paths['json']}"
+        )
+        return plan
+    if args.phase1_samples <= 0:
+        print(
+            "[ERROR][main._load_or_build_phase1_plan_for_full_flow] "
+            f"cause=non_positive_phase1_samples value={args.phase1_samples}"
+        )
+        raise RuntimeError("--phase1-samples must be positive")
+    if args.phase1_temperature <= 0:
+        print(
+            "[ERROR][main._load_or_build_phase1_plan_for_full_flow] "
+            f"cause=non_positive_phase1_temperature value={args.phase1_temperature}"
+        )
+        raise RuntimeError("--phase1-temperature must be positive")
+
+    model = load_phase1_pair_pointer_checkpoint(phase1_checkpoint)
+    candidates = []
+    if args.phase1_samples == 1:
+        candidates.append(
+            run_phase1_pair_policy_rollout(
+                jobs=jobs,
+                bay_ids=bay_ids,
+                model=model,
+                temperature=args.phase1_temperature,
+                seed=args.seed,
+                source="phase1_agent_greedy",
+                    selection="greedy",
+                    long_cut_hard_mask=long_cut_hard_mask,
+                    bay_capacity_weights=bay_capacity_weights,
+            )
+        )
+    else:
+        for sample_index in range(args.phase1_samples):
+            sample_number = sample_index + 1
+            if sample_number == 1 or sample_number % 64 == 0 or sample_number == args.phase1_samples:
+                print(
+                    "[CHECK][main._load_or_build_phase1_plan_for_full_flow.sample_progress] "
+                    f"sample={sample_number}/{args.phase1_samples}",
+                    flush=True,
+                )
+            candidates.append(
+                run_phase1_pair_policy_rollout(
+                    jobs=jobs,
+                    bay_ids=bay_ids,
+                    model=model,
+                    temperature=args.phase1_temperature,
+                    seed=args.seed + sample_index,
+                    source=f"phase1_agent_sample_{sample_number}",
+                    selection="sample",
+                    long_cut_hard_mask=long_cut_hard_mask,
+                    bay_capacity_weights=bay_capacity_weights,
+                )
+            )
+    best = min(candidates, key=lambda candidate: _score_bay_loads(candidate.bay_loads, args.phase1_score_mode))
+    plan = candidate_to_phase1_plan(
+        jobs=jobs,
+        bay_ids=bay_ids,
+        candidate=best,
+        score_mode=args.phase1_score_mode,
+        long_cut_hard_mask=long_cut_hard_mask,
+    )
+    plan_dir = Path(args.output_dir) / "phase1_agent_plan"
+    plan_paths = write_phase1_bay_plan(plan, plan_dir)
+    print(
+        "[CHECK][main._load_or_build_phase1_plan_for_full_flow] "
+        f"mode=checkpoint source={best.source} assignment_count={len(best.assignments)} "
+        f"plan_json={plan_paths['json']}"
+    )
+    return plan
+
+
+def _phase1_bay_capacity_weights_from_scenario(
+    scenario: Mapping[str, Any],
+    bay_ids: Sequence[str],
+) -> dict[str, float]:
+    """Scenario의 enabled machine 수로 Phase 1 Bay 용량비를 계산한다."""
+
+    machines = scenario.get("machines")
+    if not isinstance(machines, list) or not machines:
+        print("[ERROR][main._phase1_bay_capacity_weights_from_scenario] cause=no_machines")
+        raise RuntimeError("full-flow scenario requires machines")
+    normalized_bays = tuple(str(bay_id) for bay_id in bay_ids)
+    weights = {bay_id: 0.0 for bay_id in normalized_bays}
+    for index, machine in enumerate(machines):
+        if not isinstance(machine, Mapping):
+            print(
+                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
+                f"cause=invalid_machine_row index={index} type={type(machine).__name__}"
+            )
+            raise RuntimeError(f"invalid full-flow machine row at index={index}")
+        enabled = machine.get("enabled")
+        if not isinstance(enabled, bool):
+            print(
+                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
+                f"cause=non_boolean_enabled index={index} value={enabled}"
+            )
+            raise RuntimeError(f"full-flow machine enabled must be boolean at index={index}")
+        bay_id = str(machine.get("bay_id") or "").strip()
+        if not bay_id:
+            print(
+                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
+                f"cause=missing_bay_id index={index}"
+            )
+            raise RuntimeError(f"full-flow machine bay_id is missing at index={index}")
+        if enabled and bay_id in weights:
+            weights[bay_id] += 1.0
+    missing = sorted(bay_id for bay_id, value in weights.items() if value <= 0)
+    if missing:
+        print(
+            "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
+            f"cause=bay_without_enabled_machine bay_ids={missing}"
+        )
+        raise RuntimeError(f"full-flow selected Bays have no enabled machines: {missing}")
+    return weights
+
+
+def _validate_phase1_plan_execution_contract(
+    plan: Mapping[str, Any],
+    *,
+    bay_ids: Sequence[str],
+    bay_capacity_weights: Mapping[str, int | float],
+    long_cut_hard_mask: bool,
+) -> None:
+    """외부 Phase 1 plan이 현재 full-flow 계약과 같은지 검증한다."""
+
+    plan_weights = plan.get("bay_capacity_weights")
+    expected_weights = {str(key): float(value) for key, value in bay_capacity_weights.items()}
+    if not isinstance(plan_weights, Mapping):
+        print("[ERROR][main._validate_phase1_plan_execution_contract] cause=missing_capacity_weights")
+        raise RuntimeError("Phase 1 plan is missing bay_capacity_weights")
+    normalized_plan_weights = {str(key): float(value) for key, value in plan_weights.items()}
+    if set(str(value) for value in bay_ids) != set(expected_weights) or normalized_plan_weights != expected_weights:
+        print(
+            "[ERROR][main._validate_phase1_plan_execution_contract] "
+            f"cause=capacity_weight_mismatch expected={expected_weights} actual={normalized_plan_weights}"
+        )
+        raise RuntimeError("Phase 1 plan capacity weights differ from full-flow")
+    plan_mask = plan.get("long_cut_hard_mask")
+    if not isinstance(plan_mask, bool):
+        print("[ERROR][main._validate_phase1_plan_execution_contract] cause=missing_long_cut_mask")
+        raise RuntimeError("Phase 1 plan is missing long_cut_hard_mask")
+    if plan_mask is not bool(long_cut_hard_mask):
+        print(
+            "[ERROR][main._validate_phase1_plan_execution_contract] "
+            f"cause=long_cut_mask_mismatch expected={bool(long_cut_hard_mask)} actual={plan_mask}"
+        )
+        raise RuntimeError("Phase 1 plan long-cut mask differs from full-flow")
+
+
+def _load_phase2_full_flow_model(
+    checkpoint: str | None,
+    context: str,
+    conflicting_heuristic: str | None,
+):
+    checkpoint_path = _optional_non_empty_cli_value(checkpoint, f"{context}_checkpoint")
+    if checkpoint_path is None:
+        return None
+    if conflicting_heuristic is not None:
+        print(
+            "[ERROR][main._load_phase2_full_flow_model] "
+            f"cause=checkpoint_heuristic_conflict context={context} "
+            f"checkpoint={checkpoint_path} heuristic={conflicting_heuristic}"
+        )
+        raise RuntimeError(f"Choose either {context} checkpoint or heuristic, not both")
+    return load_phase2_set_pointer_checkpoint(
+        checkpoint_path=checkpoint_path,
+        context=context,
+    )
+
+
+def _resolve_phase2_full_flow_run_spec(
+    *,
+    args: argparse.Namespace,
+    checkpoint_spec: Mapping[str, Any] | None,
+    constraint_profile: object,
+    phase1_bay_capacity_weights: Mapping[str, int | float],
+    phase1_long_cut_hard_mask: bool,
+    heuristic: str | None,
+) -> dict[str, Any]:
+    """Full-flow의 평가 조건을 checkpoint 계약과 동일하게 확정한다."""
+
+    score_mode = str(
+        getattr(
+            args,
+            "phase2_score_mode",
+            checkpoint_spec["score_mode"] if checkpoint_spec is not None else "raw",
+        )
+    )
+    action_pool_limit = getattr(
+        args,
+        "action_pool_limit",
+        checkpoint_spec["action_pool_limit"] if checkpoint_spec is not None else None,
+    )
+    max_wo_count = int(
+        getattr(
+            args,
+            "max_wo_count",
+            checkpoint_spec["max_wo_count"] if checkpoint_spec is not None else 3,
+        )
+    )
+    max_length_sum = float(
+        getattr(
+            args,
+            "max_length_sum",
+            checkpoint_spec["max_length_sum"] if checkpoint_spec is not None else 55_000.0,
+        )
+    )
+    if score_mode == "raw":
+        score_fields = PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES
+    elif score_mode == "normalized":
+        score_fields = PHASE2_BATCH_MACHINE_NORMALIZED_SCORE_FIELD_NAMES
+    else:
+        print(
+            "[ERROR][main._resolve_phase2_full_flow_run_spec] "
+            f"cause=invalid_score_mode value={score_mode}"
+        )
+        raise RuntimeError(f"invalid full-flow Phase 2 score mode: {score_mode}")
+    if checkpoint_spec is None:
+        if not heuristic:
+            print("[ERROR][main._resolve_phase2_full_flow_run_spec] cause=no_checkpoint_or_heuristic")
+            raise RuntimeError("full-flow requires a Phase 2 checkpoint or heuristic")
+        heuristic_algorithms = (heuristic,)
+        train_rollout_samples = 0
+        validation_rollout_samples = 0
+    else:
+        heuristic_algorithms = tuple(checkpoint_spec["heuristic_algorithms"])
+        train_rollout_samples = int(checkpoint_spec["train_rollout_samples"])
+        validation_rollout_samples = int(checkpoint_spec["validation_rollout_samples"])
+    requested = build_phase2_run_spec(
+        score_mode=score_mode,
+        score_fields=score_fields,
+        action_pool_limit=action_pool_limit,
+        max_wo_count=max_wo_count,
+        max_length_sum=max_length_sum,
+        phase1_bay_capacity_weights=phase1_bay_capacity_weights,
+        phase1_long_cut_hard_mask=phase1_long_cut_hard_mask,
+        constraint_profile=constraint_profile,
+        heuristic_algorithms=heuristic_algorithms,
+        train_rollout_samples=train_rollout_samples,
+        validation_rollout_samples=validation_rollout_samples,
+    )
+    if checkpoint_spec is not None:
+        require_matching_phase2_run_spec(
+            checkpoint_spec,
+            requested,
+            context="full_flow",
+        )
+    return requested
+
+
+def _require_matching_phase1_feedback_contract(
+    phase1_feedback_contract: Mapping[str, Any],
+    selected_phase2_contract: Mapping[str, Any],
+) -> None:
+    """Feedback로 학습한 Phase 1이 같은 frozen Phase 2와 연결되는지 검증한다."""
+
+    if dict(phase1_feedback_contract) != dict(selected_phase2_contract):
+        differing = sorted(
+            key
+            for key in set(phase1_feedback_contract) | set(selected_phase2_contract)
+            if phase1_feedback_contract.get(key) != selected_phase2_contract.get(key)
+        )
+        print(
+            "[ERROR][main._require_matching_phase1_feedback_contract] "
+            f"cause=phase_checkpoint_contract_mismatch fields={differing}"
+        )
+        raise RuntimeError(
+            f"feedback-trained Phase 1 requires its exact frozen Phase 2 checkpoint: {differing}"
+        )
+
+
+def _scenario_jobs_by_id(scenario: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    jobs = scenario.get("jobs")
+    if not isinstance(jobs, list) or not jobs:
+        print("[ERROR][main._scenario_jobs_by_id] cause=no_jobs")
+        raise RuntimeError("scenario requires non-empty jobs")
+    result: dict[str, Mapping[str, Any]] = {}
+    for index, row in enumerate(jobs):
+        if not isinstance(row, Mapping):
+            print(
+                "[ERROR][main._scenario_jobs_by_id] "
+                f"cause=invalid_job_row index={index} row_type={type(row).__name__}"
+            )
+            raise RuntimeError(f"invalid scenario job row at index={index}")
+        job_id = str(row.get("job_id") or "").strip()
+        if not job_id:
+            print(f"[ERROR][main._scenario_jobs_by_id] cause=missing_job_id index={index}")
+            raise RuntimeError(f"scenario job missing job_id at index={index}")
+        if job_id in result:
+            print(f"[ERROR][main._scenario_jobs_by_id] cause=duplicate_job_id job_id={job_id}")
+            raise RuntimeError(f"duplicate scenario job_id: {job_id}")
+        result[job_id] = row
+    return result
 
 
 def command_apply_phase1_to_phase2(args: argparse.Namespace) -> None:
@@ -2020,7 +3167,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--score-mode",
         choices=["steel_first"],
         default="steel_first",
-        help="Fixed objective: steel gap, cut gap, bevel gap, long-cut Bay24 count",
+        help="Fixed objective: capacity-normalized steel gap, cut gap, bevel gap",
     )
     phase1_train_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     phase1_train_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
@@ -2048,12 +3195,50 @@ def build_parser() -> argparse.ArgumentParser:
     phase1_train_pair_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per sampled episode")
     phase1_train_pair_self_labeling_parser.add_argument("--noise-ratio", type=float, default=0.03, help="Bootstrap jitter ratio")
     phase1_train_pair_self_labeling_parser.add_argument(
+        "--hard-case-ratio",
+        type=float,
+        default=0.0,
+        help="Probability that a sampled synthetic episode becomes a hard steel-cut decorrelation case.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--hard-case-mode",
+        choices=["none", "cut_shuffle"],
+        default="cut_shuffle",
+        help="Hard-case generator mode. Ratio 0 keeps the original bootstrap+jitter behavior.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--hard-case-target-corr",
+        type=float,
+        default=0.85,
+        help="Target maximum Pearson corr(STL_QTY,CUT_LTH) for cut_shuffle hard cases.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--hard-case-max-attempts",
+        type=int,
+        default=20,
+        help="Maximum cut-shuffle attempts before failing a hard-case episode.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--validation-hard-case-ratio",
+        type=float,
+        default=None,
+        help="Synthetic validation hard-case ratio. Default follows --hard-case-ratio; actual_8days is unchanged.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
         "--output-dir",
         default="output/phase1_pair_self_labeling",
         help="Directory for checkpoint and metrics",
     )
     phase1_train_pair_self_labeling_parser.add_argument("--episodes", type=int, default=20, help="Self-labeling episodes")
     phase1_train_pair_self_labeling_parser.add_argument("--rollout-samples", type=int, default=4, help="Current-policy sampled candidates per episode")
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--rollout-samples_validation",
+        "--rollout-samples-validation",
+        dest="validation_rollout_samples",
+        type=int,
+        default=None,
+        help="Current-policy sampled candidates per validation problem. Default follows --rollout-samples.",
+    )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--heuristic-algorithms",
         default="all8",
@@ -2063,12 +3248,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--score-mode",
         choices=["steel_first"],
         default="steel_first",
-        help="Fixed objective: steel gap, cut gap, bevel gap, long-cut Bay24 count",
+        help="Fixed objective: capacity-normalized steel gap, cut gap, bevel gap",
     )
     phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     phase1_train_pair_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
     phase1_train_pair_self_labeling_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     phase1_train_pair_self_labeling_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
+    phase1_train_pair_self_labeling_parser.add_argument("--device", default="cpu", help="Torch device for Phase 1 pair training: cpu, cuda, or cuda:0")
     phase1_train_pair_self_labeling_parser.add_argument("--checkpoint-every", type=int, default=100, help="Save periodic checkpoint every N episodes")
     phase1_train_pair_self_labeling_parser.add_argument("--validation-every", type=int, default=100, help="Run holdout validation every N episodes")
     phase1_train_pair_self_labeling_parser.add_argument("--validation-episodes", type=int, default=20, help="Holdout validation episodes per validation run")
@@ -2078,9 +3264,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume pair self-labeling from explicit checkpoint path or 'latest' in output-dir/checkpoints",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
-        "--actual-validation-wo-xlsx",
-        default="input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx",
-        help="W/O Excel/CSV path used for fixed actual Phase 1 validation",
+        "--actual-validation-candidate-xlsx",
+        default="착수일 후보 블록.xlsx",
+        help="Candidate block workbook used for fixed actual_8days Phase 1 validation.",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--actual-validation-workdays",
@@ -2090,25 +3276,12 @@ def build_parser() -> argparse.ArgumentParser:
     phase1_train_pair_self_labeling_parser.add_argument(
         "--enable-phase2-feedback-score",
         action="store_true",
-        help="Prepend Phase 2 feasibility feedback score to the pair self-labeling objective.",
+        help="Prepend the frozen Phase 2 best-of-K schedule score to the Phase 1 objective.",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
-        "--phase2-wide-bth-threshold",
-        type=float,
-        default=DEFAULT_WIDE_BTH_THRESHOLD,
-        help="BTH/plate_width threshold for wide-plate Phase 2 feedback.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--phase2-batch-max-wo-count",
-        type=int,
-        default=DEFAULT_BATCH_MAX_WO_COUNT,
-        help="Estimated Phase 2 batch W/O count limit used by feedback scoring.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--phase2-batch-max-length-sum",
-        type=float,
-        default=DEFAULT_BATCH_MAX_LENGTH_SUM,
-        help="Estimated Phase 2 batch LTH sum limit used by feedback scoring.",
+        "--phase2-feedback-checkpoint",
+        default="",
+        help="Frozen Phase 2 set-pointer checkpoint. Required with --enable-phase2-feedback-score.",
     )
     phase1_train_pair_self_labeling_parser.set_defaults(func=command_phase1_train_pair_self_labeling)
 
@@ -2154,6 +3327,239 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory for episode dataset files",
     )
     phase1_episode_dataset_parser.set_defaults(func=command_phase1_build_episode_dataset)
+
+    phase2_train_graph_parser = subparsers.add_parser(
+        "phase2-train-batch-machine-self-labeling",
+        parents=[common_parser],
+        help="Train merged Phase 2 policy that selects W/O batch and machine together",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--scenario-path",
+        default=None,
+        help="Optional source scenario override. Default follows config/data-source loader.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-heuristic",
+        default=None,
+        help="Phase 1 heuristic run in memory for every merged Phase 2 training episode. Default is bevel_first_balanced when --phase1-checkpoint is absent.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-checkpoint",
+        default=None,
+        help="Frozen Phase 1 pair-pointer checkpoint or output directory. Replaces --phase1-heuristic during Phase 2 training.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-bay-ids",
+        default=None,
+        help="Comma-separated Bay IDs for Phase 1 heuristic. Default uses enabled machine Bays.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-samples",
+        type=int,
+        default=32,
+        help="Frozen Phase 1 checkpoint best-of-N samples used to build each Phase 2 episode's block-to-Bay assignment.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-temperature",
+        type=float,
+        default=1.0,
+        help="Frozen Phase 1 checkpoint sampling temperature for --phase1-samples > 1.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-score-mode",
+        choices=["steel_first"],
+        default="steel_first",
+        help="Phase 1 checkpoint candidate score mode.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase1-no-long-cut-hard-mask",
+        action="store_true",
+        help="Disable Phase 1 long-cut Bay 24 hard mask during upstream heuristic generation.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--output-dir",
+        default="output/phase2_batch_machine_self_labeling",
+        help="Directory for Phase 2 checkpoint and metrics.",
+    )
+    phase2_train_graph_parser.add_argument("--episodes", type=int, default=10, help="Self-labeling training episodes")
+    phase2_train_graph_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
+    phase2_train_graph_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    phase2_train_graph_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
+    phase2_train_graph_parser.add_argument("--device", default="cpu", help="Torch device for merged Phase 2 training: cpu, cuda, or cuda:0")
+    phase2_train_graph_parser.add_argument(
+        "--heuristic-algorithms",
+        default=",".join(PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK),
+        help="Comma-separated merged Phase 2 candidate-bank heuristics.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--phase2-score-mode",
+        choices=["raw", "normalized"],
+        default="raw",
+        help="Teacher score mode for merged Phase 2 candidate ranking.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--rollout-samples",
+        type=int,
+        default=1,
+        help="Number of stochastic agent assignment candidates per episode.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--rollout-samples_validation",
+        "--rollout-samples-validation",
+        dest="validation_rollout_samples",
+        type=int,
+        default=None,
+        help="Number of stochastic agent candidates per validation problem. Default follows --rollout-samples.",
+    )
+    phase2_train_graph_parser.add_argument("--validation-every", type=int, default=100, help="Run Phase 2 validation every N episodes")
+    phase2_train_graph_parser.add_argument("--validation-episodes", type=int, default=20, help="Holdout Phase 2 validation episodes per validation run")
+    phase2_train_graph_parser.add_argument("--checkpoint-every", type=int, default=0, help="Save periodic Phase 2 checkpoint every N episodes. 0 disables periodic checkpoints.")
+    phase2_train_graph_parser.add_argument(
+        "--resume-checkpoint",
+        default=None,
+        help="Resume merged Phase 2 training from explicit checkpoint path or 'latest' in output-dir/checkpoints.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--write-candidate-summary",
+        action="store_true",
+        help="Write per-training-candidate audit rows. Disabled by default for long training speed.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--synthetic-source",
+        choices=["report_formula", "config"],
+        default="report_formula",
+        help="Merged Phase 2 training episode source. report_formula uses the PDF fixed formulas; config reuses config jobs.",
+    )
+    phase2_train_graph_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum synthetic blocks per report-formula episode")
+    phase2_train_graph_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum synthetic blocks per report-formula episode")
+    phase2_train_graph_parser.add_argument("--gyel", default="NP", help="Synthetic series/family label")
+    phase2_train_graph_parser.add_argument("--max-wo-count", type=int, default=3, help="Maximum W/O count per machine batch")
+    phase2_train_graph_parser.add_argument("--max-length-sum", type=float, default=55000.0, help="Maximum LTH sum per machine batch")
+    phase2_train_graph_parser.add_argument(
+        "--action-pool-limit",
+        type=_parse_optional_positive_int,
+        default=None,
+        help="Top W/O count considered when selecting the next W/O for an open batch. Use None/all/full for all feasible W/O.",
+    )
+    phase2_train_graph_parser.set_defaults(func=command_phase2_train_batch_machine_self_labeling)
+
+    phase2_run_full_parser = subparsers.add_parser(
+        "phase2-run-full-workflow",
+        parents=[common_parser],
+        help="Run merged Phase 2 batch-machine schedule export",
+    )
+    phase2_run_full_parser.add_argument(
+        "--scenario-path",
+        default=None,
+        help="Optional source scenario override. Default follows config/data-source loader.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-plan",
+        default=None,
+        help="Phase 1 plan JSON path. Phase 2 candidates depend on block-to-Bay assignments.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-checkpoint",
+        default=None,
+        help="Optional Phase 1 pair-pointer checkpoint. Mutually exclusive with --phase1-plan.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-heuristic",
+        default=None,
+        help="Optional fixed Phase 1 heuristic, e.g. mbf_ppb. Mutually exclusive with --phase1-plan/--phase1-checkpoint.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-bay-ids",
+        default="22,23,24",
+        help="Comma-separated Bay IDs used when --phase1-checkpoint builds the upstream plan.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-samples",
+        type=int,
+        default=1,
+        help="Phase 1 checkpoint inference samples. 1 uses greedy; values >1 choose best sampled plan.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-temperature",
+        type=float,
+        default=1.0,
+        help="Phase 1 sampling temperature when --phase1-samples is greater than 1.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-score-mode",
+        choices=["steel_first"],
+        default="steel_first",
+        help="Phase 1 checkpoint candidate score mode.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase1-no-long-cut-hard-mask",
+        action="store_true",
+        help="Evaluation-only ablation: disable Phase 1 long-cut Bay 24 hard mask.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--assignment-mode",
+        default="allowed_bay_ids",
+        choices=["allowed_bay_ids", "cut_bay"],
+        help="How to inject Phase 1 Bay assignments before Phase 2.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--batch-machine-heuristic",
+        default=None,
+        help="Optional fixed merged Phase 2 heuristic. Default is min_makespan only when no checkpoint is given.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--batch-machine-checkpoint",
+        default=None,
+        help="Optional merged Phase 2 batch-machine policy checkpoint. Mutually exclusive with --batch-machine-heuristic.",
+    )
+    phase2_run_full_parser.add_argument("--seed", type=int, default=0, help="Inference random seed")
+    phase2_run_full_parser.add_argument(
+        "--max-wo-count",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Maximum W/O count per batch. A checkpoint run inherits this from RunSpec.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--max-length-sum",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Maximum LTH sum per batch. A checkpoint run inherits this from RunSpec.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--action-pool-limit",
+        type=_parse_optional_positive_int,
+        default=argparse.SUPPRESS,
+        help="Sequential W/O candidate limit. A checkpoint run inherits this from RunSpec.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--phase2-score-mode",
+        choices=["raw", "normalized"],
+        default=argparse.SUPPRESS,
+        help="Phase 2 score mode. A checkpoint run inherits this from RunSpec.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--synthetic-source",
+        choices=["config", "report_formula"],
+        default="config",
+        help="Full-flow job source. report_formula replaces config jobs with PDF fixed-formula W/O rows.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--synthetic-blocks",
+        type=int,
+        default=30,
+        help="Block count for --synthetic-source report_formula.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--gyel",
+        default="NP",
+        help="Synthetic series label for --synthetic-source report_formula.",
+    )
+    phase2_run_full_parser.add_argument(
+        "--output-dir",
+        default="output/phase2_full_workflow",
+        help="Directory for Phase 2 CSV/debug outputs.",
+    )
+    phase2_run_full_parser.set_defaults(func=command_phase2_run_full_workflow)
 
     apply_phase1_parser = subparsers.add_parser(
         "apply-phase1-to-phase2",
@@ -2588,16 +3994,6 @@ def build_parser() -> argparse.ArgumentParser:
     actual_range_parser.add_argument("--output-scenario", default="output/generated/test_slices/np_actual_start_range.yaml", help="Output scenario path")
     # LINE-BY-LINE: `actual_range_parser.set_defaults(func`에 `command_select_actual_range)` 결과를 저장합니다. 의미/사용: `set_defaults(func` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     actual_range_parser.set_defaults(func=command_select_actual_range)
-
-    # LINE-BY-LINE: `train_parser`에 `subparsers.add_parser("train", parents=[common_parser], help="Run training")` 결과를 저장합니다. 의미/사용: `train_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
-    train_parser = subparsers.add_parser("train", parents=[common_parser], help="Run training")
-    # LINE-BY-LINE: `train_parser.set_defaults(func`에 `lambda args: run_train(load_config(args.config)))` 결과를 저장합니다. 의미/사용: `set_defaults(func` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
-    train_parser.set_defaults(func=lambda args: run_train(load_config(args.config)))
-
-    # LINE-BY-LINE: `eval_parser`에 `subparsers.add_parser("eval", parents=[common_parser], help="Run evaluation")` 결과를 저장합니다. 의미/사용: `eval_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
-    eval_parser = subparsers.add_parser("eval", parents=[common_parser], help="Run evaluation")
-    # LINE-BY-LINE: `eval_parser.set_defaults(func`에 `lambda args: run_eval(load_config(args.config)))` 결과를 저장합니다. 의미/사용: `set_defaults(func` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
-    eval_parser.set_defaults(func=lambda args: run_eval(load_config(args.config)))
 
     # LINE-BY-LINE: 호출자에게 `parser`를 반환합니다. 사용: 상위 함수가 이 결과로 다음 계산/검증/출력을 진행합니다.
     return parser

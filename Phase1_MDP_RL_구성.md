@@ -151,8 +151,8 @@ score_bays(bay_features, env_features, selected_block_features)
 구현 파일:
 
 ```text
-Train/network/phase1_pointer.py
-Train/algorithm/phase1_imitation.py
+Phase1/pointer_policy.py
+Phase1/imitation.py
 ```
 
 학습 루프는 `phase1_action_table.jsonl`을 읽어서 `selected_action_index`에 대해 cross-entropy를 건다. 입력 feature는 trainer 내부에서 mean/std 정규화하고, 정규화 파라미터는 checkpoint metadata에 저장한다.

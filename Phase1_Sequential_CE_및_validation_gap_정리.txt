@@ -1,0 +1,121 @@
+Phase 1/2/3 self-labeling 학습 구조와 validation steel gap 점검 정리
+
+1. self-labeling Cross Entropy 학습 구조
+
+- 한 episode는 하나의 complete assignment sequence를 만든다.
+- 매 step에서 환경은 현재 가능한 candidate action 목록을 만든다.
+- Phase 1 현재 action은 (block, Bay) pair다.
+- Phase 2 현재 action은 (W/O, Machine) pair다.
+- Phase 3 현재 action은 batch/sequence candidate다.
+- 모델은 step마다 candidate feature matrix와 env feature vector를 받아 각 candidate logit을 낸다.
+- teacher는 고정 정답이 아니라 candidate bank에서 고른 best complete solution이다.
+- candidate bank는 휴리스틱 후보와 agent rollout 후보를 포함한다.
+- best complete solution을 고른 뒤, 그 solution이 실제로 선택한 step별 candidate index를 Cross Entropy target으로 사용한다.
+
+수식 형태:
+
+- step t 후보: A_t = {a_1, ..., a_k}
+- 모델 점수: z_t = policy(candidate_features_t, env_features_t)
+- teacher 선택 index: y_t
+- step loss: CE(z_t, y_t)
+- episode loss: mean_t CE(z_t, y_t)
+
+2. 일반 분류 Cross Entropy와 다른 점
+
+- 일반 분류는 class 개수가 고정인 경우가 많다.
+- 현재 문제는 step마다 candidate 수가 달라진다.
+- 그래도 Cross Entropy는 "현재 후보 목록 안에서 선택된 index"를 맞추는 방식이라 사용할 수 있다.
+- action을 하나 선택하면 Bay/Machine load가 바뀌므로 다음 step의 state와 candidate가 달라진다.
+- 따라서 학습 label은 단일 class label이 아니라 "상태 변화가 포함된 선택 sequence"다.
+
+3. Phase 2 order ambiguity 문제
+
+- Phase 2는 최종적으로 W/O -> Machine assignment가 중요하다.
+- 같은 최종 assignment라도 선택 순서는 여러 개가 가능하다.
+- 예: W/O A를 먼저 배정하든 W/O B를 먼저 배정하든 최종 설비 배정이 같을 수 있다.
+- 현재 pair-action CE는 teacher가 만든 한 sequence만 정답으로 본다.
+- 그래서 동등한 다른 순서를 선택한 agent 행동도 loss에서는 틀린 것으로 볼 수 있다.
+- 이 문제는 현재 학습이 완전히 틀렸다는 뜻은 아니다.
+- 다만 Phase 2가 "순서보다 최종 배정"이 중요한 문제라면 fixed W/O order + Machine 선택 방식이 더 안정적일 수 있다.
+
+권장 구조:
+
+- Phase 1은 현재처럼 (Block, Bay) pair-action 유지 가능.
+- Phase 2는 비교 실험이 필요하다.
+  1) pair-action: (W/O, Machine)을 agent가 직접 선택.
+  2) fixed W/O order: W/O 순서는 휴리스틱/고정 규칙으로 두고 agent는 Machine만 선택.
+- Phase 3는 batch와 sequence 자체가 핵심이므로 sequential policy가 자연스럽다.
+
+4. validation_summary.csv의 steel gap 1~2 현상
+
+확인 파일:
+
+- output/phase1_pair_v8_candidate_actual8_ppb_lcp6/validation_summary.csv
+- output/phase1_pair_v8_candidate_actual8_ppb_lcp6/validation_candidate_summary.csv
+
+관찰:
+
+- latest train episode 1200 기준 actual_8days는 8문제다.
+- validation_summary.csv에서 agent_greedy가 actual_8days 8문제 모두 rank 1로 기록되어 있다.
+- score_0 steel gap이 20260408 기준 1.0처럼 매우 작게 나온다.
+- validation_candidate_summary.csv의 agent_greedy Bay raw 강재합 예시는 다음과 같다.
+  - 20260408: Bay22=81, Bay23=82, Bay24=81
+  - raw max-min gap = 1
+
+문제:
+
+- Phase 1 목적은 Bay별 설비 수를 반영한 부하평준화다.
+- Bay 22/23/24 설비 수가 4/3/4라면 raw 강재합을 같게 맞추는 것이 아니라 설비 1대당 부하를 맞춰야 한다.
+- 예를 들어 총 강재수량 110이면 이상적인 비율은 4:3:4다.
+- 즉 40/30/40은 per-capacity로 10/10/10이므로 gap 0이다.
+- 81/82/81은 raw gap은 1이지만 per-capacity는 20.25/27.33/20.25라서 gap 7.08이다.
+
+원인:
+
+- scoring 함수 _multi_objective_load_score 자체는 capacity_weight를 사용하도록 구현되어 있다.
+- 하지만 validation candidate의 bay_loads_json에는 capacity_weight가 빠져 있었다.
+- _capacity_normalized_value는 row.get("capacity_weight", 1.0)을 사용하므로, capacity_weight가 없으면 모든 Bay를 동일 capacity 1로 보고 raw gap을 계산한다.
+- 따라서 기존 validation_summary.csv의 actual_8days rank와 score_0은 설비 수 보정 기준이 아니라 raw Bay 합계 기준으로 계산된 결과다.
+- 같은 이유로 기존 v8 학습 중 self-label teacher를 고르는 최종 score도 raw Bay 합계 기준으로 평가되었을 가능성이 높다.
+- 휴리스틱이 내부 Bay 선택을 할 때는 capacity_weight를 쓰더라도, 후보 bank에서 best 후보를 고르는 최종 비교 단계가 capacity_weight를 잃으면 학습 label이 달라질 수 있다.
+
+수정:
+
+- Phase1/self_labeling.py의 _plain_bay_loads에 capacity_weight를 보존하도록 수정했다.
+- Phase1/pair_self_labeling.py의 _plain_bay_loads에 capacity_weight를 보존하도록 수정했다.
+- 회귀 테스트를 추가했다.
+- 새로 학습/validation을 실행하면 score_0은 capacity-normalized steel gap으로 계산된다.
+
+5. 기존 CSV를 capacity 기준으로 다시 읽었을 때의 해석
+
+기존 CSV는 raw score로 저장되어 있으므로 그대로 발표용으로 쓰면 안 된다.
+같은 bay_loads_json을 설비 수 4/3/4로 재계산하면 다음 경향이 나온다.
+
+- ACTUAL_20260331: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+- ACTUAL_20260407: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+- ACTUAL_20260408: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+- ACTUAL_20260413: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+- ACTUAL_20260414: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+- ACTUAL_20260415: raw rank 1은 agent_greedy, capacity 기준 rank 1은 bevel_first_balanced
+- ACTUAL_20260424: raw rank 1은 agent_greedy, capacity 기준 rank 1은 bevel_first_balanced
+- ACTUAL_20260429: raw rank 1은 agent_greedy, capacity 기준 rank 1은 steel_first_balanced
+
+재계산 CSV:
+
+- output/phase1_pair_v8_candidate_actual8_ppb_lcp6/validation_candidate_summary_capacity_reaudit.csv
+
+결론:
+
+- steel gap 1~2는 "학습이 매우 좋아졌다"는 뜻이 아니다.
+- 기존 validation CSV가 capacity_weight를 잃어서 raw gap으로 평가된 결과다.
+- 현업 기준처럼 설비 수를 반영하려면 기존 output/phase1_pair_v8_candidate_actual8_ppb_lcp6 결과는 재생성해야 한다.
+- 기존 v8 checkpoint도 capacity 기준 학습 결과로 보기 어렵기 때문에 v9 output으로 재학습하는 것이 맞다.
+
+6. 다음에 해야 할 일
+
+- phase1_pair_v8_candidate_actual8_ppb_lcp6 또는 새 output_dir로 Phase 1 validation을 다시 실행한다.
+- 권장 output_dir는 output/phase1_pair_v9_capacity_actual8_ppb_lcp6 이다.
+- 새 validation_candidate_summary.csv에서 bay_loads_json에 capacity_weight가 포함되는지 확인한다.
+- actual_8days 8문제의 score_0이 raw gap이 아니라 per-capacity gap인지 재확인한다.
+- validation plot의 y축 이름을 "Capacity-normalized steel gap"으로 바꿔 오해를 줄인다.
+- Phase 2는 pair-action과 fixed W/O order 방식을 비교하는 실험을 추가한다.

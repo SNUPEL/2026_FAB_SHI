@@ -1,0 +1,267 @@
+GNN Phase별 적용 판단 근거
+작성 목적: Phase 1/2/3 중 어디에 GNN을 적용하는 것이 타당한지 판단하기 위한 근거 정리
+
+1. 결론
+
+현재 기준에서는 Phase 1에 full message-passing GNN을 바로 쓰는 것은 비추천이다.
+Phase 1은 graph state 자체는 유지하되, candidate edge MLP scorer가 더 단순하고 설명 가능하다.
+
+GNN을 우선 검토할 구간은 Phase 2와 Phase 3이다.
+Phase 2는 W/O-Machine-Bay 관계가 실제 제약과 선호도를 담을 가능성이 크고,
+Phase 3는 W/O-W/O batch compatibility와 machine timeline 관계가 생기기 때문이다.
+
+정리:
+- Phase 1: graph state + candidate edge MLP scorer 유지 권장
+- Phase 2: W/O-Machine-Bay heterogeneous graph encoder 검토 가치 있음
+- Phase 3: W/O-W/O compatibility graph 또는 set/attention/GNN encoder 검토 가치 있음
+
+
+2. Phase 1에서 complete graph message passing이 애매한 이유
+
+Phase 1의 현재 문제는 Block -> Bay 배정이다.
+현재 대부분의 블록은 모든 Bay 후보로 갈 수 있다.
+
+예:
+Block 1 -> Bay 22 가능
+Block 1 -> Bay 23 가능
+Block 1 -> Bay 24 가능
+Block 2 -> Bay 22 가능
+Block 2 -> Bay 23 가능
+Block 2 -> Bay 24 가능
+
+즉 graph 구조는 거의 complete bipartite graph다.
+
+Block node 집합과 Bay node 집합이 있고,
+거의 모든 Block-Bay edge가 존재한다.
+
+이 경우 adjacency 자체가 많은 정보를 주지 않는다.
+왜냐하면 "어떤 Block이 어떤 Bay에 연결되어 있는가"가 거의 전부 동일하기 때문이다.
+
+GNN message passing은 보통 다음 형태다.
+
+h_v_new = UPDATE(h_v, AGGREGATE(messages from neighbors))
+
+그런데 Phase 1 complete bipartite graph에서는 같은 type의 node들이 거의 같은 neighbor set을 본다.
+
+예를 들어 모든 Block이 Bay 22, 23, 24와 연결되어 있으면,
+각 Block node는 매 layer마다 동일한 Bay 집합에서 message를 받는다.
+반대로 각 Bay node는 모든 Block node에서 message를 받는다.
+
+이때 aggregation이 mean/sum 형태면 다음 문제가 생긴다.
+
+1. 각 Block node가 받는 Bay-side 정보가 거의 동일해진다.
+2. 각 Bay node가 받는 Block-side 정보도 전체 Block 평균 또는 합계에 가까워진다.
+3. layer가 깊어질수록 "특정 Block과 특정 Bay 후보의 차이"보다 "전체 평균 상태"가 강해진다.
+4. 결국 candidate별 차이는 edge feature나 self feature에 다시 의존하게 된다.
+
+이러면 GNN을 쓴 이득이 작다.
+어차피 최종 판단은 아래처럼 candidate edge feature가 결정한다.
+
+candidate = (Block i, Bay j)
+features = Block i 부하 + Bay j 현재 부하 + Bay j에 넣었을 때 projected gap
+score = MLP(features)
+
+즉 Phase 1에서는 message passing이 없어도 필요한 정보가 이미 candidate feature에 직접 들어간다.
+
+
+3. complete graph에서 정보가 흐려질 수 있다는 말의 의미
+
+"정보가 흐려진다"는 것은 모든 node embedding이 완전히 같아진다는 뜻만은 아니다.
+정확한 의미는 다음이다.
+
+complete bipartite graph에서 message passing을 하면,
+각 node가 받는 neighbor 정보가 매우 넓고 비슷해진다.
+
+Block node 입장:
+- 모든 Bay의 평균적인 상태를 반복해서 받는다.
+- 특정 Bay 후보를 비교하는 문제인데, node embedding은 모든 Bay 정보를 섞어서 받는다.
+
+Bay node 입장:
+- 모든 Block의 평균적인 상태를 반복해서 받는다.
+- 특정 Block을 넣었을 때의 marginal effect가 아니라 전체 물량 평균이 강해진다.
+
+따라서 Phase 1처럼 "한 Block을 어느 Bay에 넣을지"가 핵심인 문제에서는,
+message passing이 candidate별 marginal score를 더 선명하게 만들기보다
+전체 평균 context를 반복 주입하는 형태가 될 수 있다.
+
+특히 edge가 모두 같은 의미라면 topology가 학습에 주는 추가 정보는 작다.
+이 경우 GNN은 복잡도만 늘리고, 실제로는 MLP edge scorer와 큰 차이를 내기 어렵다.
+
+
+4. 이 판단의 일반 GNN 이론 근거
+
+GNN은 neighbor 정보를 반복적으로 aggregate한다.
+GCN 계열에서는 이것이 Laplacian smoothing처럼 작동할 수 있음이 알려져 있다.
+반복 smoothing은 node 표현을 점점 비슷하게 만들 수 있고, 이것을 over-smoothing이라고 부른다.
+
+근거 1:
+Li, Han, Wu, "Deeper Insights into Graph Convolutional Networks for Semi-Supervised Learning"
+- GCN graph convolution을 Laplacian smoothing 관점으로 해석한다.
+- smoothing이 GCN의 장점이지만, layer가 많아지면 over-smoothing 우려가 생긴다고 설명한다.
+- URL: https://arxiv.org/abs/1801.07606
+
+근거 2:
+Oono, Suzuki, "Graph Neural Networks Exponentially Lose Expressive Power for Node Classification"
+- GNN depth가 증가할 때 표현력이 감소할 수 있음을 이론적으로 분석한다.
+- 특히 충분히 dense한 graph에서 정보 손실이 생길 수 있음을 논의한다.
+- URL: https://arxiv.org/abs/1905.10947
+
+근거 3:
+Alon, Yahav, "On the Bottleneck of Graph Neural Networks and its Practical Implications"
+- GNN message passing은 long-range 정보 전달에서 bottleneck/over-squashing 문제가 생길 수 있음을 설명한다.
+- 우리 Phase 1의 핵심 문제는 long-range relation이 아니라 즉시 후보 비교이므로, GNN의 장점이 더 약하다.
+- URL: https://arxiv.org/abs/2006.05205
+
+이 근거들은 "GNN은 쓰면 안 된다"가 아니다.
+의미 있는 graph topology와 relation이 없는 complete graph에서 message passing을 무겁게 넣으면
+단순 edge scorer보다 반드시 좋아진다고 보기 어렵다는 근거다.
+
+
+5. Phase 1에서 GNN이 의미 있어지는 조건
+
+Phase 1에서도 아래 조건이 생기면 GNN 검토 가치가 커진다.
+
+1. Block-Bay edge가 sparse해지는 경우
+   예: 광폭 블록은 Bay 22/23만 가능, 특정 계열은 Bay 24 불가.
+
+2. Bay별 선호 설비가 들어오는 경우
+   예: 어떤 Bay에는 특정 계열을 잘 처리하는 설비가 부족함.
+
+3. Block 간 관계가 생기는 경우
+   예: 같은 블록군은 같은 Bay, 특정 블록끼리 같은 날짜/다른 Bay 제약.
+
+4. 후속 Phase 2 feedback이 Phase 1 후보 edge에 강하게 반영되는 경우
+   예: Bay 선택이 나중의 설비 가능성, batch feasibility, machine bottleneck을 크게 좌우함.
+
+5. Bay node가 단순 22/23/24가 아니라 설비 구성, 계열 선호, 광폭 가능성, capacity calendar를 가진 복합 resource node가 되는 경우
+
+이런 조건이 없으면 Phase 1은 candidate edge MLP scorer가 더 낫다.
+
+
+6. Phase 2에서 GNN이 더 의미 있는 이유
+
+Phase 2는 W/O -> Machine 배정이다.
+
+이 단계는 Phase 1보다 graph relation이 더 실제적이다.
+
+Node:
+- W/O node
+- Machine node
+- Bay node
+- Block node optional
+
+Edge:
+- W/O -> Machine 가능 edge
+- Machine -> Bay 소속 edge
+- W/O -> Block 소속 edge
+- W/O -> Machine 선호/불가 edge
+
+Phase 2에서 GNN이 의미 있는 이유:
+
+1. 후보 edge가 complete graph가 아닐 가능성이 높다.
+   Phase 1에서 Bay가 정해지면 W/O는 해당 Bay 내부 설비에만 연결된다.
+   즉 W/O-Machine edge가 sparse해진다.
+
+2. 설비별 eligibility가 생길 수 있다.
+   예: 계열별 선호 설비, 두께 가능 범위, 광폭 가능 여부, 특정 설비 제외.
+
+3. Machine-Bay hierarchy가 중요하다.
+   Machine은 Bay에 속해 있고, Bay별 설비 수가 다르다.
+   GNN은 W/O-Machine뿐 아니라 Machine-Bay 관계까지 embedding에 반영할 수 있다.
+
+4. 설비 부하평준화는 local/global context가 모두 필요하다.
+   같은 Bay 내부 설비 gap도 봐야 하고, 전체 설비 gap도 봐야 한다.
+   이때 machine node들이 서로 비교되는 구조가 생긴다.
+
+5. 나중에 계열별 선호 설비가 들어오면 edge 의미가 강해진다.
+   예: NP는 PLS21/22 선호, 다른 계열은 Bay25 설비 선호.
+   이런 relation은 GNN/attention이 MLP edge scorer보다 자연스럽게 표현할 수 있다.
+
+따라서 Phase 2는 GNN 후보가 맞다.
+다만 지금 당장 모든 제약이 없는 상태라면 MLP edge scorer baseline을 먼저 유지해야 한다.
+
+
+7. Phase 3에서 GNN 또는 attention이 더 의미 있는 이유
+
+Phase 3는 설비별 W/O를 batch로 묶고 순서를 정하는 단계다.
+
+여기서는 W/O끼리 관계가 직접 생긴다.
+
+핵심 제약:
+- 한 batch에 W/O 1~3개
+- batch 내 W/O 길이(LTH) 합 <= 55,000
+- batch 처리시간 = batch 내부 W/O TACT_TIME max
+
+이 단계는 단순히 W/O 하나를 독립적으로 보는 문제가 아니다.
+W/O 조합 자체가 action 품질을 결정한다.
+
+예:
+W/O A 길이 20,000
+W/O B 길이 18,000
+W/O C 길이 17,000
+합 55,000 -> 같은 batch 가능
+
+W/O D 길이 25,000
+W/O E 길이 20,000
+W/O F 길이 15,000
+합 60,000 -> 같은 batch 불가
+
+또 처리시간이 max rule이면,
+TACT_TIME이 긴 W/O와 짧은 W/O를 같이 묶는 것이 유리할 수 있다.
+
+이런 관계는 W/O-W/O compatibility graph 또는 set attention이 잘 표현한다.
+
+Phase 3에서 GNN/attention이 의미 있는 이유:
+
+1. W/O-W/O pair 관계가 action 품질을 결정한다.
+2. batch feasibility가 조합 제약이다.
+3. batch duration이 sum이 아니라 max이므로 W/O 간 상호작용이 중요하다.
+4. machine별 timeline과 remaining W/O 상태가 계속 바뀐다.
+5. 같은 W/O라도 어떤 W/O와 묶이는지에 따라 좋은 action인지 달라진다.
+
+따라서 Phase 3는 Phase 1보다 GNN/attention 적용 근거가 훨씬 강하다.
+
+
+8. 최종 개발 판단
+
+현재 단계에서 추천 구조:
+
+Phase 1:
+- 유지: graph state + candidate edge MLP scorer
+- 이유: Block-Bay graph가 거의 complete bipartite라 topology 정보가 약함.
+- GNN 전환은 광폭/계열/선호설비/Block 관계가 충분히 들어온 뒤 검토.
+
+Phase 2:
+- 단기: 현재 MLP edge scorer 유지
+- 중기: W/O-Machine-Bay heterogeneous graph encoder 추가 검토
+- 비교: 같은 후보, 같은 self-label bank, 같은 score로 MLP vs GNN 비교
+
+Phase 3:
+- 단기: 현재 batch candidate scorer 유지
+- 중기: W/O-W/O compatibility graph 또는 set attention encoder 검토
+- 비교: hard violation, makespan, idle sum, occupancy gap으로 MLP vs GNN/attention 비교
+
+중요:
+GNN은 환경을 바꾸는 것이 아니다.
+환경, 후보 생성, 제약, CSV export는 그대로 둔다.
+바뀌는 것은 후보 scoring 앞단의 encoder다.
+
+현재:
+candidate features -> MLP scorer -> score
+
+GNN 전환:
+graph state -> GNN encoder -> candidate embedding -> MLP scoring head -> score
+
+따라서 GNN을 넣더라도 MLP scoring head는 유지된다.
+비교 대상은 "graph state vs GNN"이 아니라 다음 두 모델이다.
+
+Baseline:
+graph state + edge feature MLP scorer
+
+GNN version:
+same graph state + GNN encoder + MLP scoring head
+
+
+9. 발표/보고용 한 줄 결론
+
+Phase 1은 모든 블록이 대부분 모든 Bay에 연결되는 complete bipartite 구조라 message passing의 추가 이득이 제한적이고, 반복 aggregation으로 후보별 차이가 평균화될 수 있다. 따라서 Phase 1은 candidate edge MLP scorer를 유지하고, 실제 제약과 설비 선호 관계가 강하게 나타나는 Phase 2/3에서 GNN 또는 attention encoder를 우선 검토하는 것이 타당하다.

@@ -6,10 +6,12 @@ These tests define the first-stage planning problem:
 - the primary balancing load is the sum of steel quantity, not block count.
 """
 
+import csv
+import tempfile
 from types import SimpleNamespace
 import unittest
 
-from Utils.phase1_bay_balancer import (
+from Utils.phase1.phase1_bay_balancer import (
     LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
     MULTI_OBJECTIVE_PHASE1_HEURISTIC,
     PRIORITY_GREEDY_PHASE1_HEURISTIC,
@@ -22,7 +24,7 @@ from Utils.phase1_bay_balancer import (
     _multi_objective_assignment_score,
     _priority_sweep_load_score,
 )
-from Utils.cutting_scenario_builder import build_scenario_from_cutting_records
+from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
 
 
 class Phase1BayBalancerTest(unittest.TestCase):
@@ -56,6 +58,8 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(result["bay_loads"]["23"]["steel_quantity_sum"], 9)
         self.assertEqual(result["bay_loads"]["22"]["wo_count"], 2)
         self.assertEqual(result["bay_loads"]["23"]["wo_count"], 2)
+        self.assertEqual(result["bay_capacity_weights"], {"22": 1.0, "23": 1.0})
+        self.assertIs(result["long_cut_hard_mask"], True)
 
     def test_respects_allowed_bay_ids_for_a_block(self) -> None:
         """If a block is restricted to one Bay, Phase 1 must not assign another Bay."""
@@ -224,7 +228,7 @@ class Phase1BayBalancerTest(unittest.TestCase):
         )
 
     def test_priority_sweep_score_uses_fixed_gap_tuple(self) -> None:
-        """The public score tuple must stay steel/cut/bevel/long-cut for every mode."""
+        """The public score tuple is steel/cut/bevel only; Bay24 long-cut is a mask."""
 
         no_long_cut_bay24_but_uneven = {
             "22": self._load(steel=1, cut_length=10.0, bevel_quantity=1, long_cut_bay24_count=0),
@@ -237,12 +241,55 @@ class Phase1BayBalancerTest(unittest.TestCase):
             "24": self._load(steel=34, cut_length=340.0, bevel_quantity=34, long_cut_bay24_count=1),
         }
 
-        self.assertEqual(_priority_sweep_load_score(no_long_cut_bay24_but_uneven), (97, 970.0, 97, 0))
-        self.assertEqual(_priority_sweep_load_score(one_long_cut_bay24_but_balanced), (1, 10.0, 1, 1))
+        self.assertEqual(_priority_sweep_load_score(no_long_cut_bay24_but_uneven), (97, 970.0, 97))
+        self.assertEqual(_priority_sweep_load_score(one_long_cut_bay24_but_balanced), (1, 10.0, 1))
         self.assertLess(
             _priority_sweep_load_score(one_long_cut_bay24_but_balanced),
             _priority_sweep_load_score(no_long_cut_bay24_but_uneven),
         )
+
+    def test_multi_objective_score_normalizes_load_by_bay_capacity_weight(self) -> None:
+        """Bay loads must be balanced per machine capacity, not raw Bay totals only."""
+
+        proportional_loads = {
+            "22": self._load(steel=40, cut_length=400.0, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
+            "23": self._load(steel=30, cut_length=300.0, bevel_quantity=6, long_cut_bay24_count=0, capacity_weight=3),
+            "24": self._load(steel=40, cut_length=400.0, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
+        }
+
+        self.assertEqual(_priority_sweep_load_score(proportional_loads), (0.0, 0.0, 0.0))
+
+    def test_bay_load_csv_reports_capacity_normalized_values(self) -> None:
+        """The Bay load CSV must expose the same per-capacity values used by scoring."""
+
+        jobs = {
+            "WO_A": self._job("WO_A", "P1::A", 40, cut_length=400.0, bevel_quantity=8),
+            "WO_B": self._job("WO_B", "P1::B", 30, cut_length=300.0, bevel_quantity=6),
+            "WO_C": self._job("WO_C", "P1::C", 40, cut_length=400.0, bevel_quantity=8),
+        }
+        plan = build_phase1_bay_plan(
+            jobs=jobs,
+            bay_ids=["22", "23", "24"],
+            algorithm=PRIORITY_SWEEP_PHASE1_HEURISTIC,
+            bay_capacity_weights={"22": 4, "23": 3, "24": 4},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from Utils.phase1.phase1_bay_balancer import write_phase1_bay_plan
+
+            paths = write_phase1_bay_plan(plan, tmpdir)
+            with open(paths["bay_loads_csv"], encoding="utf-8-sig", newline="") as file:
+                rows = {row["bay_id"]: row for row in csv.DictReader(file)}
+
+        self.assertEqual(rows["22"]["steel_quantity_sum_per_capacity"], "10.0")
+        self.assertEqual(rows["23"]["steel_quantity_sum_per_capacity"], "10.0")
+        self.assertEqual(rows["24"]["steel_quantity_sum_per_capacity"], "10.0")
+        self.assertEqual(rows["22"]["cut_length_sum_per_capacity"], "100.0")
+        self.assertEqual(rows["23"]["cut_length_sum_per_capacity"], "100.0")
+        self.assertEqual(rows["24"]["cut_length_sum_per_capacity"], "100.0")
+        self.assertEqual(rows["22"]["bevel_quantity_sum_per_capacity"], "2.0")
+        self.assertEqual(rows["23"]["bevel_quantity_sum_per_capacity"], "2.0")
+        self.assertEqual(rows["24"]["bevel_quantity_sum_per_capacity"], "2.0")
 
     def test_priority_sweep_balanced_reports_fixed_objective_priority(self) -> None:
         """Legacy heuristic names should still report the fixed public objective order."""
@@ -264,10 +311,9 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(
             result["summary"]["objective_priority"],
             [
-                "steel_quantity_sum",
-                "cut_length_sum",
-                "bevel_quantity_sum",
-                "long_cut_over_1000_prefer_bay22_23",
+                "steel_quantity_sum_per_capacity",
+                "cut_length_sum_per_capacity",
+                "bevel_quantity_sum_per_capacity",
             ],
         )
 
@@ -297,10 +343,9 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(
             result["summary"]["objective_priority"],
             [
-                "steel_quantity_sum",
-                "cut_length_sum",
-                "bevel_quantity_sum",
-                "long_cut_over_1000_prefer_bay22_23",
+                "steel_quantity_sum_per_capacity",
+                "cut_length_sum_per_capacity",
+                "bevel_quantity_sum_per_capacity",
             ],
         )
         self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
@@ -485,6 +530,7 @@ class Phase1BayBalancerTest(unittest.TestCase):
         cut_length: float,
         bevel_quantity: int,
         long_cut_bay24_count: int,
+        capacity_weight: float = 1.0,
     ) -> dict:
         """Create the Bay load shape used by Phase 1 score functions."""
 
@@ -495,6 +541,7 @@ class Phase1BayBalancerTest(unittest.TestCase):
             "long_cut_bay24_count": long_cut_bay24_count,
             "wo_count": steel,
             "block_count": steel,
+            "capacity_weight": capacity_weight,
         }
 
 

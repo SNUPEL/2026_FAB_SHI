@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from Utils.phase1_phase2_communication import (
+from Utils.learning.phase1_phase2_communication import (
     apply_phase1_messages_to_scenario,
     build_phase1_plan_messages,
     build_phase2_feedback_messages,

@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from Utils.cutting_data_loader import load_and_clean_cutting_data
-from Utils.io import load_scenario_for_config
+from Utils.data.cutting_data_loader import load_and_clean_cutting_data
+from Utils.data.io import load_scenario_for_config
 
 
 class SourceDataProcessTimeFilterTest(unittest.TestCase):

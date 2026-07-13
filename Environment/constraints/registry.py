@@ -272,6 +272,12 @@ class CandidateConstraintBundle:
         # LINE-BY-LINE: 호출자에게 `[result.reason for result in self.hard_results if not result.passed]`를 반환합니다. 사용: 상위 함수가 이 결과로 다음 계산/검증/출력을 진행합니다.
         return [result.reason for result in self.hard_results if not result.passed]
 
+    @property
+    def hard_failed_rule_names(self) -> List[str]:
+        """통과하지 못한 hard rule 이름을 평가 순서대로 반환한다."""
+
+        return [result.rule_name for result in self.hard_results if not result.passed]
+
     # LINE-BY-LINE: `@property` 데코레이터를 바로 다음 class/function에 적용합니다. 사용: 생성/검증/테스트 동작을 보강합니다.
     @property
     # LINE-BY-LINE: `soft_penalty(self)` 함수를 정의합니다. 반환 타입: `float`. 사용: 제약 registry가 이 함수를 호출해 후보 action의 통과/탈락을 판단합니다.

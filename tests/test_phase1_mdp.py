@@ -16,10 +16,10 @@ import unittest
 
 import torch
 
-from Train.algorithm.phase1_imitation import train_phase1_pointer_imitation
-from Train.network.phase1_pointer import Phase1PointerPolicy
-from Utils.phase1_bay_balancer import LONG_CUT_PREFERRED_PHASE1_HEURISTIC
-from Utils.phase1_mdp import (
+from Phase1.imitation import train_phase1_pointer_imitation
+from Phase1.pointer_policy import Phase1PointerPolicy
+from Utils.phase1.phase1_bay_balancer import LONG_CUT_PREFERRED_PHASE1_HEURISTIC
+from Utils.phase1.phase1_mdp import (
     PHASE1_BAY_FEATURE_NAMES,
     PHASE1_BLOCK_FEATURE_NAMES,
     PHASE1_ENV_FEATURE_NAMES,

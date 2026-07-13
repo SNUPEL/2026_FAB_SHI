@@ -1,6 +1,6 @@
 import unittest
 
-from Utils.cutting_scenario_builder import build_scenario_from_cutting_records
+from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
 
 
 class FactoryScopeMetadataTest(unittest.TestCase):

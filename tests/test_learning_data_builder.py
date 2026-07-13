@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from Utils.learning_data_builder import build_learning_data_package
+from Utils.learning.learning_data_builder import build_learning_data_package
 
 
 class LearningDataBuilderTest(unittest.TestCase):

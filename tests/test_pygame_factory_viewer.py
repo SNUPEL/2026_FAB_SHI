@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from Utils.pygame_factory_viewer import (
+from Utils.reporting.pygame_factory_viewer import (
     _fit_text_to_width,
     build_completion_summary,
     build_run_summary_lines,

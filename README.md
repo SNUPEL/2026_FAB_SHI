@@ -2,19 +2,17 @@
 
 절단 공정용 `PMSP(Parallel Machine Scheduling Problem)` 기반 스케줄링 프로젝트입니다.
 
-이 저장소는 연구계획서의 큰 흐름을 바로 코드로 옮길 수 있도록 만든 **실행 가능한 스켈레톤 + 확장 가능한 프레임워크**입니다.  
-즉, 단순 문서용 뼈대가 아니라 아래가 실제로 동작합니다.
+이 저장소는 절단 공장의 실제 데이터와 합성 데이터를 같은 제약·평가 계약으로 검증하는 실행 가능한 스케줄링 환경입니다.
 
 - 병렬 이기종 설비 환경 `reset / step`
 - 휴리스틱 실행
-- PPO / REINFORCE / Self-labeling 학습 루프
+- Phase 1 / merged Phase 2 self-labeling 학습 루프
 - category / hard / soft / override 제약 구조
 - calendar 제약
 - 설비별 운영시간 / 계획 정지 / 고장
-- 샘플 시나리오 기반 시뮬레이션 / trace / eval
+- 샘플 시나리오 기반 시뮬레이션 / trace / Phase별 평가
 
-다만 아직 **현업 실데이터 기반 최종 모델**은 아닙니다.  
-실제 택트타임 산출식, 상세 셋업 룰, 정반 분할 물리 로직, 후공정 상세 반출 로직 등은 이후 데이터가 들어오면 채우는 구조입니다.
+확정되지 않은 셋업·계열 선호·후공정 반출 규칙은 임의로 활성화하지 않습니다. 현재 확정된 batch 규칙은 W/O 1~3개, W/O `LTH` 합 55,000 이하, batch 처리시간은 W/O `TACT_TIME`의 최댓값입니다.
 
 ---
 
@@ -36,18 +34,69 @@
 
 현재 상태를 한 문장으로 정리하면 아래와 같습니다.
 
-> 학습과 휴리스틱을 붙일 수 있는 PMSP형 절단 스케줄링 환경은 구현 완료  
-> 단, 현업 데이터 기반 상세 택트타임 / 상세 물리 제약은 추후 채움
+> Phase 1 Block-Bay 배정과 merged Phase 2 `(W/O batch, Machine)` 스케줄링을 strict RunSpec, 공통 제약 audit, self-labeling, actual 8일 평가로 연결한 상태
 
-현재 중간발표/검증의 1차 초점은 **Phase 1: 블록 단위 Bay 배정**입니다.
+현재 구조는 2단계로 정리합니다.
 
 - Phase 1: 같은 블록의 모든 W/O를 하나의 절단 Bay에 배정
-- Phase 2: Phase 1 결과를 받아 Bay 내부 설비/W/O batch scheduling 수행
-- 현재 발표 비교: Phase 1만 수행하고 실적 Bay 부하와 비교
+- Phase 2: Phase 1 결과를 받아 `SELECT_MACHINE -> SELECT_WO 반복 -> batch 자동 close`로 batch와 설비를 함께 결정
+
+Phase 2의 1순위 목적은 전체 `makespan` 최소화입니다. 2순위 이후에 Bay 내부 설비별 W/O 수, 절단장, 베벨수량, 점유시간 부하평준화를 봅니다. 순차 선택이 이후의 batch 구성과 machine 배정 가능성을 바꾸므로 MDP/RL로 정의합니다. 다만 setup time이 꺼진 현재 조건에서는 최종 batch 구성과 machine 배정이 같을 때 단순한 batch 투입 순서 교환만으로 목적값이 달라지지는 않습니다.
 
 상세 진행 상태와 다음 작업은 [현재과제_진행체크리스트.md](현재과제_진행체크리스트.md)를 기준으로 봅니다.
 
 Phase 1 학습/MDP 구성은 [Phase1_MDP_RL_구성.md](Phase1_MDP_RL_구성.md)에 정리되어 있습니다.
+
+### 현재 실행 명령
+
+Phase 1 단독 학습:
+
+```bash
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --block-xlsx "input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx" --gyel NP --episodes 20000 --min-blocks 12 --max-blocks 80 --noise-ratio 0.03 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms ppb_lcp6 --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --actual-validation-candidate-xlsx "착수일 후보 블록.xlsx" --output-dir output/phase1_pair_train
+```
+
+Merged Phase 2 학습:
+
+```bash
+python main.py phase2-train-batch-machine-self-labeling --config config_np_100.yaml --phase1-heuristic bevel_first_balanced --phase1-bay-ids 22,23,24 --synthetic-source report_formula --gyel NP --min-blocks 12 --max-blocks 80 --episodes 20000 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms min_makespan,lookahead_min_makespan,best_fit_lth,balanced_tact_load,spt_batch,lpt_batch --phase2-score-mode normalized --hidden-dim 128 --action-pool-limit None --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --output-dir output/phase2_batch_machine_train
+```
+
+Phase 2 재개 학습은 위와 동일한 RunSpec 인자를 유지하고 아래 옵션만 추가합니다.
+
+```bash
+--resume-checkpoint latest
+```
+
+Frozen Phase 2 feedback을 사용하는 Phase 1 계층 학습:
+
+```bash
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --gyel NP --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms ppb_lcp6 --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --actual-validation-candidate-xlsx "착수일 후보 블록.xlsx" --enable-phase2-feedback-score --phase2-feedback-checkpoint output/phase2_batch_machine_train/phase2_batch_machine_policy.pt --output-dir output/phase1_with_phase2_feedback
+```
+
+Phase 1 -> merged Phase 2 full-flow checkpoint 평가:
+
+```bash
+python main.py phase2-run-full-workflow --config config_np_100.yaml --phase1-checkpoint output/phase1_with_phase2_feedback/phase1_pair_pointer.pt --phase1-bay-ids 22,23,24 --phase1-samples 64 --batch-machine-checkpoint output/phase2_batch_machine_train/phase2_batch_machine_policy.pt --synthetic-source report_formula --synthetic-blocks 30 --gyel NP --output-dir output/full_flow_checkpoint
+```
+
+Actual 8일 Phase 2 평가는 W/O 착수시간을 재구성하지 않고 `착수일 후보 블록.xlsx`의 8개 sheet를 authoritative block universe로 사용합니다.
+
+```bash
+python scripts/evaluate_phase2_candidate_workbook.py --config config_np_100.yaml --wo-xlsx "input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx" --candidate-xlsx "착수일 후보 블록.xlsx" --workdays 20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429 --bay-ids 22,23,24 --phase1-heuristic bevel_first_balanced --checkpoint output/phase2_batch_machine_train/phase2_batch_machine_policy.pt --output-dir output/phase2_actual8_checkpoint
+```
+
+Phase 2 checkpoint에는 feature schema, score mode, batch limit, action pool, heuristic bank, sampling 수, Phase 1 Bay 용량비/장척 mask, constraint profile을 포함한 단일 `run_spec`이 저장됩니다. 재개·actual 평가·full-flow는 이 값이 하나라도 다르거나 RunSpec/model/optimizer state가 누락되면 자동 보정하지 않고 실패합니다. Frozen feedback으로 학습한 Phase 1 checkpoint도 원본 Phase 2 checkpoint SHA256과 RunSpec이 정확히 같은 full-flow에서만 사용할 수 있습니다.
+
+### 현재 Phase / Network 경계
+
+- `Environment/simulation.py`: `simulate/replay/Gym`이 사용하는 custom event-driven DES다. SimPy를 사용하지 않고 decision epoch와 machine clock을 직접 전진시킨다.
+- `Environment/hierarchical.py`: Phase 1 planning state와 Phase 2 runtime/event state, snapshot/fork, batch transition의 공통 소유자다. full DES와 data/event/constraint 계약은 공유하지만 transition loop는 별도다.
+- `Phase1/`: Block -> Bay 배정. `pointer_policy.py`가 공통 planning state에서 만든 pair/env feature를 점수화한다.
+- `Phase2/`: merged batch-machine scheduling. `set_pointer_policy.py`가 가변 Machine/W/O set을 인코딩하고, `merged.py`가 순차 action, Bay별 self-labeling, batch/timeline 저장을 담당한다.
+- Phase 2 및 full-flow synthetic 학습/검증은 `[제출본]가공공장_중간보고.pdf` 수식을 고정 구현한 `Utils/data/report_formula_data_generator.py`의 `report_formula` source를 사용한다. Phase 1 단독 학습은 기존 block bootstrap을 유지한다.
+- `Train/network/mlp.py`: Phase1/2 self-labeling edge/action scorer와 Phase1 pointer policy가 공통으로 사용하는 유일한 `Train` 공용 network helper다.
+- `Train/algorithm/`, `Train/runner.py`, legacy `gnn/policy_value/feature_builder` 스택은 현재 실행 경로에서 제거했다. Phase별 학습 루프는 각 `Phase*/` 패키지가 소유한다.
+- 현재 Phase 1은 graph-derived pair feature를 사용하는 pointer policy이고, Phase 2는 mean/max set pooling 기반 pointer policy다. 둘 다 GNN message passing은 사용하지 않는다. Frozen Phase 2 best-of-K score를 Phase 1 후보 평가 앞에 붙이는 feedback 기반 계층 학습까지 구현했으며, alternating joint optimization은 검증되지 않은 별도 방식이라 기본 실행 경로에 포함하지 않는다.
 
 ---
 
@@ -125,13 +174,15 @@ long_cut_preferred_balanced
 
 ### Phase 1 MDP/self-labeling
 
-Phase 1 학습 구조는 `SELECT_BLOCK -> SELECT_BAY` 계층형 MDP로 둡니다. 현재 구현은 바로 PPO를 돌리는 단계가 아니라, 검증된 `long_cut_preferred_balanced` 휴리스틱을 teacher label로 사용해 supervised/self-labeling용 trace를 만드는 단계입니다.
+Phase 1 학습 구조는 `SELECT_BLOCK -> SELECT_BAY` 계층형 MDP로 둡니다. 현재 live 구현은 invalid action masking과 self-labeling 후보 비교를 사용하며, Phase 2는 별도 W/O 배정 단계 없이 `(W/O batch, Machine)`을 한 번에 선택합니다.
 
 구현 파일:
 
-- `Utils/phase1_mdp.py`
-- `Train/network/phase1_pointer.py`
-- `Train/algorithm/phase1_imitation.py`
+- `Utils/phase1/phase1_mdp.py`
+- `Phase1/pointer_policy.py`
+- `Phase1/imitation.py`
+- `Phase1/self_labeling.py`
+- `Phase1/pair_self_labeling.py`
 
 100건 smoke 기준 산출 결과:
 
@@ -177,11 +228,12 @@ pmsp/
 ├─ main.py
 ├─ config.yaml
 ├─ Agent/
-│  ├─ heuristics.py
-│  └─ policy.py
+│  └─ heuristics.py
 ├─ Environment/
 │  ├─ data.py
 │  ├─ environment.py
+│  ├─ hierarchical.py
+│  ├─ metrics.py
 │  ├─ reward.py
 │  ├─ simulation.py
 │  ├─ state.py
@@ -190,26 +242,49 @@ pmsp/
 │     ├─ calendar_rules.py
 │     ├─ downstream_rules.py
 │     ├─ machine_rules.py
+│     ├─ profiles.py
 │     ├─ registry.py
 │     └─ soft_rules.py
+├─ Phase1/
+│  ├─ orchestrator.py
+│  ├─ pair_self_labeling.py
+│  └─ pointer_policy.py
+├─ Phase2/
+│  ├─ merged.py
+│  ├─ orchestrator.py
+│  ├─ run_spec.py
+│  ├─ set_pointer_policy.py
+│  └─ state.py
 ├─ Train/
-│  ├─ runner.py
-│  ├─ algorithm/
-│  │  ├─ common.py
-│  │  ├─ factory.py
-│  │  ├─ ppo.py
-│  │  ├─ reinforce.py
-│  │  └─ self_labeling.py
 │  └─ network/
-│     ├─ feature_builder.py
-│     ├─ gnn.py
-│     ├─ mlp.py
-│     └─ policy_value.py
+│     └─ mlp.py
 ├─ Utils/
 │  ├─ config.py
-│  ├─ io.py
-│  ├─ scenario_generator.py
-│  └─ tact_time.py
+│  ├─ data/
+│  │  ├─ cutting_data_loader.py
+│  │  ├─ cutting_scenario_builder.py
+│  │  ├─ factory_builder.py
+│  │  ├─ io.py
+│  │  ├─ phase2_candidate_workbook.py
+│  │  ├─ report_formula_data_generator.py
+│  │  ├─ scenario_generator.py
+│  │  └─ test_data_selection.py
+│  ├─ phase1/
+│  │  ├─ phase1_bay_balancer.py
+│  │  ├─ phase1_block_data_generator.py
+│  │  ├─ phase1_episode_dataset.py
+│  │  └─ phase1_mdp.py
+│  ├─ learning/
+│  │  ├─ learning_data_builder.py
+│  │  ├─ phase1_phase2_communication.py
+│  │  ├─ phase_agent_checkpoints.py
+│  │  └─ phase_graph_mdp.py
+│  └─ reporting/
+│     ├─ playback_builder.py
+│     ├─ pygame_factory_viewer.py
+│     ├─ share_report_builder.py
+│     ├─ tact_gap_analysis.py
+│     └─ tact_time.py
 ├─ input/
 ├─ output/
 └─ 현재과제_진행체크리스트.md
@@ -221,7 +296,7 @@ pmsp/
 
 ### 4.1 action
 
-현재 기본 action은 `batch_open`입니다.
+`CuttingSimulation` full DES의 기본 action mode는 `batch_open`입니다.
 
 즉, 한 step에서 고르는 것은:
 
@@ -230,6 +305,10 @@ pmsp/
 - batch 닫기 및 투입: `close_batch:batch_id@machine_id`
 
 의 세 가지 action 중 하나입니다.
+
+Merged Phase 2 policy는 이 저수준 action을 직접 고르지 않습니다. 정책은
+`SELECT_MACHINE -> SELECT_WO 반복`을 수행하고, `CommonHierarchicalEnvironment`가
+batch 목표 개수 도달 또는 추가 가능한 W/O 소진 시 batch를 자동으로 닫습니다.
 
 현업 확인 기준:
 - W/O 1~3개를 batch로 묶을 수 있습니다.
@@ -363,30 +442,20 @@ pmsp/
 
 ## 8. 학습 알고리즘
 
-현재 선택 가능한 알고리즘:
+현재 실행 경로에서 사용하는 학습 방식은 Phase별 self-labeling입니다.
 
-- `ppo`
-- `reinforce`
-- `self_labeling`
+- Phase 1: block-Bay 후보 또는 pair 후보 중 가장 좋은 후보를 pseudo-label로 사용
+- Merged Phase 2: `(W/O batch, Machine)` 후보 bank 중 makespan 우선 score가 가장 좋은 후보를 pseudo-label로 사용
 
-선택 위치:
-- [config.yaml](config.yaml)
+legacy `ppo`, `reinforce` runner는 현재 live path에서 제거했습니다.
 
-예:
-
-```yaml
-train:
-  episodes: 10
-  algorithm: ppo
-```
-
-네트워크는 `GNN + MLP` 기반 정책/가치 구조를 사용합니다.
+현재 네트워크는 Phase별 graph state를 MLP edge/action scorer로 점수화합니다.
+full message-passing GNN 정책은 아직 실행 경로가 아니므로 legacy 코드를 제거했습니다.
 
 관련 코드:
-- [Train/algorithm/ppo.py](Train/algorithm/ppo.py)
-- [Train/algorithm/reinforce.py](Train/algorithm/reinforce.py)
-- [Train/algorithm/self_labeling.py](Train/algorithm/self_labeling.py)
-- [Train/network/policy_value.py](Train/network/policy_value.py)
+- [Phase1/pair_self_labeling.py](Phase1/pair_self_labeling.py)
+- [Phase2/merged.py](Phase2/merged.py)
+- [Train/network/mlp.py](Train/network/mlp.py)
 
 참고 논문/코드는 필요 시 별도 정리하고, 현재 실행 기준은 master checklist에만 유지합니다.
 
@@ -505,14 +574,10 @@ python3 main.py generate-scenario --config config.yaml --duplicate-jobs 2 --outp
 
 ### 9.10 학습
 
-```bash
-python3 main.py train --config config.yaml
-```
-
-### 9.11 평가
+generic `train/eval` 명령은 제거했습니다. 현재 학습은 Phase별 CLI를 사용합니다.
 
 ```bash
-python3 main.py eval --config config.yaml
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --bay-ids 22,23,24 --block-xlsx "input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx" --gyel NP --episodes 20000 --min-blocks 12 --max-blocks 80 --noise-ratio 0.03 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms ppb_lcp6 --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --actual-validation-candidate-xlsx "착수일 후보 블록.xlsx" --output-dir output/phase1_pair_v8_candidate_actual8_ppb_lcp6
 ```
 
 ---
@@ -563,7 +628,7 @@ calendar:
 - preemption / resume
 - 2D 레이아웃 상세 모델
 
-즉, 지금은 **연구계획서 전체를 따라갈 수 있는 구조는 완료**되었고,  
+즉, 지금은 **연구계획서 전체를 따라갈 수 있는 구조는 완료**되었고,
 **현업 상세값과 물리 세부는 앞으로 채우는 단계**입니다.
 
 ---
@@ -578,5 +643,5 @@ calendar:
 
 ## 13. 한 줄 요약
 
-이 저장소는 **절단 공정 PMSP형 스케줄링 문제를 위한 실행 가능한 연구용 프레임워크**이며,  
+이 저장소는 **절단 공정 PMSP형 스케줄링 문제를 위한 실행 가능한 연구용 프레임워크**이며,
 **초보자도 제약과 운영 규칙을 함수/설정 단위로 추가할 수 있게 설계된 코드베이스**입니다.

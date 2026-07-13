@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from Utils.phase1_block_data_generator import (
+from Utils.phase1.phase1_block_data_generator import (
     PHASE1_BLOCK_FEATURE_COLUMNS,
     generate_phase1_block_data,
     validate_phase1_block_data,

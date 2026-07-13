@@ -73,7 +73,6 @@ factory:
         count: 1
         machine_ids:
         - PLS52
-device: cpu
 simulation:
   start_date: '2026-03-03'
   minutes_per_day: 1440
@@ -115,10 +114,29 @@ batch:
   processing_time_rule: max_individual
 agent:
   default_heuristic: batch_fill_spt
-network:
-  hidden_dim: 128
-  num_gnn_layers: 2
 constraints:
+  profiles:
+    phase2:
+      categories:
+        machine: true
+        capacity: true
+        downstream: false
+        priority: false
+        preference: false
+        layout: true
+        calendar: false
+      hard_enabled:
+        machine_enabled: true
+        machine_bay_consistency: true
+        block_set_same_bay: true
+        machine_single_processing: true
+        batch_wo_count_limit: true
+        batch_length_sum_limit: true
+        family_eligibility: false
+        thickness_range: false
+        table_length_limit: false
+      soft_enabled: {}
+      soft_penalty_weights: {}
   categories:
     machine: true
     capacity: true
@@ -182,25 +200,3 @@ reward:
   load_balance_weight: 0.1
   priority_bonus_weight: 0.02
   soft_penalty_weight: 1.0
-train:
-  episodes: 3
-  algorithm: ppo
-algorithm:
-  reinforce:
-    lr: 0.0005
-    gamma: 0.99
-    entropy_coef: 0.001
-  ppo:
-    lr: 0.0003
-    gamma: 0.99
-    clip_eps: 0.2
-    update_epochs: 2
-    value_coef: 0.5
-    entropy_coef: 0.001
-  self_labeling:
-    lr: 0.0005
-    rollout_samples: 2
-    imitation_epochs: 2
-    sample_temperature: 1.0
-eval:
-  save_summary: false

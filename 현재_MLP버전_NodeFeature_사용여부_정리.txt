@@ -1,0 +1,364 @@
+현재 MLP 버전에서 Node Feature 사용 여부 정리
+작성 목적: Phase 1/2 graph state에서 node feature와 edge feature가 각각 어떤 역할을 하는지 명확히 구분
+
+
+1. 결론
+
+현재 Phase 1/2 MLP 버전에서는 node feature가 model scoring input으로 직접 들어가지 않는다.
+
+현재 실제 scoring 입력:
+
+edge["features"] -> MLP -> score
+
+따라서 엄밀히 말하면 현재 학습/추론 점수 계산에는 edge feature만 직접 사용된다.
+
+하지만 node feature가 완전히 의미 없는 것은 아니다.
+현재 node feature는 다음 역할을 한다.
+
+1. graph state 구조 검증용
+2. 디버깅/시각화용
+3. 향후 GNN encoder 전환을 위한 interface 보존
+
+현재 모델을 GNN이라고 부르면 안 된다.
+정확한 표현은 다음이다.
+
+Graph-structured candidate state with edge-feature MLP scorer
+
+한국어 표현:
+
+그래프 구조 후보 상태 기반 edge-feature MLP scoring 정책
+
+
+2. 현재 Phase 1 구조
+
+Phase 1 문제:
+
+Block -> Bay 배정
+
+현재 graph state:
+
+- block_nodes
+- bay_nodes
+- candidate_edges
+
+Phase 1 node feature:
+
+Block node feature:
+- steel_quantity_ratio
+- cut_length_ratio
+- bevel_quantity_ratio
+- long_cut_over_1000
+- plate_length_avg_ratio
+- thickness_avg_ratio
+
+Bay node feature:
+- current_steel_quantity_ratio
+- current_cut_length_ratio
+- current_bevel_quantity_ratio
+- current_block_count_ratio
+- capacity_weight_ratio
+
+Phase 1 edge feature:
+
+- block_steel_quantity_ratio
+- block_cut_length_ratio
+- block_bevel_quantity_ratio
+- bay_current_steel_quantity_ratio
+- bay_current_cut_length_ratio
+- bay_current_bevel_quantity_ratio
+- bay_capacity_weight_ratio
+- projected_steel_gap_ratio
+- projected_cut_gap_ratio
+- projected_bevel_gap_ratio
+
+현재 Phase 1 policy는 아래처럼 동작한다.
+
+candidate_edges = [
+  Block A -> Bay 22,
+  Block A -> Bay 23,
+  Block A -> Bay 24,
+  Block B -> Bay 22,
+  ...
+]
+
+각 candidate edge의 feature만 MLP에 넣는다.
+
+score_i = MLP(edge_feature_i)
+
+즉 block_nodes와 bay_nodes의 feature는 현재 MLP scoring에 직접 들어가지 않는다.
+
+
+3. Phase 1에서 node feature를 직접 안 써도 학습되는 이유
+
+Phase 1 edge feature 안에 이미 Block 정보와 Bay 정보가 들어 있다.
+
+예를 들어 Block A -> Bay 22 후보 edge feature에는 아래 정보가 들어 있다.
+
+Block A 정보:
+- block_steel_quantity_ratio
+- block_cut_length_ratio
+- block_bevel_quantity_ratio
+
+Bay 22 현재 상태:
+- bay_current_steel_quantity_ratio
+- bay_current_cut_length_ratio
+- bay_current_bevel_quantity_ratio
+- bay_capacity_weight_ratio
+
+Block A를 Bay 22에 넣었을 때 결과:
+- projected_steel_gap_ratio
+- projected_cut_gap_ratio
+- projected_bevel_gap_ratio
+
+즉 edge feature가 사실상 다음 정보를 하나로 압축한 상태다.
+
+edge feature = Block feature + Bay feature + projected result feature
+
+따라서 node feature를 따로 넣지 않아도,
+candidate scoring에 필요한 핵심 정보는 edge feature만으로도 전달된다.
+
+그래서 현재 self-labeling 학습은 가능하다.
+
+학습 흐름:
+
+1. teacher heuristic 또는 agent sample 중 가장 좋은 candidate를 고른다.
+2. 그 candidate가 가진 edge feature를 positive target처럼 사용한다.
+3. MLP는 "좋은 edge feature pattern"을 학습한다.
+
+
+4. 현재 Phase 2 구조
+
+Phase 2 문제:
+
+W/O -> Machine 배정
+
+현재 graph state:
+
+- wo_nodes
+- machine_nodes
+- candidate_edges
+
+Phase 2 node feature:
+
+W/O node feature:
+- processing_time_ratio
+- cut_length_ratio
+- bevel_quantity_ratio
+- plate_length_ratio
+- thickness_ratio
+
+Machine node feature:
+- current_wo_count_ratio
+- current_processing_time_ratio
+- current_cut_length_ratio
+- current_bevel_quantity_ratio
+
+Phase 2 edge feature:
+
+- job_processing_time_ratio
+- job_cut_length_ratio
+- job_bevel_quantity_ratio
+- machine_current_wo_count_ratio
+- machine_current_processing_time_ratio
+- same_phase1_bay
+
+현재 Phase 2 policy도 Phase 1과 동일하게 candidate edge feature만 직접 사용한다.
+
+score_i = MLP(edge_feature_i)
+
+
+5. Phase 2에서 node feature를 직접 안 써도 학습되는 이유
+
+Phase 2 edge feature 안에도 W/O 정보와 Machine 정보가 이미 들어 있다.
+
+예를 들어 W/O A -> PLS21 후보 edge feature에는 아래 정보가 들어 있다.
+
+W/O A 정보:
+- job_processing_time_ratio
+- job_cut_length_ratio
+- job_bevel_quantity_ratio
+
+PLS21 현재 상태:
+- machine_current_wo_count_ratio
+- machine_current_processing_time_ratio
+
+Phase 1과의 연결 관계:
+- same_phase1_bay
+
+즉 현재 Phase 2 edge feature도 다음 구조다.
+
+edge feature = W/O feature + Machine feature + W/O-Machine relation feature
+
+그래서 node feature를 직접 사용하지 않아도 MLP 학습이 가능하다.
+
+
+6. 그럼 node feature는 왜 남겨두는가?
+
+현재 node feature는 즉시 scoring에 쓰이지 않지만, 남겨둘 이유가 있다.
+
+6.1 graph state 구조 검증
+
+node feature가 있으면 아래를 명확히 확인할 수 있다.
+
+- block node가 몇 개인지
+- bay node가 몇 개인지
+- W/O node가 몇 개인지
+- machine node가 몇 개인지
+- candidate edge가 어떤 node 사이에 생겼는지
+
+즉 graph state가 제대로 만들어졌는지 검증하기 쉽다.
+
+6.2 디버깅/시각화
+
+나중에 graph state를 그림이나 CSV로 볼 때 node feature가 있으면 설명이 가능하다.
+
+예:
+- 이 Bay node는 현재 강재수량 부하가 높다.
+- 이 Machine node는 현재 처리시간 부하가 높다.
+- 이 W/O node는 절단장이 크다.
+
+6.3 GNN 전환 대비
+
+향후 GNN으로 바꿀 경우 필요한 입력은 다음이다.
+
+node feature
+edge feature
+graph connectivity
+
+현재 graph state에 node feature를 남겨두면,
+나중에 model만 아래처럼 바꿀 수 있다.
+
+현재:
+
+edge feature -> MLP scorer -> score
+
+GNN 전환:
+
+node feature + edge feature + graph connectivity
+-> GNN encoder
+-> candidate embedding
+-> MLP scoring head
+-> score
+
+즉 node feature는 현재 scoring에는 직접 쓰이지 않지만,
+future model interface를 유지하는 역할이 있다.
+
+
+7. 현재 구조의 정확한 이름
+
+부정확한 표현:
+
+- GNN
+- heterogeneous GNN
+- graph neural network policy
+
+현재는 이것들이 아니다.
+
+정확한 표현:
+
+- graph-structured candidate state
+- edge-feature MLP scorer
+- pointer-style candidate scoring
+
+한국어 표현:
+
+- 그래프 구조 후보 상태
+- 후보 edge feature 기반 MLP scorer
+- pointer-style 후보 선택 정책
+
+가장 정확한 한 줄:
+
+현재 모델은 graph state를 만들지만, graph neural network는 아니며,
+각 후보 edge에 필요한 node 정보를 압축해 넣고 MLP로 scoring하는 구조다.
+
+
+8. 이 구조가 현재 단계에서 나쁘지 않은 이유
+
+현재 단계에서는 오히려 이 구조가 타당하다.
+
+이유:
+
+1. 학습 데이터가 많지 않다.
+2. 제약조건과 목적함수가 아직 계속 바뀐다.
+3. edge feature가 의사결정에 필요한 핵심 값을 직접 담고 있다.
+4. 디버깅이 쉽다.
+5. Bay 수나 Machine 수가 늘어도 모델 input dimension이 바뀌지 않는다.
+6. self-labeling teacher의 선택 이유를 edge feature와 score로 설명하기 쉽다.
+
+
+9. Bay 수나 Machine 수가 늘어도 문제가 없는 이유
+
+현재 model input dimension은 node 수가 아니라 edge feature 길이에 의해 결정된다.
+
+Phase 1:
+
+edge feature dim = 10
+
+Bay가 3개일 때:
+
+candidate edge 수 = block 수 x 3
+
+Bay가 4개일 때:
+
+candidate edge 수 = block 수 x 4
+
+하지만 각 edge feature는 여전히 10차원이다.
+
+따라서 MLP는 같은 함수를 더 많은 후보 edge에 반복 적용하면 된다.
+
+Phase 2도 같다.
+
+edge feature dim = 6
+
+Machine이 7대일 때:
+
+candidate edge 수 = 가능한 W/O-Machine 조합 수
+
+Machine이 13대일 때:
+
+candidate edge 수가 늘어난다.
+
+하지만 각 edge feature는 여전히 6차원이다.
+
+따라서 모델 구조는 깨지지 않는다.
+
+
+10. 한계
+
+현재 구조의 한계도 명확하다.
+
+1. node feature가 직접 사용되지 않으므로 graph 전체 관계를 학습하지 않는다.
+2. W/O-W/O 관계, Machine-Bay hierarchy, Block-W/O 관계를 message passing으로 학습하지 않는다.
+3. edge feature 설계에 성능이 많이 의존한다.
+4. 사람이 projection gap, 현재 부하 같은 feature를 잘 만들어줘야 한다.
+
+따라서 나중에 relation이 많아지면 GNN/attention encoder를 검토해야 한다.
+
+특히 Phase 2/3에서 다음 정보가 늘어나면 GNN/attention 가치가 커진다.
+
+- 계열별 선호 설비
+- 광폭 가능 설비
+- Machine-Bay 소속 관계
+- W/O-Block 소속 관계
+- W/O-W/O batch compatibility
+- 길이합 55,000 제약
+- batch 처리시간 max rule
+
+
+11. 최종 정리
+
+현재 MLP 버전에서 node feature는 scoring에 직접 쓰이지 않는다.
+하지만 edge feature 안에 node 정보가 이미 압축되어 있으므로 학습은 가능하다.
+
+현재 구조는 GNN이 아니라:
+
+graph-structured candidate state + edge-feature MLP scorer
+
+이다.
+
+이 구조는 현재처럼 제약과 목적함수가 계속 바뀌고,
+데이터가 많지 않고,
+설명 가능한 휴리스틱/self-labeling 기반 학습이 필요한 단계에서는 적합하다.
+
+GNN은 지금 구조를 버리고 새로 만드는 것이 아니라,
+현재 graph state를 그대로 두고 scorer 앞단 encoder를 교체하는 방식으로 나중에 비교하면 된다.

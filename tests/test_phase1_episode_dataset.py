@@ -7,9 +7,10 @@ import unittest
 
 import pandas as pd
 
-from Train.algorithm.phase1_imitation import train_phase1_pointer_imitation
-from Utils.phase1_episode_dataset import (
+from Phase1.imitation import train_phase1_pointer_imitation
+from Utils.phase1.phase1_episode_dataset import (
     build_phase1_actual_workday_jobs,
+    build_phase1_candidate_workbook_jobs,
     build_phase1_episode_jobs,
     write_phase1_episode_dataset,
 )
@@ -67,6 +68,30 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
         self.assertTrue(all(2 <= count <= 5 for count in block_counts))
         self.assertTrue(all(episode["jobs"] for episode in episodes))
         self.assertEqual([episode["episode_id"] for episode in episodes], ["EP00001", "EP00002", "EP00003", "EP00004"])
+
+    def test_builds_hard_case_episode_jobs_with_lower_steel_cut_correlation(self) -> None:
+        """Hard-case sampling should expose episodes where steel and cut length diverge."""
+
+        episodes = build_phase1_episode_jobs(
+            actual_blocks=self._actual_blocks(),
+            episode_count=3,
+            min_blocks=6,
+            max_blocks=6,
+            seed=21,
+            noise_ratio=0.0,
+            hard_case_ratio=1.0,
+            hard_case_mode="cut_shuffle",
+            hard_case_target_corr=0.85,
+            hard_case_max_attempts=20,
+        )
+
+        self.assertEqual(len(episodes), 3)
+        for episode in episodes:
+            self.assertEqual(episode["case_type"], "hard_cut_shuffle")
+            self.assertEqual(episode["hard_case_mode"], "cut_shuffle")
+            self.assertLessEqual(episode["hard_case_corr_steel_cut_after"], 0.85)
+            if episode["hard_case_corr_steel_cut_before"] > 0.85:
+                self.assertLess(episode["hard_case_corr_steel_cut_after"], episode["hard_case_corr_steel_cut_before"])
 
     def test_train_imitation_reports_eval_metrics_from_holdout_episodes(self) -> None:
         """The trainer should train on train episodes and report holdout accuracy."""
@@ -128,6 +153,50 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
         self.assertEqual(set(first_jobs), {"WO1", "WO2"})
         self.assertEqual(set(second_jobs), {"WO3"})
         self.assertNotIn("WO4", first_jobs)
+
+    def test_builds_actual_8days_from_candidate_workbook(self) -> None:
+        """Fixed Phase 1 actual_8days validation should use the candidate block workbook grain."""
+
+        rows = pd.DataFrame(
+            [
+                {
+                    "PROJ_NO": "P1",
+                    "BLK_NO": "B1",
+                    "LTH": 10000,
+                    "THK": 13,
+                    "CUT_LTH": 900.0,
+                    "STL_QTY": 6,
+                    "BV_QTY": 2,
+                    "CUT_BAY": 22,
+                },
+                {
+                    "PROJ_NO": "P2",
+                    "BLK_NO": "B2",
+                    "LTH": 11000,
+                    "THK": 16,
+                    "CUT_LTH": 1200.0,
+                    "STL_QTY": 8,
+                    "BV_QTY": 5,
+                    "CUT_BAY": 24,
+                },
+            ]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "candidate.xlsx"
+            with pd.ExcelWriter(source) as writer:
+                rows.to_excel(writer, sheet_name="20260407_BLK", index=False)
+            payloads = build_phase1_candidate_workbook_jobs(
+                candidate_path=source,
+                workdays=["20260407"],
+                bay_ids=["22", "23", "24"],
+            )
+
+        payload = payloads[0]
+        self.assertEqual(payload["metadata"]["validation_source"], "actual_8days")
+        self.assertEqual(payload["metadata"]["evaluation_input_type"], "candidate_workbook")
+        self.assertEqual(payload["metadata"]["block_count"], 2)
+        self.assertEqual({job.block_set_id for job in payload["jobs"].values()}, {"P1::B1", "P2::B2"})
+        self.assertEqual({job.source_cut_bay for job in payload["jobs"].values()}, {"22", "24"})
 
     @staticmethod
     def _actual_blocks() -> pd.DataFrame:

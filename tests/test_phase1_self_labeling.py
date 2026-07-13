@@ -11,14 +11,16 @@ import json
 import tempfile
 import unittest
 
-from Train.algorithm.phase1_self_labeling import (
+from Phase1.self_labeling import (
     PHASE1_SELF_LABEL_HEURISTIC_BANK,
     Phase1SelfLabelCandidate,
+    _projected_bank_score,
     _select_best_candidate,
     _score_bay_loads,
     run_phase1_policy_rollout,
     train_phase1_pointer_self_labeling,
 )
+from Utils.phase1.phase1_bay_balancer import Phase1Block
 
 
 class Phase1SelfLabelingTest(unittest.TestCase):
@@ -71,7 +73,7 @@ class Phase1SelfLabelingTest(unittest.TestCase):
         self.assertEqual(len(candidate.assignments), 2)
         self.assertEqual([step.phase for step in candidate.transitions[0:2]], ["SELECT_BLOCK", "SELECT_BAY"])
         self.assertIn(candidate.assignments["P1::A"], {"22", "23"})
-        self.assertEqual(len(_score_bay_loads(candidate.bay_loads, "steel_first")), 4)
+        self.assertEqual(len(_score_bay_loads(candidate.bay_loads, "steel_first")), 3)
 
     def test_self_label_training_writes_inspectable_learning_data(self) -> None:
         """Training should leave candidate and best-action data for audit."""
@@ -152,6 +154,38 @@ class Phase1SelfLabelingTest(unittest.TestCase):
         self.assertEqual({row["block_count"] for row in candidate_rows}, {"2", "3"})
         self.assertEqual({row["problem_id"] for row in best_rows}, {"EP00001", "EP00002"})
 
+    def test_lcp_uses_three_gap_score_after_hard_masking(self) -> None:
+        """LCP no longer prepends Bay24 count; Bay24 avoidance is a candidate mask."""
+
+        bay_loads = {
+            "22": self._load(steel=40, cut=1000.0, bevel=10, long_cut=0),
+            "23": self._load(steel=20, cut=1000.0, bevel=10, long_cut=0),
+            "24": self._load(steel=20, cut=0.0, bevel=0, long_cut=0),
+        }
+        block = Phase1Block(
+            block_set_id="P1::LONG",
+            project_no="P1",
+            block_no="LONG",
+            job_ids=("WO_LONG",),
+            wo_count=1,
+            steel_quantity_sum=10,
+            cut_length_sum=10.0,
+            bevel_quantity_sum=1,
+            long_cut_over_1000=1,
+            allowed_bay_ids=("22", "23", "24"),
+            length_avg=None,
+            thickness_avg=None,
+        )
+
+        self.assertEqual(
+            _projected_bank_score(bay_loads, "23", block, "long_cut_preferred"),
+            (20.0, 1010.0, 11.0, "23"),
+        )
+        self.assertLess(
+            _projected_bank_score(bay_loads, "24", block, "long_cut_preferred"),
+            _projected_bank_score(bay_loads, "23", block, "long_cut_preferred"),
+        )
+
     @staticmethod
     def _job(
         job_id: str,
@@ -185,6 +219,7 @@ class Phase1SelfLabelingTest(unittest.TestCase):
             "long_cut_bay24_count": long_cut,
             "wo_count": 1,
             "block_count": 1,
+            "capacity_weight": 1.0,
         }
 
     @staticmethod

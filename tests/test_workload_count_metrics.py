@@ -2,7 +2,7 @@
 
 import unittest
 
-from Utils.playback_builder import build_metrics_from_rows
+from Utils.reporting.playback_builder import build_metrics_from_rows
 
 
 class WorkloadCountMetricsTest(unittest.TestCase):

@@ -35,7 +35,6 @@ factory:
         - PLS31
         - PLS32
         - PLS33
-device: cpu
 simulation:
   start_date: '2026-04-24'
   minutes_per_day: 1440
@@ -77,9 +76,6 @@ batch:
   processing_time_rule: max_individual
 agent:
   default_heuristic: batch_fill_spt
-network:
-  hidden_dim: 128
-  num_gnn_layers: 2
 constraints:
   categories:
     machine: true
@@ -144,25 +140,3 @@ reward:
   load_balance_weight: 0.1
   priority_bonus_weight: 0.02
   soft_penalty_weight: 1.0
-train:
-  episodes: 3
-  algorithm: ppo
-algorithm:
-  reinforce:
-    lr: 0.0005
-    gamma: 0.99
-    entropy_coef: 0.001
-  ppo:
-    lr: 0.0003
-    gamma: 0.99
-    clip_eps: 0.2
-    update_epochs: 2
-    value_coef: 0.5
-    entropy_coef: 0.001
-  self_labeling:
-    lr: 0.0005
-    rollout_samples: 2
-    imitation_epochs: 2
-    sample_temperature: 1.0
-eval:
-  save_summary: false
