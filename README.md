@@ -9,9 +9,11 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
 1. 진행 상태와 남은 작업: [`현재과제_진행체크리스트.md`](현재과제_진행체크리스트.md)
 2. 실행 코드·state·action·feature·학습·데이터 계약:
    [`다계열_Phase1_정책_및_합성데이터_생성_계약.md`](다계열_Phase1_정책_및_합성데이터_생성_계약.md)
-3. 장시간 학습·재개·Phase 2 upstream 비교 실행:
+3. MIXED 합성데이터 인과 생성 최종 계약:
+   [`MIXED_합성데이터_인과생성_최종정리.txt`](MIXED_합성데이터_인과생성_최종정리.txt)
+4. 장시간 학습·재개·Phase 2 upstream 비교 실행:
    [`다계열_Phase1_Phase2_학습_실행_가이드.md`](다계열_Phase1_Phase2_학습_실행_가이드.md)
-4. 빠른 실행 방법: 이 README
+5. 빠른 실행 방법: 이 README
 
 그 밖의 루트 md는 과거 설계 근거 archive이며 현재 실행 계약보다 우선하지 않습니다.
 
@@ -66,12 +68,27 @@ Phase 2에서 해당 Bay의 PLS 설비만 선택합니다.
 
 공개 생성기는 `Utils/data/multi_series_formula_data_generator.py`입니다.
 
-1. 실제 물리 블록 `(PROJ_NO, BLK_NO)`에서 계열 조합을 하나의 donor 단위로 읽습니다.
-2. 같은 물리 블록의 계열별 `WO_QTY`, `LTH`, `THK`, `BTH`, `CUT_LTH`, `BV_QTY`
-   percentile 공동관계를 함께 표본화합니다.
-3. 계열별 주변분포를 유지한 생성 block을 donor 공동 rank에 일대일 매칭합니다.
-4. 생성 W/O를 block-series에 연결하고 block 집계 identity를 검증합니다.
-5. Phase 1과 Phase 2는 같은 생성 episode의 W/O를 사용합니다.
+1. 발표자료 고정식으로 물리 블록 목표 특성과 전체 `WO_QTY`를 먼저 생성합니다.
+2. 전체 `WO_QTY`로 배분 가능한 실적 계열 조합 하나를 실적 확률로 표본화합니다.
+3. 물리 블록 특성이 가까운 실적 count-vector profile을 이용해 전체 `WO_QTY`를
+   선택된 계열에 양의 정수로 배분합니다.
+4. 확정된 계열별 `WO_QTY`를 각 계열 생성기에 입력해 W/O 특성을 생성합니다.
+5. 생성 W/O를 `(PROJ_NO, BLK_NO, GYEL)`로 역집계하고 block-series identity를
+   엄격히 검증합니다.
+6. Phase 1과 Phase 2는 같은 생성 episode의 W/O를 사용합니다.
+
+```text
+WO_QTY = max(
+    1,
+    round((0.01203 * CUT_LTH + 2.014) * Gamma(shape=7.616, scale=0.128))
+)
+
+N_NP + N_FN + N_FL + N_NC = WO_QTY
+```
+
+계열별 생성기가 W/O 수를 독립 생성한 뒤 합치거나, 생성 후 block swap·Hungarian
+매칭·임의 비율 보정을 수행하지 않습니다. 배분이나 집계가 불가능하면 다른 값으로
+대체하지 않고 원인을 출력한 뒤 실패합니다.
 
 NP component는 발표자료의 고정 수식을 사용합니다. FN/FL/NC는 동일한 계층 생성
 흐름과 계열별 empirical profile을 사용합니다. 전 계열 `TACT_TIME`은 현재 확정된
