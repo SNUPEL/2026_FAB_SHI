@@ -1,4 +1,4 @@
-"""NP/FN/FL/NC별 실적·생성 W/O 및 블록 상관관계 히트맵을 생성한다."""
+"""MIXED 실적·생성 데이터의 계열별·계열 간 상관관계 히트맵을 생성한다."""
 
 from __future__ import annotations
 
@@ -466,6 +466,58 @@ def _cross_series_matrix(metrics: pd.DataFrame, correlation_column: str) -> pd.D
     return matrix
 
 
+def _series_pair_matrix(
+    metrics: pd.DataFrame,
+    series_a: str,
+    series_b: str,
+    correlation_column: str,
+) -> pd.DataFrame:
+    """한 계열 쌍의 특성 간 상관을 읽기 쉬운 6×6 행렬로 변환한다."""
+
+    required = {
+        "series_a",
+        "feature_a",
+        "series_b",
+        "feature_b",
+        correlation_column,
+    }
+    status_column = correlation_column.replace("correlation", "status")
+    required.add(status_column)
+    missing = sorted(required - set(metrics.columns))
+    if missing:
+        print(
+            "[ERROR][plot_multi_series_generator_heatmaps._series_pair_matrix] "
+            f"cause=missing_columns key={series_a}-{series_b} input={missing}"
+        )
+        raise RuntimeError(f"missing_series_pair_columns[{series_a}-{series_b}]: {missing}")
+
+    selected = metrics.loc[
+        metrics["series_a"].eq(series_a) & metrics["series_b"].eq(series_b)
+    ]
+    if selected.empty:
+        print(
+            "[ERROR][plot_multi_series_generator_heatmaps._series_pair_matrix] "
+            f"cause=missing_series_pair input={series_a}-{series_b}"
+        )
+        raise RuntimeError(f"missing_series_pair: {series_a}-{series_b}")
+
+    matrix = pd.DataFrame(np.nan, index=JOINT_FEATURES, columns=JOINT_FEATURES, dtype=float)
+    for row in selected.itertuples(index=False):
+        value = getattr(row, correlation_column)
+        if getattr(row, status_column) != "ok" or not np.isfinite(float(value)):
+            continue
+        matrix.loc[row.feature_a, row.feature_b] = float(value)
+    return matrix
+
+
+def _cross_series_absolute_error_matrix(metrics: pd.DataFrame) -> pd.DataFrame:
+    """실적·생성 계열 간 상관계수의 절대오차를 대칭 행렬로 만든다."""
+
+    actual = _cross_series_matrix(metrics, "actual_correlation")
+    generated = _cross_series_matrix(metrics, "generated_correlation")
+    return (actual - generated).abs()
+
+
 def _plot_cross_series_comparison(
     metrics: pd.DataFrame,
     output_path: Path,
@@ -512,6 +564,109 @@ def _plot_cross_series_comparison(
     plt.close(figure)
 
 
+def _plot_series_pair_comparison(
+    metrics: pd.DataFrame,
+    series_a: str,
+    series_b: str,
+    output_path: Path,
+    font: font_manager.FontProperties,
+) -> None:
+    """한 계열 쌍의 실적·생성 공동 상관을 6×6 확대 그림으로 저장한다."""
+
+    actual = _series_pair_matrix(metrics, series_a, series_b, "actual_correlation")
+    generated = _series_pair_matrix(metrics, series_a, series_b, "generated_correlation")
+    labels = [FEATURE_LABELS[feature] for feature in JOINT_FEATURES]
+    actual.index = generated.index = [f"{series_a} {label}" for label in labels]
+    actual.columns = generated.columns = [f"{series_b} {label}" for label in labels]
+
+    pair_rows = metrics.loc[
+        metrics["series_a"].eq(series_a) & metrics["series_b"].eq(series_b)
+    ]
+    actual_pair_count = int(pair_rows["actual_pair_count"].iloc[0])
+    generated_pair_count = int(pair_rows["generated_pair_count"].iloc[0])
+
+    sns.set_theme(style="white")
+    plt.rcParams["font.family"] = font.get_name()
+    plt.rcParams["axes.unicode_minus"] = False
+    figure, axes = plt.subplots(1, 2, figsize=(17, 7), constrained_layout=True)
+    common = {
+        "annot": True,
+        "fmt": ".2f",
+        "cmap": "rocket",
+        "vmin": -1.0,
+        "vmax": 1.0,
+        "square": True,
+        "linewidths": 0.35,
+        "linecolor": "white",
+        "annot_kws": {"size": 8},
+    }
+    sns.heatmap(actual, ax=axes[0], cbar=False, mask=actual.isna(), **common)
+    sns.heatmap(
+        generated,
+        ax=axes[1],
+        cbar=True,
+        cbar_kws={"label": "Pearson r", "shrink": 0.85},
+        mask=generated.isna(),
+        **common,
+    )
+    axes[0].set_title(
+        f"실적 동일 블록 ({actual_pair_count}쌍)",
+        fontproperties=font,
+        fontsize=14,
+    )
+    axes[1].set_title(
+        f"생성 동일 블록 ({generated_pair_count}쌍)",
+        fontproperties=font,
+        fontsize=14,
+    )
+    for axis in axes:
+        axis.tick_params(axis="x", rotation=45, labelsize=9)
+        axis.tick_params(axis="y", rotation=0, labelsize=9)
+    figure.suptitle(
+        f"동일 물리 블록 내 {series_a}-{series_b} 계열 공동분포",
+        fontproperties=font,
+        fontsize=18,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+
+
+def _plot_cross_series_absolute_error(
+    metrics: pd.DataFrame,
+    output_path: Path,
+    font: font_manager.FontProperties,
+) -> None:
+    """계열 간 상관계수 절대오차가 큰 위치를 한 장에 표시한다."""
+
+    matrix = _cross_series_absolute_error_matrix(metrics)
+    sns.set_theme(style="white")
+    plt.rcParams["font.family"] = font.get_name()
+    figure, axis = plt.subplots(figsize=(17, 15), constrained_layout=True)
+    sns.heatmap(
+        matrix,
+        ax=axis,
+        cmap="mako",
+        vmin=0.0,
+        vmax=1.0,
+        square=True,
+        linewidths=0.25,
+        linecolor="white",
+        mask=matrix.isna(),
+        cbar_kws={"label": "|실적 r - 생성 r|", "shrink": 0.8},
+    )
+    axis.set_title(
+        "동일 물리 블록 계열 간 상관계수 절대오차",
+        fontproperties=font,
+        fontsize=18,
+    )
+    axis.tick_params(axis="x", rotation=90, labelsize=7)
+    axis.tick_params(axis="y", rotation=0, labelsize=7)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(figure)
+
+
 def generate_heatmaps(
     actual_wo_path: Path,
     actual_block_path: Path,
@@ -519,7 +674,7 @@ def generate_heatmaps(
     seed: int,
     font_path: Path | None,
 ) -> list[Path]:
-    """하나의 MIXED 생성값으로 계열별 8개와 물리 블록 공동 heatmap 1개를 만든다."""
+    """최신 MIXED 생성값으로 계열 내부·계열 간 heatmap 16개를 만든다."""
 
     for path in (actual_wo_path, actual_block_path):
         if not path.is_file():
@@ -544,6 +699,7 @@ def generate_heatmaps(
     )
     font = _resolve_korean_font(font_path)
     outputs: list[Path] = []
+    error_summary_rows: list[dict] = []
     for family in SERIES:
         actual_wo, actual_block = _prepare_actual_family_data(
             actual_wos,
@@ -566,6 +722,24 @@ def generate_heatmaps(
                 features,
                 f"{family}_{key}_generated",
             )
+            upper = np.triu_indices(len(features), k=1)
+            errors = np.abs(
+                actual_matrix.to_numpy(dtype=float)[upper]
+                - generated_matrix.to_numpy(dtype=float)[upper]
+            )
+            error_summary_rows.append(
+                {
+                    "scope": "within_series",
+                    "series_a": family,
+                    "series_b": family,
+                    "grain": key,
+                    "relation_count": int(len(errors)),
+                    "actual_pair_count": int(len(actual)),
+                    "generated_pair_count": int(len(generated_frame)),
+                    "mean_absolute_correlation_error": float(errors.mean()),
+                    "max_absolute_correlation_error": float(errors.max()),
+                }
+            )
             output_path = output_dir / f"{family.lower()}_{key}_correlation_heatmap.png"
             _plot_comparison(
                 actual_matrix,
@@ -582,13 +756,56 @@ def generate_heatmaps(
                 f"generated_rows={len(generated_frame)} output={output_path}"
             )
 
-    actual_joint = fit_physical_block_joint_profile(actual_wos, actual_blocks).rows
+    actual_joint = fit_physical_block_joint_profile(actual_wos, actual_blocks).rows.rename(
+        columns={"SERIES_WO_QTY": "WO_QTY"}
+    )
     joint_metrics = _merge_cross_series_metrics(actual_joint, generated.block_df)
     metrics_path = output_dir / "physical_block_cross_series_correlations.csv"
     joint_metrics.to_csv(metrics_path, index=False, encoding="utf-8-sig")
     joint_path = output_dir / "physical_block_cross_series_correlation_heatmap.png"
     _plot_cross_series_comparison(joint_metrics, joint_path, font)
     outputs.append(joint_path)
+
+    for series_a, series_b in combinations(SERIES, 2):
+        pair_rows = joint_metrics.loc[
+            joint_metrics["series_a"].eq(series_a)
+            & joint_metrics["series_b"].eq(series_b)
+            & joint_metrics["absolute_error"].notna()
+        ]
+        if len(pair_rows) != len(JOINT_FEATURES) ** 2:
+            print(
+                "[ERROR][plot_multi_series_generator_heatmaps.generate_heatmaps] "
+                f"cause=incomplete_pair_metrics key={series_a}-{series_b} input={len(pair_rows)}"
+            )
+            raise RuntimeError(
+                f"incomplete_pair_metrics[{series_a}-{series_b}]: {len(pair_rows)}"
+            )
+        pair_path = output_dir / f"physical_block_{series_a.lower()}_{series_b.lower()}_heatmap.png"
+        _plot_series_pair_comparison(joint_metrics, series_a, series_b, pair_path, font)
+        outputs.append(pair_path)
+        error_summary_rows.append(
+            {
+                "scope": "cross_series_physical_block",
+                "series_a": series_a,
+                "series_b": series_b,
+                "grain": "block",
+                "relation_count": int(len(pair_rows)),
+                "actual_pair_count": int(pair_rows["actual_pair_count"].iloc[0]),
+                "generated_pair_count": int(pair_rows["generated_pair_count"].iloc[0]),
+                "mean_absolute_correlation_error": float(pair_rows["absolute_error"].mean()),
+                "max_absolute_correlation_error": float(pair_rows["absolute_error"].max()),
+            }
+        )
+
+    error_path = output_dir / "physical_block_cross_series_absolute_error_heatmap.png"
+    _plot_cross_series_absolute_error(joint_metrics, error_path, font)
+    outputs.append(error_path)
+    error_summary_path = output_dir / "correlation_error_summary.csv"
+    pd.DataFrame(error_summary_rows).to_csv(
+        error_summary_path,
+        index=False,
+        encoding="utf-8-sig",
+    )
     valid_errors = joint_metrics["absolute_error"].dropna()
     print(
         "[CHECK][plot_multi_series_generator_heatmaps.generate_heatmaps] "
@@ -597,7 +814,12 @@ def generate_heatmaps(
         f"metrics={metrics_path} output={joint_path}"
     )
 
-    if len(outputs) != 9 or any(not path.is_file() for path in outputs) or not metrics_path.is_file():
+    if (
+        len(outputs) != 16
+        or any(not path.is_file() for path in outputs)
+        or not metrics_path.is_file()
+        or not error_summary_path.is_file()
+    ):
         print(
             "[ERROR][plot_multi_series_generator_heatmaps.generate_heatmaps] "
             f"cause=output_count_mismatch input={len(outputs)}"
@@ -605,14 +827,14 @@ def generate_heatmaps(
         raise RuntimeError(f"heatmap_output_count_mismatch: {len(outputs)}")
     print(
         "[VALIDATION][plot_multi_series_generator_heatmaps.generate_heatmaps] "
-        f"passed=true files={len(outputs)} output={output_dir}"
+        f"passed=true files={len(outputs)} summary={error_summary_path} output={output_dir}"
     )
     return outputs
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="MIXED 생성값의 계열별 8개 및 물리 블록 공동분포 heatmap 생성",
+        description="MIXED 생성값의 계열별·계열 쌍별 상관관계 heatmap 16개 생성",
     )
     parser.add_argument(
         "--actual-wo-xlsx",

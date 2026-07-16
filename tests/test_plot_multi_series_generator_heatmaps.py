@@ -13,9 +13,11 @@ from scripts.plot_multi_series_generator_heatmaps import (
     BLOCK_FEATURES,
     JOINT_FEATURES,
     _correlation_matrix,
+    _cross_series_absolute_error_matrix,
     _physical_block_cross_series_metrics,
     _prepare_actual_family_data,
     _resolve_korean_font,
+    _series_pair_matrix,
 )
 
 
@@ -139,6 +141,54 @@ class MultiSeriesGeneratorHeatmapTest(unittest.TestCase):
         self.assertEqual(fn_nc["status"], "insufficient_pairs")
         self.assertEqual(int(fn_nc["pair_count"]), 0)
         self.assertTrue(pd.isna(fn_nc["correlation"]))
+
+    def test_series_pair_matrix_preserves_feature_direction(self) -> None:
+        metrics = pd.DataFrame(
+            [
+                {
+                    "series_a": "NP",
+                    "feature_a": "LTH",
+                    "series_b": "FL",
+                    "feature_b": "CUT_LTH",
+                    "actual_status": "ok",
+                    "generated_status": "ok",
+                    "actual_correlation": 0.75,
+                    "generated_correlation": 0.25,
+                    "absolute_error": 0.50,
+                }
+            ]
+        )
+
+        actual = _series_pair_matrix(metrics, "NP", "FL", "actual_correlation")
+        generated = _series_pair_matrix(metrics, "NP", "FL", "generated_correlation")
+
+        self.assertEqual(actual.shape, (len(JOINT_FEATURES), len(JOINT_FEATURES)))
+        self.assertAlmostEqual(float(actual.loc["LTH", "CUT_LTH"]), 0.75)
+        self.assertAlmostEqual(float(generated.loc["LTH", "CUT_LTH"]), 0.25)
+        self.assertTrue(pd.isna(actual.loc["CUT_LTH", "LTH"]))
+
+    def test_cross_series_absolute_error_matrix_is_symmetric(self) -> None:
+        metrics = pd.DataFrame(
+            [
+                {
+                    "series_a": "NP",
+                    "feature_a": "LTH",
+                    "series_b": "FL",
+                    "feature_b": "CUT_LTH",
+                    "actual_status": "ok",
+                    "generated_status": "ok",
+                    "actual_correlation": 0.75,
+                    "generated_correlation": 0.25,
+                    "absolute_error": 0.50,
+                }
+            ]
+        )
+
+        matrix = _cross_series_absolute_error_matrix(metrics)
+
+        self.assertAlmostEqual(float(matrix.loc["NP:LTH", "FL:CUT_LTH"]), 0.50)
+        self.assertAlmostEqual(float(matrix.loc["FL:CUT_LTH", "NP:LTH"]), 0.50)
+        self.assertTrue(pd.isna(matrix.loc["NP:CUT_LTH", "FL:LTH"]))
 
     def test_korean_font_is_registered_for_matplotlib_lookup(self) -> None:
         font_path = Path("/mnt/c/Windows/Fonts/malgun.ttf")

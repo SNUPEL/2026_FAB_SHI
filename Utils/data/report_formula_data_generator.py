@@ -519,6 +519,8 @@ def generate_report_formula_data(
     gyel: str = "NP",
     thickness_specs: Sequence[float] = DEFAULT_THICKNESS_SPECS,
     bth_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
+    wo_counts: Sequence[int] | None = None,
+    block_seeds: Sequence[int] | None = None,
 ) -> ReportFormulaGeneration:
     """Generate synthetic W/O and block rows using only the PDF formulas."""
 
@@ -533,15 +535,39 @@ def generate_report_formula_data(
         )
         raise RuntimeError("PDF fixed-formula generator supports NP only")
     _validate_thickness_specs(thickness_specs)
+    resolved_wo_counts = _validate_optional_positive_integer_sequence(
+        values=wo_counts,
+        expected_length=n_blocks,
+        field_name="wo_counts",
+    )
+    resolved_block_seeds = _validate_optional_positive_integer_sequence(
+        values=block_seeds,
+        expected_length=n_blocks,
+        field_name="block_seeds",
+    )
     rng = np.random.default_rng(seed)
     wo_rows: List[Dict] = []
     block_rows: List[Dict] = []
     for block_index in range(1, n_blocks + 1):
         project_no = f"SYNTH_PROJ_{(block_index - 1) // 1000 + 1}"
         block_no = f"SYNTH_BLK_{block_index:06d}"
-        seed_block = _generate_block_seed_values(rng, thickness_specs)
+        block_rng = (
+            np.random.default_rng(resolved_block_seeds[block_index - 1])
+            if resolved_block_seeds is not None
+            else rng
+        )
+        requested_wo_count = (
+            resolved_wo_counts[block_index - 1]
+            if resolved_wo_counts is not None
+            else None
+        )
+        seed_block = _generate_block_seed_values(
+            block_rng,
+            thickness_specs,
+            wo_count_override=requested_wo_count,
+        )
         block_wo_rows = _generate_work_order_rows(
-            rng=rng,
+            rng=block_rng,
             project_no=project_no,
             block_no=block_no,
             gyel=normalized_gyel,
@@ -549,7 +575,7 @@ def generate_report_formula_data(
             block_thickness=float(seed_block["THK"]),
             block_mark_length=float(seed_block["MARK_LTH"]),
             block_cut_length=float(seed_block["CUT_LTH"]),
-            wo_count=int(seed_block["STL_QTY"]),
+            wo_count=int(seed_block["WO_QTY"]),
             thickness_specs=thickness_specs,
         )
         wo_rows.extend(block_wo_rows)
@@ -577,6 +603,28 @@ def generate_report_formula_data(
         f"passed=true blocks={len(block_df)} wos={len(wo_df)} seed={seed}"
     )
     return ReportFormulaGeneration(wo_df=wo_df, block_df=block_df)
+
+
+def generate_report_formula_block_seeds(
+    n_blocks: int,
+    seed: int,
+    thickness_specs: Sequence[float] = DEFAULT_THICKNESS_SPECS,
+) -> pd.DataFrame:
+    """PPT 블록 수식으로 물리 블록 목표와 전체 W/O 수를 먼저 생성한다."""
+
+    if n_blocks <= 0:
+        print(
+            "[ERROR][report_formula_data_generator.generate_report_formula_block_seeds] "
+            f"cause=invalid_n_blocks value={n_blocks}"
+        )
+        raise ValueError("n_blocks must be positive")
+    _validate_thickness_specs(thickness_specs)
+    rng = np.random.default_rng(seed)
+    rows = []
+    for physical_index in range(1, n_blocks + 1):
+        values = _generate_block_seed_values(rng, thickness_specs)
+        rows.append({"physical_index": physical_index, **values})
+    return pd.DataFrame(rows)
 
 
 def build_report_formula_episode_jobs(
@@ -797,7 +845,11 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
             raise RuntimeError(f"STL_QTY mismatch for block {key}")
 
 
-def _generate_block_seed_values(rng: np.random.Generator, thickness_specs: Sequence[float]) -> Dict[str, float | int]:
+def _generate_block_seed_values(
+    rng: np.random.Generator,
+    thickness_specs: Sequence[float],
+    wo_count_override: int | None = None,
+) -> Dict[str, float | int]:
     block_length = float(np.clip(rng.normal(BLOCK_LENGTH_MEAN, BLOCK_LENGTH_STD), BLOCK_LENGTH_MIN, BLOCK_LENGTH_MAX))
     if rng.random() < BLOCK_MARK_ZERO_INFLATION:
         block_mark = 0.0
@@ -810,13 +862,20 @@ def _generate_block_seed_values(rng: np.random.Generator, thickness_specs: Seque
             + BLOCK_MARK_GAMMA_SHIFT,
         )
     block_cut = max(0.0, (BLOCK_CUT_A * block_mark + BLOCK_CUT_B) * rng.gamma(BLOCK_CUT_GAMMA_SHAPE, BLOCK_CUT_GAMMA_SCALE))
-    steel_quantity = max(1, int(round((BLOCK_STEEL_A * block_cut + BLOCK_STEEL_B) * rng.gamma(BLOCK_STEEL_GAMMA_SHAPE, BLOCK_STEEL_GAMMA_SCALE))))
-    block_thickness_raw = BLOCK_THICKNESS_A * np.log(steel_quantity) + BLOCK_THICKNESS_B + rng.normal(0.0, BLOCK_THICKNESS_STD)
+    formula_wo_count = max(1, int(round((BLOCK_STEEL_A * block_cut + BLOCK_STEEL_B) * rng.gamma(BLOCK_STEEL_GAMMA_SHAPE, BLOCK_STEEL_GAMMA_SCALE))))
+    wo_count = int(wo_count_override) if wo_count_override is not None else formula_wo_count
+    if wo_count <= 0:
+        print(
+            "[ERROR][report_formula_data_generator._generate_block_seed_values] "
+            f"cause=invalid_wo_count_override value={wo_count_override}"
+        )
+        raise RuntimeError("wo_count_override must be positive")
+    block_thickness_raw = BLOCK_THICKNESS_A * np.log(wo_count) + BLOCK_THICKNESS_B + rng.normal(0.0, BLOCK_THICKNESS_STD)
     return {
         "LTH": block_length,
         "MARK_LTH": block_mark,
         "CUT_LTH": block_cut,
-        "STL_QTY": steel_quantity,
+        "WO_QTY": wo_count,
         "THK": _nearest_spec(block_thickness_raw, thickness_specs),
     }
 
@@ -1061,6 +1120,39 @@ def _validate_thickness_specs(specs: Sequence[float]) -> None:
     if any(float(value) <= 0 for value in specs):
         print(f"[ERROR][report_formula_data_generator._validate_thickness_specs] cause=non_positive_spec specs={specs}")
         raise RuntimeError("thickness specs must be positive")
+
+
+def _validate_optional_positive_integer_sequence(
+    values: Sequence[int] | None,
+    expected_length: int,
+    field_name: str,
+) -> tuple[int, ...] | None:
+    if values is None:
+        return None
+    raw_values = tuple(values)
+    resolved = []
+    invalid_value = None
+    for value in raw_values:
+        if isinstance(value, (bool, np.bool_)):
+            invalid_value = value
+            break
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            invalid_value = value
+            break
+        if not np.isfinite(numeric) or numeric <= 0 or not numeric.is_integer():
+            invalid_value = value
+            break
+        resolved.append(int(numeric))
+    if len(raw_values) != expected_length or invalid_value is not None:
+        print(
+            "[ERROR][report_formula_data_generator._validate_optional_positive_integer_sequence] "
+            f"cause=invalid_sequence field={field_name} expected={expected_length} "
+            f"actual={len(raw_values)} invalid_value={invalid_value} values={raw_values[:10]}"
+        )
+        raise RuntimeError(f"invalid {field_name}")
+    return tuple(resolved)
 
 
 def _require_columns(frame: pd.DataFrame, columns: Sequence[str], frame_name: str) -> None:

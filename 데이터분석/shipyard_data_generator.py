@@ -943,20 +943,33 @@ class ShipyardGenerator:
         return float(rng.choice(cand, p=weights / weights.sum()))
 
     # ================= 생성 =================
-    def _gen_one(self, rng):
+    def _gen_one(self, rng, wo_count=None):
         # 1) 블록 속성: 식의 형태는 공통이고 모든 값은 선택 계열의 실적 적합값이다.
         p = self.block_chain
         ML = float(np.clip(rng.normal(p['length_mean'], p['length_sd']), p['length_min'], p['length_max']))
         bMARK = max(p['mark_a'] * ML + p['mark_b'] + rng.normal(0, p['mark_residual_sd']), p['mark_min'])
         bMARK = _apply_zero_inflated_floor(bMARK, self.mk_lo)
         bCUT = max(p['cut_a'] * bMARK + p['cut_b'] + rng.normal(0, p['cut_residual_sd']), p['cut_min'])
-        n = _sample_wo_count(
-            expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
-            residual_sd=p['wo_count_residual_sd'],
-            minimum=self.n_min,
-            maximum=self.n_max,
-            rng=rng,
+        n = (
+            int(wo_count)
+            if wo_count is not None
+            else _sample_wo_count(
+                expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
+                residual_sd=p['wo_count_residual_sd'],
+                minimum=self.n_min,
+                maximum=self.n_max,
+                rng=rng,
+            )
         )
+        # 외부 count는 물리 블록 수식에서 먼저 확정한 값이므로 실적 지원범위로
+        # 자르지 않는다. 생성기 자체가 count를 뽑을 때만 적합 지원범위를 강제한다.
+        if n <= 0 or (wo_count is None and (n < self.n_min or n > self.n_max)):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator._gen_one] "
+                f"cause=invalid_generated_wo_count series={self.series} value={n} "
+                f"support={self.n_min}..{self.n_max} prescribed={wo_count is not None}"
+            )
+            raise RuntimeError("invalid_generated_wo_count")
         # 블록 두께 = f(W/O 수 n): a·ln(n)+b + 잔차 → 가장 가까운 규격으로 스냅
         thk_cont = self.thk_a * np.log(max(n, 1)) + self.thk_b + rng.normal(0, self.thk_sig)
         MT = float(self.blk_thk_vals[np.argmin(np.abs(self.blk_thk_vals - thk_cont))])
@@ -1052,14 +1065,34 @@ class ShipyardGenerator:
         wodf['TACT_TIME'] = _calculate_tact_time(CUT, MARK, THK, PT, BVQ)
         return wodf
 
-    def generate(self, n_blocks=800, seed=2026):
+    def generate(self, n_blocks=800, seed=2026, wo_counts=None, block_seeds=None):
         """합성 블록 n_blocks개 생성. 반환: (wo_df, blk_df). wo_df엔 BLK_ID 부여."""
         if not self._fitted:
             self.fit()
+        resolved_wo_counts = _validate_optional_positive_integer_sequence(
+            wo_counts,
+            int(n_blocks),
+            'wo_counts',
+        )
+        resolved_block_seeds = _validate_optional_positive_integer_sequence(
+            block_seeds,
+            int(n_blocks),
+            'block_seeds',
+        )
         rng = np.random.default_rng(seed)
         wos = []
         for bid in range(n_blocks):
-            w = self._gen_one(rng)
+            block_rng = (
+                np.random.default_rng(resolved_block_seeds[bid])
+                if resolved_block_seeds is not None
+                else rng
+            )
+            requested_count = (
+                resolved_wo_counts[bid]
+                if resolved_wo_counts is not None
+                else None
+            )
+            w = self._gen_one(block_rng, wo_count=requested_count)
             w = w.copy()
             w.insert(0, 'BLK_ID', bid)
             if self.series is not None:
@@ -1109,6 +1142,35 @@ class ShipyardGenerator:
         print(f"[{method}] WO 상관행렬 MAE={wmae:.3f} / 블록 MAE={bmae:.3f}")
         return {'wo_mae': wmae, 'blk_mae': bmae,
                 'wo_actual': cwa, 'wo_gen': cwg, 'blk_actual': cba, 'blk_gen': cbg}
+
+
+def _validate_optional_positive_integer_sequence(values, expected_length, field_name):
+    if values is None:
+        return None
+    raw_values = tuple(values)
+    resolved = []
+    invalid_value = None
+    for value in raw_values:
+        if isinstance(value, (bool, np.bool_)):
+            invalid_value = value
+            break
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            invalid_value = value
+            break
+        if not np.isfinite(numeric) or numeric <= 0 or not numeric.is_integer():
+            invalid_value = value
+            break
+        resolved.append(int(numeric))
+    if len(raw_values) != expected_length or invalid_value is not None:
+        print(
+            "[ERROR][shipyard_data_generator._validate_optional_positive_integer_sequence] "
+            f"cause=invalid_sequence field={field_name} expected={expected_length} "
+            f"actual={len(raw_values)} invalid_value={invalid_value} values={raw_values[:10]}"
+        )
+        raise RuntimeError(f"invalid_{field_name}")
+    return tuple(resolved)
 
 
 def main():

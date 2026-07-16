@@ -22,6 +22,44 @@ def _load_generator_module():
 
 
 class ShipyardDataGeneratorTest(unittest.TestCase):
+    def test_empirical_generator_accepts_prescribed_wo_counts(self) -> None:
+        module = _load_generator_module()
+        root = Path(__file__).parents[1]
+        generator = module.ShipyardGenerator(
+            root / "변경사항" / "절단WO_데이터.xlsx",
+            root / "변경사항" / "절단블록_데이터.xlsx",
+            mode="spearman",
+            series="FN",
+        ).fit()
+
+        work_orders, blocks = generator.generate(
+            n_blocks=3,
+            seed=20260716,
+            wo_counts=(1, 4, 2),
+            block_seeds=(101, 202, 303),
+        )
+
+        self.assertEqual(work_orders.groupby("BLK_ID", sort=True).size().tolist(), [1, 4, 2])
+        self.assertEqual(blocks.sort_values("BLK_ID")["WO_QTY"].tolist(), [1, 4, 2])
+
+    def test_empirical_generator_rejects_fractional_prescribed_counts(self) -> None:
+        module = _load_generator_module()
+        root = Path(__file__).parents[1]
+        generator = module.ShipyardGenerator(
+            root / "변경사항" / "절단WO_데이터.xlsx",
+            root / "변경사항" / "절단블록_데이터.xlsx",
+            mode="spearman",
+            series="FN",
+        ).fit()
+
+        with self.assertRaisesRegex(RuntimeError, "invalid_wo_counts"):
+            generator.generate(
+                n_blocks=1,
+                seed=20260716,
+                wo_counts=(1.5,),
+                block_seeds=(101,),
+            )
+
     def test_conditional_sampler_uses_bth_formula_and_stl_probability(self) -> None:
         module = _load_generator_module()
         rng = np.random.default_rng(17)

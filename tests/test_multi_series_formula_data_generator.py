@@ -8,18 +8,20 @@ import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
+from Utils.data import multi_series_formula_data_generator as multi_formula
 from Utils.data.multi_series_formula_data_generator import (
     DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
-    JOINT_BLOCK_FEATURES,
     SUPPORTED_SERIES,
     build_multi_series_formula_episode_jobs,
     fit_physical_block_joint_profile,
     generate_multi_series_formula_data,
-    match_generated_blocks_to_joint_targets,
-    sample_physical_block_joint_targets,
+    select_physical_block_series_allocations,
     validate_multi_series_formula_data,
 )
-from Utils.data.report_formula_data_generator import build_report_formula_episode_jobs
+from Utils.data.report_formula_data_generator import (
+    build_report_formula_episode_jobs,
+    generate_report_formula_block_seeds,
+)
 from Utils.phase1.phase1_episode_dataset import build_phase1_episode_jobs
 
 
@@ -34,27 +36,6 @@ def _joint_block_row(project: str, block: str, series: str, base: float) -> dict
         "CUT_LTH": base * 3.0,
         "BV_QTY": int(base // 100),
     }
-
-
-def _generated_joint_block(source_block_id: str, base: float) -> dict:
-    return {
-        "source_block_id": source_block_id,
-        "WO_QTY": int(base // 10),
-        "LTH": base,
-        "THK": base,
-        "BTH": base,
-        "CUT_LTH": base,
-        "BV_QTY": base,
-    }
-
-
-def _joint_target_rows(series: str, ranks: tuple[float, ...]) -> pd.DataFrame:
-    rows = []
-    for physical_index, rank in enumerate(ranks, start=1):
-        row = {"physical_index": physical_index, "GYEL": series}
-        row.update({f"{feature}__rank": rank for feature in JOINT_BLOCK_FEATURES})
-        rows.append(row)
-    return pd.DataFrame(rows)
 
 
 class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
@@ -84,13 +65,18 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
         p1_b1 = profile.rows.loc[
             profile.rows["PROJ_NO"].eq("P1") & profile.rows["BLK_NO"].eq("B1")
         ]
-        self.assertEqual(dict(zip(p1_b1["GYEL"], p1_b1["WO_QTY"])), {"FL": 1, "NP": 2})
-        for feature in JOINT_BLOCK_FEATURES:
-            self.assertIn(f"{feature}__rank", profile.rows.columns)
+        self.assertEqual(
+            dict(zip(p1_b1["GYEL"], p1_b1["SERIES_WO_QTY"])),
+            {"FL": 1, "NP": 2},
+        )
+        physical = profile.physical_rows.set_index(["PROJ_NO", "BLK_NO"])
+        self.assertEqual(int(physical.loc[("P1", "B1"), "TOTAL_WO_QTY"]), 3)
+        self.assertEqual(physical.loc[("P1", "B1"), "SERIES_COMBINATION"], ("FL", "NP"))
 
-    def test_joint_target_sampling_is_deterministic_and_never_splits_a_donor(self) -> None:
+    def test_series_allocation_is_conditioned_on_total_and_preserves_count_vector(self) -> None:
         work_orders = pd.DataFrame(
             [
+                {"PROJ_NO": "P1", "BLK_NO": "B1", "GYEL": "NP"},
                 {"PROJ_NO": "P1", "BLK_NO": "B1", "GYEL": "NP"},
                 {"PROJ_NO": "P1", "BLK_NO": "B1", "GYEL": "FL"},
                 {"PROJ_NO": "P1", "BLK_NO": "B2", "GYEL": "NP"},
@@ -104,52 +90,92 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
             ]
         )
         profile = fit_physical_block_joint_profile(work_orders, blocks)
+        block_seeds = pd.DataFrame(
+            [
+                {
+                    "physical_index": 1,
+                    "LTH": 100.0,
+                    "THK": 10.0,
+                    "CUT_LTH": 300.0,
+                    "WO_QTY": 3,
+                    "PHYSICAL_RANDOM_SEED": 101,
+                },
+                {
+                    "physical_index": 2,
+                    "LTH": 300.0,
+                    "THK": 30.0,
+                    "CUT_LTH": 900.0,
+                    # 실적 profile에는 총 W/O 수 4가 없다. 그래도 원 수식값 4를
+                    # 다른 지원값으로 바꾸지 않고 계열 count vector 합으로 보존해야 한다.
+                    "WO_QTY": 4,
+                    "PHYSICAL_RANDOM_SEED": 202,
+                },
+            ]
+        )
 
-        first = sample_physical_block_joint_targets(profile, 100, np.random.default_rng(17))
-        second = sample_physical_block_joint_targets(profile, 100, np.random.default_rng(17))
+        first = select_physical_block_series_allocations(
+            profile, block_seeds, np.random.default_rng(17)
+        )
+        second = select_physical_block_series_allocations(
+            profile, block_seeds, np.random.default_rng(17)
+        )
 
         assert_frame_equal(first, second, check_exact=True)
-        combinations = first.groupby("physical_index")["GYEL"].agg(lambda values: tuple(sorted(values)))
-        self.assertTrue(set(combinations).issubset({("FL", "NP"), ("NP",)}))
-        self.assertIn(("FL", "NP"), set(combinations))
-        self.assertIn(("NP",), set(combinations))
-
-    def test_joint_rank_matching_reproduces_cross_series_direction_without_changing_marginals(self) -> None:
-        generated_np = pd.DataFrame(
-            [_generated_joint_block("NP_LOW", 10.0), _generated_joint_block("NP_MID", 20.0), _generated_joint_block("NP_HIGH", 30.0)]
+        totals = first.groupby("physical_index", sort=True)["SERIES_WO_QTY"].sum()
+        self.assertEqual(totals.tolist(), [3, 4])
+        formula_totals = first.groupby("physical_index", sort=True)["FORMULA_WO_QTY"].first()
+        self.assertEqual(formula_totals.tolist(), [3, 4])
+        self.assertTrue(first["FORMULA_WO_QTY"].eq(first["TOTAL_WO_QTY"]).all())
+        self.assertNotIn("COUNT_ADJUSTED_TO_SUPPORT", first.columns)
+        first_vector = dict(
+            zip(
+                first.loc[first["physical_index"].eq(1), "GYEL"],
+                first.loc[first["physical_index"].eq(1), "SERIES_WO_QTY"],
+            )
         )
-        generated_fl = pd.DataFrame(
-            [_generated_joint_block("FL_LOW", 100.0), _generated_joint_block("FL_MID", 200.0), _generated_joint_block("FL_HIGH", 300.0)]
-        )
-        np_targets = _joint_target_rows("NP", (0.1, 0.5, 0.9))
-        fl_targets = _joint_target_rows("FL", (0.9, 0.5, 0.1))
+        self.assertIn(first_vector, ({"FL": 1, "NP": 2}, {"NP": 3}))
 
-        np_mapping = match_generated_blocks_to_joint_targets(generated_np, np_targets)
-        fl_mapping = match_generated_blocks_to_joint_targets(generated_fl, fl_targets)
+    def test_post_generation_block_matching_api_is_removed(self) -> None:
+        self.assertFalse(hasattr(multi_formula, "match_generated_blocks_to_joint_targets"))
 
-        self.assertEqual(np_mapping, {"NP_LOW": 1, "NP_MID": 2, "NP_HIGH": 3})
-        self.assertEqual(fl_mapping, {"FL_HIGH": 1, "FL_MID": 2, "FL_LOW": 3})
-        np_values = generated_np.set_index("source_block_id")["LTH"]
-        fl_values = generated_fl.set_index("source_block_id")["LTH"]
-        coupled_np = pd.Series({physical: np_values[source] for source, physical in np_mapping.items()})
-        coupled_fl = pd.Series({physical: fl_values[source] for source, physical in fl_mapping.items()})
-        self.assertAlmostEqual(float(coupled_np.corr(coupled_fl)), -1.0)
-        self.assertEqual(sorted(coupled_np), [10.0, 20.0, 30.0])
-        self.assertEqual(sorted(coupled_fl), [100.0, 200.0, 300.0])
-
-    def test_joint_target_sampling_reproduces_actual_probabilities(self) -> None:
+    def test_series_combination_sampling_tracks_actual_distribution(self) -> None:
         work_orders = pd.read_excel("변경사항/절단WO_데이터.xlsx", sheet_name="Sheet1")
         blocks = pd.read_excel(DEFAULT_MULTI_SERIES_BLOCK_SOURCE, sheet_name="Sheet1")
         profile = fit_physical_block_joint_profile(work_orders, blocks)
+        seed_sequence = np.random.SeedSequence(20260716)
+        block_seed_child, allocation_child, physical_child, *_ = seed_sequence.spawn(
+            3 + len(SUPPORTED_SERIES)
+        )
+        block_seed = int(block_seed_child.generate_state(1, dtype=np.uint32)[0])
+        block_seeds = generate_report_formula_block_seeds(
+            profile.physical_block_count,
+            block_seed,
+        )
+        block_seeds["PHYSICAL_RANDOM_SEED"] = np.random.default_rng(
+            physical_child
+        ).integers(
+            1,
+            np.iinfo(np.int32).max,
+            size=profile.physical_block_count,
+            dtype=np.int64,
+        )
+        allocations = select_physical_block_series_allocations(
+            profile,
+            block_seeds,
+            np.random.default_rng(allocation_child),
+        )
 
-        targets = sample_physical_block_joint_targets(profile, 100_000, np.random.default_rng(20260714))
-        samples = targets.groupby("physical_index")["GYEL"].agg(lambda values: tuple(sorted(values)))
-        observed = samples.value_counts(normalize=True)
-
-        self.assertEqual(profile.physical_block_count, 1_044)
-        self.assertEqual(len(profile.combinations), 13)
-        for combination, expected in zip(profile.combinations, profile.probabilities):
-            self.assertLess(abs(float(observed[combination]) - expected), 0.005)
+        sampled = allocations.groupby("physical_index", sort=True)["GYEL"].agg(
+            lambda values: tuple(sorted(set(values)))
+        ).value_counts(normalize=True)
+        expected = dict(zip(profile.combinations, profile.probabilities))
+        observed = sampled.to_dict()
+        combinations = set(expected) | set(observed)
+        total_variation = 0.5 * sum(
+            abs(float(expected.get(combination, 0.0)) - float(observed.get(combination, 0.0)))
+            for combination in combinations
+        )
+        self.assertLess(float(total_variation), 0.05)
 
     def test_validation_orders_physical_blocks_by_numeric_generated_index(self) -> None:
         rows = []
@@ -206,8 +232,46 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
             expected_series_combinations=(("NP",), ("FL",), ("NC",)),
         )
 
+    def test_series_allocation_rejects_fractional_physical_index(self) -> None:
+        work_orders = pd.DataFrame(
+            [{"PROJ_NO": "P1", "BLK_NO": "B1", "GYEL": "NP"}]
+        )
+        blocks = pd.DataFrame([_joint_block_row("P1", "B1", "NP", 100.0)])
+        profile = fit_physical_block_joint_profile(work_orders, blocks)
+        block_seeds = pd.DataFrame(
+            [
+                {
+                    "physical_index": 1.5,
+                    "LTH": 100.0,
+                    "THK": 10.0,
+                    "CUT_LTH": 300.0,
+                    "WO_QTY": 1,
+                    "PHYSICAL_RANDOM_SEED": 101,
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "invalid physical block seed values"):
+            select_physical_block_series_allocations(
+                profile,
+                block_seeds,
+                np.random.default_rng(17),
+            )
+
     def test_generated_multi_series_data_preserves_physical_and_series_block_contracts(self) -> None:
-        generated = generate_multi_series_formula_data(n_physical_blocks=24, seed=20260714)
+        seed = 20260714
+        generated = generate_multi_series_formula_data(n_physical_blocks=24, seed=seed)
+
+        block_seed_child = np.random.SeedSequence(seed).spawn(3 + len(SUPPORTED_SERIES))[0]
+        block_seed = int(block_seed_child.generate_state(1, dtype=np.uint32)[0])
+        original_formula = generate_report_formula_block_seeds(24, block_seed)
+        formula_totals_by_index = generated.allocation_df.groupby(
+            "physical_index", sort=True
+        )["FORMULA_WO_QTY"].first()
+        self.assertEqual(
+            formula_totals_by_index.tolist(),
+            original_formula.sort_values("physical_index")["WO_QTY"].astype(int).tolist(),
+        )
 
         self.assertEqual(generated.physical_block_count, 24)
         self.assertEqual(
@@ -223,6 +287,28 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
         )
         grouped = generated.wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"])
         self.assertEqual(grouped.ngroups, len(generated.block_df))
+        allocation_counts = generated.allocation_df.groupby(
+            ["PROJ_NO", "BLK_NO", "GYEL"], sort=True
+        )["SERIES_WO_QTY"].first()
+        generated_counts = generated.wo_df.groupby(
+            ["PROJ_NO", "BLK_NO", "GYEL"], sort=True
+        ).size()
+        self.assertEqual(allocation_counts.to_dict(), generated_counts.to_dict())
+        physical_allocations = generated.allocation_df.groupby(
+            ["PROJ_NO", "BLK_NO"], sort=True
+        )["SERIES_WO_QTY"].sum()
+        physical_rows = generated.wo_df.groupby(
+            ["PROJ_NO", "BLK_NO"], sort=True
+        ).size()
+        self.assertEqual(physical_allocations.to_dict(), physical_rows.to_dict())
+        formula_totals = generated.allocation_df.groupby(
+            ["PROJ_NO", "BLK_NO"], sort=True
+        )["FORMULA_WO_QTY"].first()
+        self.assertEqual(formula_totals.to_dict(), physical_rows.to_dict())
+        multi_series_seed_counts = generated.allocation_df.groupby(
+            ["PROJ_NO", "BLK_NO"], sort=True
+        )["SERIES_RANDOM_SEED"].agg(lambda values: values.nunique() == len(values))
+        self.assertTrue(multi_series_seed_counts.all())
         for _, block in generated.block_df.iterrows():
             key = (block["PROJ_NO"], block["GYEL"], block["BLK_NO"])
             rows = grouped.get_group(key)
@@ -234,6 +320,26 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
                 + 0.3840 * rows["PTLST_QTY"]
             )
             np.testing.assert_allclose(rows["TACT_TIME"], expected_tact, atol=1e-6, rtol=0.0)
+
+    def test_validation_rejects_fractional_allocation_counts(self) -> None:
+        generated = generate_multi_series_formula_data(
+            n_physical_blocks=3,
+            seed=20260714,
+        )
+        invalid_allocations = generated.allocation_df.copy()
+        invalid_allocations["SERIES_WO_QTY"] = invalid_allocations[
+            "SERIES_WO_QTY"
+        ].astype(float)
+        invalid_allocations.loc[invalid_allocations.index[0], "SERIES_WO_QTY"] += 0.5
+
+        with self.assertRaisesRegex(RuntimeError, "invalid expected series allocation values"):
+            validate_multi_series_formula_data(
+                generated.wo_df,
+                generated.block_df,
+                expected_physical_blocks=3,
+                expected_series_combinations=generated.series_combinations,
+                expected_allocations=invalid_allocations,
+            )
 
     def test_phase1_and_phase2_share_exact_mixed_episode_input(self) -> None:
         phase1 = build_phase1_episode_jobs(

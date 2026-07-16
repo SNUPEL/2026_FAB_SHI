@@ -110,6 +110,32 @@ class ReportFormulaDataGeneratorTest(unittest.TestCase):
         block_stl = generated.block_df.set_index(["PROJ_NO", "GYEL", "BLK_NO"])["STL_QTY"]
         self.assertTrue((wo_counts != block_stl).any())
 
+    def test_prescribed_wo_counts_control_rows_without_aliasing_stl_quantity(self) -> None:
+        generated = generate_report_formula_data(
+            n_blocks=3,
+            seed=20260716,
+            wo_counts=(1, 4, 2),
+            block_seeds=(101, 202, 303),
+        )
+
+        actual_counts = generated.wo_df.groupby(
+            ["PROJ_NO", "GYEL", "BLK_NO"], sort=True
+        ).size()
+        self.assertEqual(actual_counts.tolist(), [1, 4, 2])
+        block_stl = generated.block_df.set_index(
+            ["PROJ_NO", "GYEL", "BLK_NO"]
+        )["STL_QTY"]
+        self.assertTrue((actual_counts != block_stl).any())
+
+    def test_prescribed_wo_counts_reject_fractional_values(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "invalid wo_counts"):
+            generate_report_formula_data(
+                n_blocks=1,
+                seed=20260716,
+                wo_counts=(1.5,),
+                block_seeds=(101,),
+            )
+
     def test_tact_time_is_shared_case6_formula_without_bevel_term(self) -> None:
         generated = generate_report_formula_data(n_blocks=4, seed=20260714)
         expected = (
