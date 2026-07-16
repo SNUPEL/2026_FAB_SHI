@@ -43,6 +43,26 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
         self.assertEqual(int(blocks.loc[np_key, "STL_QTY"]), 1)
         self.assertEqual(float(blocks.loc[np_key, "MARK_LTH"]), 5.0)
         self.assertNotIn("RET_QTY", prepared.work_orders.columns)
+        self.assertEqual(set(prepared.work_orders["MAPPED_MACHINE_ID"]), {"PLS51"})
+        self.assertEqual(set(prepared.work_orders["MACHINE_HOME_BAY"]), {"25"})
+        self.assertEqual(set(prepared.work_orders["PLANNING_MACHINE_CANDIDATE"]), {True})
+
+    def test_eqp3_rows_are_preserved_as_actual_only_nc_trans(self) -> None:
+        block_rows = pd.DataFrame([self._block_row("NC", cut=30.0, steel=1, bevel=3)])
+        wo_rows = pd.DataFrame([self._wo_row("WO_NC_1", "NC", cut=30.0, steel=1, bevel=3)])
+        block_rows.loc[:, "EQP_NM"] = "EQP_3"
+        block_rows.loc[:, "CUT_BAY"] = "trans"
+        wo_rows.loc[:, "EQP_NM"] = "EQP_3"
+        wo_rows.loc[:, "CUT_BAY"] = "trans"
+
+        prepared = prepare_multi_series_cutting_data(block_rows, wo_rows)
+
+        self.assertEqual(set(prepared.work_orders["MAPPED_MACHINE_ID"]), {"EQP_3"})
+        self.assertEqual(
+            set(prepared.work_orders["EQUIPMENT_MAPPING_STATUS"]),
+            {"actual_nc_trans_only"},
+        )
+        self.assertEqual(set(prepared.work_orders["PLANNING_MACHINE_CANDIDATE"]), {False})
 
     def test_rejects_block_and_wo_aggregate_mismatch(self) -> None:
         block_rows = pd.DataFrame(
@@ -52,6 +72,30 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
                     cut=31.0,
                     steel=1,
                     bevel=3,
+                    bevel_length=4.0,
+                    part_quantity=8,
+                )
+            ]
+        )
+        wo_rows = pd.DataFrame(
+            [
+                self._wo_row("WO_1", "NP", cut=10.0, steel=1, bevel=1),
+                self._wo_row("WO_2", "NP", cut=20.0, steel=0, bevel=2),
+            ]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "block_wo_aggregate_mismatch"):
+            prepare_multi_series_cutting_data(block_rows, wo_rows)
+
+    def test_rejects_mark_sum_when_new_contract_requires_wo_maximum(self) -> None:
+        block_rows = pd.DataFrame(
+            [
+                self._block_row(
+                    "NP",
+                    cut=30.0,
+                    steel=1,
+                    bevel=3,
+                    mark=10.0,
                     bevel_length=4.0,
                     part_quantity=8,
                 )

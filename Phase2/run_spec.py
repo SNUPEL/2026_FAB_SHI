@@ -7,10 +7,15 @@ from typing import Any, Dict, Mapping, Sequence
 
 from Environment.constraints.profiles import PhaseConstraintProfile
 from Environment.metrics import PHASE2_METRIC_SCHEMA_VERSION, PHASE2_SCORE_FIELDS_BY_MODE
+from Utils.phase1.multi_series_rules import (
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    joint_phase1_bay_capacity_weights,
+)
 from Phase2.state import PHASE2_STATE_SCHEMA_VERSION
 
 
-PHASE2_RUN_SPEC_SCHEMA_VERSION = "phase2_run_spec_v1"
+PHASE2_RUN_SPEC_SCHEMA_VERSION = "phase2_run_spec_v2_mixed_only"
 
 
 def build_phase2_run_spec(
@@ -21,7 +26,6 @@ def build_phase2_run_spec(
     max_wo_count: int,
     max_length_sum: float,
     phase1_bay_capacity_weights: Mapping[str, int | float],
-    phase1_long_cut_hard_mask: bool,
     constraint_profile: PhaseConstraintProfile,
     heuristic_algorithms: Sequence[str],
     train_rollout_samples: int,
@@ -39,7 +43,9 @@ def build_phase2_run_spec(
         "max_wo_count": max_wo_count,
         "max_length_sum": max_length_sum,
         "phase1_bay_capacity_weights": dict(phase1_bay_capacity_weights),
-        "phase1_long_cut_hard_mask": phase1_long_cut_hard_mask,
+        "phase1_rule_profile": MULTI_SERIES_RULE_PROFILE,
+        "phase1_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
+        "phase1_score_mode": "wo_first",
         "constraint_profile": phase_constraint_profile_to_dict(constraint_profile),
         "heuristic_algorithms": list(heuristic_algorithms),
         "train_rollout_samples": train_rollout_samples,
@@ -72,7 +78,9 @@ def validate_phase2_run_spec(spec: Mapping[str, Any]) -> None:
         "max_wo_count",
         "max_length_sum",
         "phase1_bay_capacity_weights",
-        "phase1_long_cut_hard_mask",
+        "phase1_rule_profile",
+        "phase1_scope_version",
+        "phase1_score_mode",
         "constraint_profile",
         "heuristic_algorithms",
         "train_rollout_samples",
@@ -158,9 +166,28 @@ def validate_phase2_run_spec(spec: Mapping[str, Any]) -> None:
                 f"cause=invalid_phase1_capacity_weight bay_id={bay_id} value={value}"
             )
             raise RuntimeError("Phase 2 RunSpec Phase 1 capacity weights are invalid")
-    if not isinstance(spec["phase1_long_cut_hard_mask"], bool):
-        print("[ERROR][Phase2.run_spec.validate_phase2_run_spec] cause=invalid_long_cut_mask")
-        raise RuntimeError("Phase 2 RunSpec long-cut mask must be boolean")
+    expected_weights = joint_phase1_bay_capacity_weights()
+    normalized_weights = {str(key): float(value) for key, value in weights.items()}
+    if normalized_weights != expected_weights:
+        print(
+            "[ERROR][Phase2.run_spec.validate_phase2_run_spec] "
+            f"cause=phase1_capacity_contract_mismatch expected={expected_weights} "
+            f"actual={normalized_weights}"
+        )
+        raise RuntimeError("Phase 2 RunSpec requires the MIXED five-Bay capacity contract")
+    expected_phase1_contract = {
+        "phase1_rule_profile": MULTI_SERIES_RULE_PROFILE,
+        "phase1_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
+        "phase1_score_mode": "wo_first",
+    }
+    for field_name, expected_value in expected_phase1_contract.items():
+        if spec[field_name] != expected_value:
+            print(
+                "[ERROR][Phase2.run_spec.validate_phase2_run_spec] "
+                f"cause=phase1_contract_mismatch field={field_name} "
+                f"expected={expected_value} actual={spec[field_name]}"
+            )
+            raise RuntimeError(f"Phase 2 RunSpec {field_name} mismatch")
     profile = spec["constraint_profile"]
     if not isinstance(profile, Mapping) or set(profile) != {
         "name", "hard_enabled", "soft_enabled", "soft_weights", "category_flags"

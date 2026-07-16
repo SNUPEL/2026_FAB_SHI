@@ -5,23 +5,27 @@
 데이터에서 계수를 다시 fit하지 않는다.
 
 생성 흐름:
-1. block seed 값 생성: LTH -> MARK_LTH -> CUT_LTH -> STL_QTY -> THK.
-2. STL_QTY를 W/O 수로 보고 W/O row를 생성한다.
-3. W/O 값을 다시 집계해 최종 block row를 만든다.
+1. block seed 값 생성: LTH -> MARK_LTH -> CUT_LTH -> 잠재 W/O 수 -> THK.
+2. 잠재 W/O 수만큼 W/O row를 생성한다.
+3. W/O별 STL_QTY는 실적 조건부 분포에서 별도로 생성한다.
+4. W/O 값을 다시 집계해 최종 block row를 만든다.
 
 주의:
-- Phase 1 단독 학습은 기존 block-only bootstrap generator를 유지한다.
-- Merged Phase 2와 frozen-feedback full-flow는 W/O가 필요하므로 이 generator를 사용한다.
+- NP Phase 1/Phase 2 학습은 모두 이 생성기를 사용한다.
+- 계열별로 다시 적합한 다계열 분석 생성기는 이 고정 NP 학습 경로에서 사용하지 않는다.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 from Utils.data.multi_series_cutting_data import build_block_set_id
 
@@ -32,6 +36,7 @@ WO_COLUMNS = (
     "WK_ORD_NO",
     "GYEL",
     "LTH",
+    "BTH",
     "THK",
     "CUT_LTH",
     "MARK_LTH",
@@ -47,6 +52,7 @@ BLOCK_COLUMNS = (
     "BLK_NO",
     "GYEL",
     "LTH",
+    "BTH",
     "THK",
     "CUT_LTH",
     "MARK_LTH",
@@ -115,9 +121,77 @@ TACT_A_MARK = 0.1325
 TACT_A_THK = 0.4790
 TACT_A_PTLST = 0.3840
 
-# PDF는 nearest-spec rounding이라고만 명시한다. 현재 데이터가 0.5 단위 두께를
-# 포함하므로 6~36mm 0.5 단위 grid를 고정 spec으로 둔다.
-DEFAULT_THICKNESS_SPECS = tuple(round(value * 0.5, 1) for value in range(12, 73))
+# 신규 실적에는 PDF에 없던 폭(BTH)이 있으므로, 전 계열에 같은 로그선형식 구조를
+# 사용하고 계열별 계수만 실적에서 적합한다. 식의 입력은 BTH보다 먼저 생성되는
+# W/O 물리·가공 특성으로 한정한다.
+BTH_FORMULA_FEATURES = (
+    "LTH",
+    "THK",
+    "MARK_LTH",
+    "CUT_LTH",
+    "BVL_LTH",
+    "BV_QTY",
+    "PTLST_QTY",
+)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MULTI_SERIES_WO_SOURCE = REPO_ROOT / "변경사항" / "절단WO_데이터.xlsx"
+BTH_RANDOM_STREAM_SALT = 7_142_026
+STL_RANDOM_STREAM_SALT = 7_152_026
+STL_LOCAL_WEIGHT = 0.75
+
+# PDF의 nearest-spec rounding에 사용하는 과거 NP W/O 실적 두께 규격이다.
+# 관측되지 않은 6.5/7.0mm 등을 임의 규격으로 추가하지 않는다.
+DEFAULT_THICKNESS_SPECS = (
+    6.0,
+    9.0,
+    10.0,
+    10.5,
+    11.0,
+    11.5,
+    12.0,
+    12.5,
+    13.0,
+    13.5,
+    14.0,
+    14.5,
+    15.0,
+    15.5,
+    16.0,
+    16.5,
+    17.0,
+    17.5,
+    18.0,
+    18.5,
+    19.0,
+    19.5,
+    20.0,
+    20.5,
+    21.0,
+    21.5,
+    22.0,
+    22.5,
+    23.0,
+    24.0,
+    24.5,
+    25.0,
+    26.0,
+    26.5,
+    27.0,
+    27.5,
+    28.0,
+    28.5,
+    29.0,
+    30.0,
+    31.0,
+    32.0,
+    34.0,
+    35.0,
+    36.0,
+)
+
+# 정규오차 식에서 모든 W/O 값이 0 이하인 극단 표본은 같은 식으로 다시 뽑는다.
+# 이 횟수 안에도 유효 표본이 없으면 임의 분배하지 않고 데이터 생성을 실패시킨다.
+MAX_REGRESSION_RESAMPLE_ATTEMPTS = 1_000
 
 
 @dataclass(frozen=True)
@@ -128,17 +202,336 @@ class ReportFormulaGeneration:
     block_df: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class BthFormulaProfile:
+    """계열별 W/O 폭 로그선형식과 관측 폭 규격."""
+
+    series: str
+    coefficients: tuple[float, ...]
+    residual_std: float
+    r_squared: float
+    observed_specs: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class StlQuantityProfile:
+    """계열별 W/O 강재수량의 조건부 이웃분포."""
+
+    series: str
+    features: tuple[str, ...]
+    feature_mean: tuple[float, ...]
+    feature_scale: tuple[float, ...]
+    normalized_actual_features: np.ndarray
+    actual_values: np.ndarray
+    classes: tuple[int, ...]
+    priors: tuple[float, ...]
+
+
+def fit_bth_formula(frame: pd.DataFrame, series: str) -> BthFormulaProfile:
+    """실적 W/O에서 공통 형태의 계열별 BTH 로그선형식을 적합한다."""
+
+    normalized_series = str(series or "").strip().upper()
+    required = ("GYEL", "BTH", *BTH_FORMULA_FEATURES)
+    _require_columns(frame, required, "bth_formula_source")
+    selected = frame.loc[
+        frame["GYEL"].astype(str).str.strip().str.upper() == normalized_series,
+        ["BTH", *BTH_FORMULA_FEATURES],
+    ].apply(pd.to_numeric, errors="coerce")
+    minimum_rows = len(BTH_FORMULA_FEATURES) + 2
+    if len(selected) < minimum_rows:
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=insufficient_series_rows series={normalized_series} "
+            f"rows={len(selected)} required={minimum_rows}"
+        )
+        raise RuntimeError(f"insufficient BTH formula rows for {normalized_series}")
+    if selected.isna().any(axis=None):
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=non_numeric_or_missing series={normalized_series}"
+        )
+        raise RuntimeError(f"invalid BTH formula source for {normalized_series}")
+    if (selected["BTH"] <= 0).any() or (selected[list(BTH_FORMULA_FEATURES)] < 0).any(axis=None):
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=out_of_domain_value series={normalized_series}"
+        )
+        raise RuntimeError(f"out-of-domain BTH formula source for {normalized_series}")
+
+    design = np.column_stack(
+        [
+            np.ones(len(selected), dtype=float),
+            np.log1p(selected[list(BTH_FORMULA_FEATURES)].to_numpy(dtype=float)),
+        ]
+    )
+    target = np.log(selected["BTH"].to_numpy(dtype=float))
+    coefficients, _, rank, _ = np.linalg.lstsq(design, target, rcond=None)
+    if rank != design.shape[1]:
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=rank_deficient series={normalized_series} rank={rank} expected={design.shape[1]}"
+        )
+        raise RuntimeError(f"rank-deficient BTH formula for {normalized_series}")
+    residuals = target - design @ coefficients
+    residual_std = float(np.std(residuals, ddof=1))
+    if not np.isfinite(residual_std) or residual_std < 0:
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=invalid_residual_std series={normalized_series} value={residual_std}"
+        )
+        raise RuntimeError(f"invalid BTH residual for {normalized_series}")
+    total_variation = float(np.sum((target - target.mean()) ** 2))
+    if total_variation <= 0:
+        print(
+            "[ERROR][report_formula_data_generator.fit_bth_formula] "
+            f"cause=constant_target series={normalized_series}"
+        )
+        raise RuntimeError(f"constant BTH target for {normalized_series}")
+    r_squared = float(1.0 - np.sum(residuals**2) / total_variation)
+    observed_specs = tuple(sorted(float(value) for value in selected["BTH"].unique()))
+    return BthFormulaProfile(
+        series=normalized_series,
+        coefficients=tuple(float(value) for value in coefficients),
+        residual_std=residual_std,
+        r_squared=r_squared,
+        observed_specs=observed_specs,
+    )
+
+
+def sample_bth_formula(
+    features: pd.DataFrame,
+    profile: BthFormulaProfile,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """계열별 식으로 BTH를 생성하고 실제 관측 폭 규격에 스냅한다."""
+
+    _require_columns(features, BTH_FORMULA_FEATURES, "bth_formula_features")
+    numeric = features[list(BTH_FORMULA_FEATURES)].apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any(axis=None) or (numeric < 0).any(axis=None):
+        print(
+            "[ERROR][report_formula_data_generator.sample_bth_formula] "
+            f"cause=invalid_features series={profile.series}"
+        )
+        raise RuntimeError(f"invalid BTH formula features for {profile.series}")
+    coefficients = np.asarray(profile.coefficients, dtype=float)
+    expected_size = len(BTH_FORMULA_FEATURES) + 1
+    if coefficients.shape != (expected_size,) or not np.isfinite(coefficients).all():
+        print(
+            "[ERROR][report_formula_data_generator.sample_bth_formula] "
+            f"cause=invalid_coefficients series={profile.series} shape={coefficients.shape}"
+        )
+        raise RuntimeError(f"invalid BTH coefficients for {profile.series}")
+    specs = np.asarray(profile.observed_specs, dtype=float)
+    if specs.ndim != 1 or len(specs) == 0 or not np.isfinite(specs).all() or (specs <= 0).any():
+        print(
+            "[ERROR][report_formula_data_generator.sample_bth_formula] "
+            f"cause=invalid_observed_specs series={profile.series}"
+        )
+        raise RuntimeError(f"invalid BTH specs for {profile.series}")
+
+    design = np.column_stack(
+        [np.ones(len(numeric), dtype=float), np.log1p(numeric.to_numpy(dtype=float))]
+    )
+    noise = (
+        np.zeros(len(numeric), dtype=float)
+        if profile.residual_std == 0.0
+        else rng.normal(0.0, profile.residual_std, len(numeric))
+    )
+    continuous = np.clip(np.exp(design @ coefficients + noise), specs[0], specs[-1])
+    insertion = np.searchsorted(specs, continuous, side="left")
+    insertion = np.clip(insertion, 0, len(specs) - 1)
+    lower = np.maximum(insertion - 1, 0)
+    use_lower = np.abs(continuous - specs[lower]) <= np.abs(specs[insertion] - continuous)
+    return specs[np.where(use_lower, lower, insertion)]
+
+
+def fit_stl_quantity_profile(frame: pd.DataFrame, series: str) -> StlQuantityProfile:
+    """실적 W/O에서 핵심 가공특성 조건부 STL_QTY 분포를 적합한다."""
+
+    normalized_series = str(series or "").strip().upper()
+    required = ("GYEL", "STL_QTY", *BTH_FORMULA_FEATURES)
+    _require_columns(frame, required, "stl_quantity_source")
+    selected = frame.loc[
+        frame["GYEL"].astype(str).str.strip().str.upper().eq(normalized_series),
+        ["STL_QTY", *BTH_FORMULA_FEATURES],
+    ].apply(pd.to_numeric, errors="coerce")
+    if len(selected) < 3 or selected.isna().any(axis=None):
+        print(
+            "[ERROR][report_formula_data_generator.fit_stl_quantity_profile] "
+            f"cause=invalid_series_rows series={normalized_series} rows={len(selected)}"
+        )
+        raise RuntimeError(f"invalid STL_QTY profile source for {normalized_series}")
+    if (selected["STL_QTY"] < 0).any() or not np.allclose(
+        selected["STL_QTY"], np.round(selected["STL_QTY"])
+    ):
+        print(
+            "[ERROR][report_formula_data_generator.fit_stl_quantity_profile] "
+            f"cause=invalid_target series={normalized_series}"
+        )
+        raise RuntimeError(f"invalid STL_QTY target for {normalized_series}")
+
+    feature_values = selected[list(BTH_FORMULA_FEATURES)].to_numpy(dtype=float)
+    means = feature_values.mean(axis=0)
+    scales = feature_values.std(axis=0, ddof=0)
+    active = scales > 0
+    if not active.any():
+        print(
+            "[ERROR][report_formula_data_generator.fit_stl_quantity_profile] "
+            f"cause=all_features_constant series={normalized_series}"
+        )
+        raise RuntimeError(f"constant STL_QTY conditioning features for {normalized_series}")
+    features = tuple(np.asarray(BTH_FORMULA_FEATURES)[active].tolist())
+    normalized = (feature_values[:, active] - means[active]) / scales[active]
+    actual_values = selected["STL_QTY"].to_numpy(dtype=int)
+    classes = np.unique(actual_values)
+    priors = np.asarray([(actual_values == value).mean() for value in classes], dtype=float)
+    return StlQuantityProfile(
+        series=normalized_series,
+        features=features,
+        feature_mean=tuple(float(value) for value in means[active]),
+        feature_scale=tuple(float(value) for value in scales[active]),
+        normalized_actual_features=normalized,
+        actual_values=actual_values,
+        classes=tuple(int(value) for value in classes),
+        priors=tuple(float(value) for value in priors),
+    )
+
+
+def sample_stl_quantity(
+    features: pd.DataFrame,
+    profile: StlQuantityProfile,
+    rng: np.random.Generator,
+    neighbor_count: int = 32,
+) -> np.ndarray:
+    """조건부 이웃확률과 실적 주변분포를 함께 지켜 STL_QTY를 생성한다."""
+
+    if neighbor_count < 1:
+        print(
+            "[ERROR][report_formula_data_generator.sample_stl_quantity] "
+            f"cause=invalid_neighbor_count value={neighbor_count}"
+        )
+        raise ValueError("neighbor_count must be positive")
+    _require_columns(features, profile.features, "stl_quantity_features")
+    numeric = features[list(profile.features)].apply(pd.to_numeric, errors="coerce")
+    if numeric.isna().any(axis=None):
+        print(
+            "[ERROR][report_formula_data_generator.sample_stl_quantity] "
+            f"cause=invalid_features series={profile.series}"
+        )
+        raise RuntimeError(f"invalid STL_QTY features for {profile.series}")
+    means = np.asarray(profile.feature_mean, dtype=float)
+    scales = np.asarray(profile.feature_scale, dtype=float)
+    actual_features = np.asarray(profile.normalized_actual_features, dtype=float)
+    actual_values = np.asarray(profile.actual_values, dtype=int)
+    classes = np.asarray(profile.classes, dtype=int)
+    priors = np.asarray(profile.priors, dtype=float)
+    if (
+        actual_features.ndim != 2
+        or actual_features.shape[0] != len(actual_values)
+        or actual_features.shape[1] != len(profile.features)
+        or means.shape != scales.shape
+        or means.shape != (len(profile.features),)
+        or (scales <= 0).any()
+    ):
+        print(
+            "[ERROR][report_formula_data_generator.sample_stl_quantity] "
+            f"cause=invalid_profile series={profile.series}"
+        )
+        raise RuntimeError(f"invalid STL_QTY profile for {profile.series}")
+
+    target = (numeric.to_numpy(dtype=float) - means) / scales
+    k = min(int(neighbor_count), len(actual_values))
+    _, nearest = cKDTree(actual_features).query(target, k=k)
+    nearest = np.asarray(nearest, dtype=int)
+    if nearest.ndim == 1:
+        nearest = nearest.reshape(-1, 1)
+    local = np.column_stack([(actual_values[nearest] == value).mean(axis=1) for value in classes])
+    probabilities = STL_LOCAL_WEIGHT * local + (1.0 - STL_LOCAL_WEIGHT) * priors
+
+    expected_counts = priors * len(target)
+    target_counts = np.floor(expected_counts).astype(int)
+    remainder = len(target) - int(target_counts.sum())
+    if remainder:
+        order = np.argsort(-(expected_counts - target_counts), kind="stable")
+        target_counts[order[:remainder]] += 1
+    majority = int(np.argmax(target_counts))
+    class_indices = np.full(len(target), majority, dtype=int)
+    available = np.ones(len(target), dtype=bool)
+    for class_index in np.argsort(target_counts):
+        count = int(target_counts[class_index])
+        if class_index == majority or count == 0:
+            continue
+        candidates = np.flatnonzero(available)
+        scores = (
+            np.log(probabilities[candidates, class_index] + 1e-12)
+            - np.log(probabilities[candidates, majority] + 1e-12)
+            + rng.gumbel(size=len(candidates))
+        )
+        selected = candidates[np.argpartition(scores, -count)[-count:]]
+        class_indices[selected] = int(class_index)
+        available[selected] = False
+    return classes[class_indices]
+
+
+@lru_cache(maxsize=16)
+def load_bth_formula_profile(source_path: str, series: str) -> BthFormulaProfile:
+    """같은 프로세스에서 계열별 BTH 식을 한 번만 적합한다."""
+
+    path = Path(source_path)
+    if not path.exists():
+        print(
+            "[ERROR][report_formula_data_generator.load_bth_formula_profile] "
+            f"cause=source_not_found path={path} series={series}"
+        )
+        raise FileNotFoundError(path)
+    frame = pd.read_excel(path, sheet_name="Sheet1")
+    profile = fit_bth_formula(frame, series=series)
+    print(
+        "[CHECK][report_formula_data_generator.load_bth_formula_profile] "
+        f"series={profile.series} rows={len(frame)} specs={len(profile.observed_specs)} path={path}"
+    )
+    return profile
+
+
+@lru_cache(maxsize=16)
+def load_stl_quantity_profile(source_path: str, series: str) -> StlQuantityProfile:
+    """같은 프로세스에서 계열별 STL_QTY 조건부분포를 한 번만 적합한다."""
+
+    path = Path(source_path)
+    if not path.exists():
+        print(
+            "[ERROR][report_formula_data_generator.load_stl_quantity_profile] "
+            f"cause=source_not_found path={path} series={series}"
+        )
+        raise FileNotFoundError(path)
+    frame = pd.read_excel(path, sheet_name="Sheet1")
+    profile = fit_stl_quantity_profile(frame, series=series)
+    print(
+        "[CHECK][report_formula_data_generator.load_stl_quantity_profile] "
+        f"series={profile.series} rows={len(frame)} classes={profile.classes} path={path}"
+    )
+    return profile
+
+
 def generate_report_formula_data(
     n_blocks: int,
     seed: int = 2026,
     gyel: str = "NP",
     thickness_specs: Sequence[float] = DEFAULT_THICKNESS_SPECS,
+    bth_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
 ) -> ReportFormulaGeneration:
     """Generate synthetic W/O and block rows using only the PDF formulas."""
 
     if n_blocks <= 0:
         print(f"[ERROR][report_formula_data_generator.generate_report_formula_data] cause=invalid_n_blocks value={n_blocks}")
         raise ValueError("n_blocks must be positive")
+    normalized_gyel = str(gyel).strip().upper()
+    if normalized_gyel != "NP":
+        print(
+            "[ERROR][report_formula_data_generator.generate_report_formula_data] "
+            f"cause=unsupported_fixed_formula_series gyel={gyel} supported=NP"
+        )
+        raise RuntimeError("PDF fixed-formula generator supports NP only")
     _validate_thickness_specs(thickness_specs)
     rng = np.random.default_rng(seed)
     wo_rows: List[Dict] = []
@@ -151,16 +544,32 @@ def generate_report_formula_data(
             rng=rng,
             project_no=project_no,
             block_no=block_no,
-            gyel=gyel,
+            gyel=normalized_gyel,
             block_length=float(seed_block["LTH"]),
             block_thickness=float(seed_block["THK"]),
+            block_mark_length=float(seed_block["MARK_LTH"]),
+            block_cut_length=float(seed_block["CUT_LTH"]),
             wo_count=int(seed_block["STL_QTY"]),
             thickness_specs=thickness_specs,
         )
         wo_rows.extend(block_wo_rows)
-        block_rows.append(_aggregate_block_row(project_no, block_no, gyel, block_wo_rows))
+        block_rows.append(_aggregate_block_row(project_no, block_no, normalized_gyel, block_wo_rows))
 
-    wo_df = pd.DataFrame(wo_rows, columns=WO_COLUMNS)
+    wo_df = pd.DataFrame(wo_rows)
+    resolved_source = str(Path(bth_source_path).resolve())
+    bth_profile = load_bth_formula_profile(resolved_source, normalized_gyel)
+    bth_rng = np.random.default_rng(np.random.SeedSequence([int(seed), BTH_RANDOM_STREAM_SALT]))
+    wo_df["BTH"] = sample_bth_formula(wo_df, bth_profile, bth_rng)
+    stl_profile = load_stl_quantity_profile(resolved_source, normalized_gyel)
+    stl_rng = np.random.default_rng(np.random.SeedSequence([int(seed), STL_RANDOM_STREAM_SALT]))
+    wo_df["STL_QTY"] = sample_stl_quantity(wo_df, stl_profile, stl_rng)
+    wo_df = wo_df[list(WO_COLUMNS)]
+    bth_by_block = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)["BTH"].max()
+    stl_by_block = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)["STL_QTY"].sum()
+    for block_row in block_rows:
+        key = (block_row["PROJ_NO"], block_row["GYEL"], block_row["BLK_NO"])
+        block_row["BTH"] = float(bth_by_block.loc[key])
+        block_row["STL_QTY"] = int(stl_by_block.loc[key])
     block_df = pd.DataFrame(block_rows, columns=BLOCK_COLUMNS)
     validate_report_formula_data(wo_df, block_df)
     print(
@@ -177,7 +586,11 @@ def build_report_formula_episode_jobs(
     seed: int = 2026,
     gyel: str = "NP",
 ) -> List[Dict]:
-    """Merged Phase 2 학습용 가변 크기 W/O episode를 만든다."""
+    """Phase 1/2가 공유하는 가변 크기 W/O episode를 만든다.
+
+    ``NP``는 발표자료 고정 산식을 사용하고, ``MIXED``는 실적 계열 조합과
+    NP/FN/FL/NC 계열별 수식을 사용하는 공용 생성기로 명시적으로 분기한다.
+    """
 
     if episode_count <= 0:
         print(f"[ERROR][report_formula_data_generator.build_report_formula_episode_jobs] cause=invalid_episode_count value={episode_count}")
@@ -188,6 +601,25 @@ def build_report_formula_episode_jobs(
             f"cause=invalid_block_range min_blocks={min_blocks} max_blocks={max_blocks}"
         )
         raise ValueError("invalid block range")
+    normalized_gyel = str(gyel or "").strip().upper()
+    if normalized_gyel == "MIXED":
+        # 순환 import를 피하면서 NP와 다계열 생성기의 public episode 진입점만 공유한다.
+        from Utils.data.multi_series_formula_data_generator import (
+            build_multi_series_formula_episode_jobs,
+        )
+
+        return build_multi_series_formula_episode_jobs(
+            episode_count=episode_count,
+            min_physical_blocks=min_blocks,
+            max_physical_blocks=max_blocks,
+            seed=seed,
+        )
+    if normalized_gyel != "NP":
+        print(
+            "[ERROR][report_formula_data_generator.build_report_formula_episode_jobs] "
+            f"cause=unsupported_episode_series gyel={gyel} supported=NP,MIXED"
+        )
+        raise RuntimeError(f"unsupported formula episode series: {gyel}")
     rng = np.random.default_rng(seed)
     episodes: List[Dict] = []
     for episode_index in range(episode_count):
@@ -197,12 +629,13 @@ def build_report_formula_episode_jobs(
         generated = generate_report_formula_data(
             n_blocks=block_count,
             seed=episode_seed,
-            gyel=gyel,
+            gyel=normalized_gyel,
         )
         episodes.append(
             {
                 "episode_id": episode_id,
                 "problem_id": episode_id,
+                "physical_block_count": block_count,
                 "block_count": block_count,
                 "job_count": len(generated.wo_df),
                 "seed": episode_seed,
@@ -233,6 +666,7 @@ def jobs_from_report_formula_wo(wo_df: pd.DataFrame, episode_id: str) -> Dict[st
             block_set_id=block_set_id,
             steel_quantity=1,
             plate_length=_positive_float(row["LTH"], "LTH", job_id),
+            plate_width=_positive_float(row["BTH"], "BTH", job_id),
             thickness=_positive_float(row["THK"], "THK", job_id),
             cut_length=_non_negative_float(row["CUT_LTH"], "CUT_LTH", job_id),
             marking_length=_non_negative_float(row["MARK_LTH"], "MARK_LTH", job_id),
@@ -279,6 +713,7 @@ def scenario_jobs_from_report_formula_jobs(jobs: Mapping[str, object]) -> List[D
                 "block_set_id": _required_text(_job_field(job, "block_set_id"), "block_set_id", str(job_id)),
                 "steel_quantity": _positive_int(_job_field(job, "steel_quantity"), "steel_quantity", str(job_id)),
                 "plate_length": _positive_float(_job_field(job, "plate_length"), "plate_length", str(job_id)),
+                "plate_width": _positive_float(_job_field(job, "plate_width"), "plate_width", str(job_id)),
                 "thickness": _positive_float(_job_field(job, "thickness"), "thickness", str(job_id)),
                 "cut_length": _non_negative_float(_job_field(job, "cut_length"), "cut_length", str(job_id)),
                 "marking_length": _non_negative_float(_job_field(job, "marking_length"), "marking_length", str(job_id)),
@@ -309,8 +744,8 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
         print("[ERROR][report_formula_data_generator.validate_report_formula_data] cause=empty_generated_data")
         raise RuntimeError("generated W/O and block data must not be empty")
     for frame_name, frame, positive_columns, non_negative_columns in (
-        ("wo_df", wo_df, ("LTH", "THK", "TACT_TIME", "PTLST_QTY", "STL_QTY"), ("CUT_LTH", "MARK_LTH", "BVL_LTH", "BV_QTY")),
-        ("block_df", block_df, ("LTH", "THK", "TACT_TIME", "STL_QTY", "PTLST_QTY"), ("CUT_LTH", "MARK_LTH", "BVL_LTH", "BV_QTY")),
+        ("wo_df", wo_df, ("LTH", "BTH", "THK", "TACT_TIME", "PTLST_QTY"), ("CUT_LTH", "MARK_LTH", "BVL_LTH", "STL_QTY", "BV_QTY")),
+        ("block_df", block_df, ("LTH", "BTH", "THK", "TACT_TIME", "PTLST_QTY"), ("CUT_LTH", "MARK_LTH", "BVL_LTH", "STL_QTY", "BV_QTY")),
     ):
         if frame.isna().any().any():
             print(f"[ERROR][report_formula_data_generator.validate_report_formula_data] cause=nan_values frame={frame_name}")
@@ -329,6 +764,13 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
                     f"cause=negative_values frame={frame_name} column={column}"
                 )
                 raise RuntimeError(f"negative {column} in {frame_name}")
+        stl_quantity = pd.to_numeric(frame["STL_QTY"], errors="coerce")
+        if not np.allclose(stl_quantity, np.round(stl_quantity)):
+            print(
+                "[ERROR][report_formula_data_generator.validate_report_formula_data] "
+                f"cause=non_integer_values frame={frame_name} column=STL_QTY"
+            )
+            raise RuntimeError(f"non-integer STL_QTY in {frame_name}")
 
     grouped = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)
     for _, block in block_df.iterrows():
@@ -338,6 +780,7 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
             raise RuntimeError(f"missing generated W/O rows for block {key}")
         rows = grouped.get_group(key)
         _assert_close(float(block["LTH"]), float(rows["LTH"].max()), "LTH", key)
+        _assert_close(float(block["BTH"]), float(rows["BTH"].max()), "BTH", key)
         _assert_close(float(block["THK"]), float(rows["THK"].max()), "THK", key)
         _assert_close(float(block["TACT_TIME"]), float(rows["TACT_TIME"].max()), "TACT_TIME", key)
         _assert_close(float(block["CUT_LTH"]), float(rows["CUT_LTH"].sum()), "CUT_LTH", key)
@@ -345,10 +788,11 @@ def validate_report_formula_data(wo_df: pd.DataFrame, block_df: pd.DataFrame) ->
         _assert_close(float(block["BVL_LTH"]), float(rows["BVL_LTH"].sum()), "BVL_LTH", key)
         _assert_close(float(block["BV_QTY"]), float(rows["BV_QTY"].sum()), "BV_QTY", key)
         _assert_close(float(block["PTLST_QTY"]), float(rows["PTLST_QTY"].sum()), "PTLST_QTY", key)
-        if int(block["STL_QTY"]) != len(rows):
+        expected_stl_quantity = int(rows["STL_QTY"].sum())
+        if int(block["STL_QTY"]) != expected_stl_quantity:
             print(
                 "[ERROR][report_formula_data_generator.validate_report_formula_data] "
-                f"cause=stl_qty_mismatch key={key} block={block['STL_QTY']} wo_count={len(rows)}"
+                f"cause=stl_qty_mismatch key={key} block={block['STL_QTY']} wo_sum={expected_stl_quantity}"
             )
             raise RuntimeError(f"STL_QTY mismatch for block {key}")
 
@@ -384,6 +828,8 @@ def _generate_work_order_rows(
     gyel: str,
     block_length: float,
     block_thickness: float,
+    block_mark_length: float,
+    block_cut_length: float,
     wo_count: int,
     thickness_specs: Sequence[float],
 ) -> List[Dict]:
@@ -405,10 +851,38 @@ def _generate_work_order_rows(
     if max(thicknesses) < block_thickness:
         thicknesses[0] = block_thickness
 
+    # PDF 23쪽의 W/O 식으로 상대적인 W/O 크기를 만든 뒤, PDF 21쪽의
+    # block 제약에 따라 합계가 block MARK/CUT seed와 정확히 같도록 맞춘다.
+    raw_cut_lengths = _sample_linked_non_negative_regression_values(
+        rng=rng,
+        expected_values=WO_CUT_A * lengths + WO_CUT_B,
+        residual_std=WO_CUT_STD,
+        target_total=block_cut_length,
+        field_name="CUT_LTH",
+    )
+    raw_mark_lengths = _sample_linked_non_negative_regression_values(
+        rng=rng,
+        expected_values=WO_MARK_A * lengths + WO_MARK_B,
+        residual_std=WO_MARK_STD,
+        target_total=block_mark_length,
+        field_name="MARK_LTH",
+    )
+    cut_lengths = _scale_non_negative_values_to_total(
+        raw_values=raw_cut_lengths,
+        total=block_cut_length,
+        field_name="CUT_LTH",
+    )
+    mark_lengths = _scale_non_negative_values_to_total(
+        raw_values=raw_mark_lengths,
+        total=block_mark_length,
+        field_name="MARK_LTH",
+    )
+
     rows: List[Dict] = []
-    for wo_index, (length, thickness) in enumerate(zip(lengths, thicknesses), start=1):
-        cut_length = max(0.0, WO_CUT_A * length + WO_CUT_B + rng.normal(0.0, WO_CUT_STD))
-        mark_length = max(0.0, WO_MARK_A * length + WO_MARK_B + rng.normal(0.0, WO_MARK_STD))
+    for wo_index, (length, thickness, cut_length, mark_length) in enumerate(
+        zip(lengths, thicknesses, cut_lengths, mark_lengths),
+        start=1,
+    ):
         bevel_length = max(
             0.0,
             WO_BEVEL_B
@@ -430,8 +904,8 @@ def _generate_work_order_rows(
                 "GYEL": gyel,
                 "LTH": round(float(length), 6),
                 "THK": round(float(thickness), 6),
-                "CUT_LTH": round(float(cut_length), 6),
-                "MARK_LTH": round(float(mark_length), 6),
+                "CUT_LTH": float(cut_length),
+                "MARK_LTH": float(mark_length),
                 "BVL_LTH": round(float(bevel_length), 6),
                 "STL_QTY": 1,
                 "BV_QTY": int(bevel_quantity),
@@ -458,6 +932,105 @@ def _aggregate_block_row(project_no: str, block_no: str, gyel: str, wo_rows: Seq
         "TACT_TIME": round(float(frame["TACT_TIME"].max()), 6),
         "PTLST_QTY": int(frame["PTLST_QTY"].sum()),
     }
+
+
+def _sample_linked_non_negative_regression_values(
+    rng: np.random.Generator,
+    expected_values: Sequence[float],
+    residual_std: float,
+    target_total: float,
+    field_name: str,
+) -> np.ndarray:
+    """PPT 정규오차 회귀식에서 block 합계와 연결 가능한 W/O 표본을 뽑는다."""
+
+    expected = np.asarray(expected_values, dtype=float)
+    target = float(target_total)
+    sigma = float(residual_std)
+    if expected.ndim != 1 or len(expected) == 0:
+        print(
+            "[ERROR][report_formula_data_generator._sample_linked_non_negative_regression_values] "
+            f"cause=invalid_expected_shape field={field_name} shape={expected.shape}"
+        )
+        raise RuntimeError(f"invalid W/O regression input for {field_name}")
+    if not np.isfinite(expected).all() or not np.isfinite(target) or not np.isfinite(sigma):
+        print(
+            "[ERROR][report_formula_data_generator._sample_linked_non_negative_regression_values] "
+            f"cause=non_finite_input field={field_name} target={target_total} residual_std={residual_std}"
+        )
+        raise RuntimeError(f"non-finite W/O regression input for {field_name}")
+    if target < 0 or sigma <= 0:
+        print(
+            "[ERROR][report_formula_data_generator._sample_linked_non_negative_regression_values] "
+            f"cause=out_of_domain field={field_name} target={target} residual_std={sigma}"
+        )
+        raise RuntimeError(f"out-of-domain W/O regression input for {field_name}")
+    if target == 0:
+        return np.zeros(len(expected), dtype=float)
+
+    for _ in range(MAX_REGRESSION_RESAMPLE_ATTEMPTS):
+        sampled = np.maximum(0.0, expected + rng.normal(0.0, sigma, len(expected)))
+        if float(sampled.sum()) > 0:
+            return sampled
+
+    print(
+        "[ERROR][report_formula_data_generator._sample_linked_non_negative_regression_values] "
+        f"cause=unable_to_sample_positive_formula_values field={field_name} "
+        f"attempts={MAX_REGRESSION_RESAMPLE_ATTEMPTS}"
+    )
+    raise RuntimeError(f"unable to sample positive W/O formula values for {field_name}")
+
+
+def _scale_non_negative_values_to_total(
+    raw_values: Sequence[float],
+    total: float,
+    field_name: str,
+) -> np.ndarray:
+    """W/O 비율을 유지하면서 반올림 후 합계까지 block seed에 맞춘다."""
+
+    raw = np.asarray(raw_values, dtype=float)
+    target = float(total)
+    if raw.ndim != 1 or len(raw) == 0:
+        print(
+            "[ERROR][report_formula_data_generator._scale_non_negative_values_to_total] "
+            f"cause=invalid_shape field={field_name} raw_shape={raw.shape}"
+        )
+        raise RuntimeError(f"invalid W/O scaling input for {field_name}")
+    if not np.isfinite(raw).all() or not np.isfinite(target):
+        print(
+            "[ERROR][report_formula_data_generator._scale_non_negative_values_to_total] "
+            f"cause=non_finite_input field={field_name} total={total}"
+        )
+        raise RuntimeError(f"non-finite W/O scaling input for {field_name}")
+    if (raw < 0).any() or target < 0:
+        print(
+            "[ERROR][report_formula_data_generator._scale_non_negative_values_to_total] "
+            f"cause=out_of_domain field={field_name} total={target}"
+        )
+        raise RuntimeError(f"out-of-domain W/O scaling input for {field_name}")
+    if target == 0:
+        return np.zeros(len(raw), dtype=float)
+
+    raw_total = float(raw.sum())
+    if raw_total <= 0:
+        print(
+            "[ERROR][report_formula_data_generator._scale_non_negative_values_to_total] "
+            f"cause=non_positive_formula_total field={field_name} total={target}"
+        )
+        raise RuntimeError(f"positive W/O formula total required for {field_name}")
+    scaled = raw / raw_total * target
+    rounded = np.round(scaled, 6)
+    rounded_target = round(target, 6)
+    residual = round(rounded_target - float(rounded.sum()), 6)
+    if residual:
+        adjust_index = int(np.argmax(rounded))
+        rounded[adjust_index] = round(float(rounded[adjust_index]) + residual, 6)
+    if (rounded < 0).any() or abs(float(rounded.sum()) - rounded_target) > 1e-6:
+        print(
+            "[ERROR][report_formula_data_generator._scale_non_negative_values_to_total] "
+            f"cause=total_identity_failed field={field_name} expected={rounded_target} actual={rounded.sum()}"
+        )
+        raise RuntimeError(f"W/O total identity failed for {field_name}")
+    return rounded
 
 
 def _sample_wo_thickness_noise(rng: np.random.Generator) -> float:

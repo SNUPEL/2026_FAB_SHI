@@ -1,69 +1,96 @@
 # -*- coding: utf-8 -*-
 """
-조선소 블록·W/O 합성 데이터 생성기 (2가지 모드)
+조선소 블록·W/O 합성 데이터 생성기
 ====================================================
 
-실적 엑셀(WO/블록)에서 파라미터를 적합한 뒤, RL 학습용 합성 블록·작업지시(W/O)
-데이터를 생성한다.
+NP는 `[제출본]가공공장_중간보고.pdf` 고정 산식 생성기를 그대로 사용한다.
+FN/FL/NC만 실적 엑셀(WO/블록)에서 계열별 파라미터를 적합한다.
 
 모드 (mode 인자)
   · 'spearman' (기본, 길이 직접) : 로그-로그·멱함수·코퓰러로 순위 구조·분포 보존
         → WO Spearman MAE 0.084 / 블록 0.179
   · 'pearson'  (선형식)          : 선형회귀+정규잔차로 선형 상관(Pearson) 보존
         → WO Pearson MAE 0.114 / 블록 0.123 (Spearman MAE 0.104 / 0.152)
-    두 모드는 '확정식'을 공유하고, 물량 변수(두께 의존·마킹·절단·베벨·부재) 식만 다르다.
+    두 모드는 생성 흐름을 공유하고, 모든 계수와 잔차분포는 선택한 계열에서 적합한다.
 
 공통 생성 구조
-  1. 블록 속성   : 길이 ~ N → 마킹 → 절단 → 강재(n) = 확정 사슬,
-                   블록두께 = a·ln(강재) + b + 잔차 → 규격 스냅 (강재로 피팅)
+  1. 블록 속성   : 길이 ~ N → 마킹 → 절단 → W/O 수 사슬,
+                   블록두께 = a·ln(W/O 수) + b + 잔차 → 규격 스냅
   2. WO 길이     : 함수형(병합 패턴 + 멱감쇠), max = 블록길이 보존
   3. WO 두께     : μ(rL)+σ(rL)·SkewNormal, 0.5mm 빈도가중 스냅 (+모드별 ρ 코퓰러)
-  4. WO 마킹·절단: WO 길이로 자유 생성 → 합 제약 후처리 보정
-                   (pearson: 길이가중 가법 / spearman: 곱셈 스케일)
-  5. WO 베벨·부재·택트: WO 직접 생성 (베벨길이 ← 두께+길이+마킹, 부재 ← 절단+길이+마킹)
-     → 블록값: 베벨길이·베벨수량·부재 = Σ WO,  택트타임 = MAX WO
+  4. WO 마킹·절단: WO 길이로 자유 생성 → 입력 실적의 block 집계 계약에 맞게 보정
+                   (신규 다계열 MARK=MAX, 과거 260618 NP MARK=SUM, CUT=SUM)
+  5. WO 베벨·부재: WO 직접 생성 (베벨길이 ← 두께+길이+마킹, 부재 ← 절단+길이+마킹)
+  6. BTH·STL_QTY: BTH는 계열별 로그선형식, STL_QTY는 조건부 범주확률과 계열별 주변분포로 생성
+  7. TACT_TIME: 발표자료 Case 6 고정식(CUT/MARK/THK/PTLST)을 전 계열에 공통 적용
+     → 블록값: 베벨길이·베벨수량·부재·강재 = Σ WO, BTH·TACT_TIME = MAX WO
 
-확정식(사용자 지정, 두 모드 공통, 재적합 안 함)
-  · 블록길이 ~ N(13380.9, 5376.4²)
-  · 블록MARK = 0.03386·길이 − 172.90 + N(0,238.4²)
-  · 블록CUT  = 1.70636·MARK + 58.76 + N(0,218.7²)
-  · 블록STL  = 0.01203·CUT + 2.014  → n(WO수) = round(STL)
-  · WO TACT  = 0.3037·CUT + 0.1325·MARK + 0.4790·THK + 0.3840·PT
-               (부재·두께 의존 — 생성에서 PT·THK 계산 후 마지막에 산출)
-  · 블록두께 = a·ln(강재) + b + N(0,σ²) → 규격 스냅 (a,b,σ는 실적 적합)
+계열별 공통 식(식의 형태만 공유하고 값은 독립 적합)
+  · 블록길이 ~ N(μ_GYEL, σ_GYEL²)
+  · 블록MARK = a_GYEL·길이 + b_GYEL + N(0,σ_MARK,GYEL²)
+  · 블록CUT  = c_GYEL·MARK + d_GYEL + N(0,σ_CUT,GYEL²)
+  · W/O 수   = round(e_GYEL·CUT + f_GYEL + N(0,σ_WO,GYEL²))
+  · 블록두께 = g_GYEL·ln(W/O 수) + h_GYEL + N(0,σ_THK,GYEL²)
+
+`TACT_TIME`은 발표자료의 NP Case 6 고정식을 NP/FN/FL/NC에 적용한다.
 
 선형식(pearson 모드 — 확정식 제외, 실적에서 적합)
   · 베벨길이 = a·두께 + b + N(0,σ)            (허들 유지)
   · 베벨수량 = round(a·베벨길이 + b + N(0,σ))
   · 부재수량 = round(a·절단 + b·길이 + c + N(0,σ))
-  · 마킹·절단 = 길이 비례 선형 배분 + 정규노이즈 (합 보존)
+  · 마킹·절단 = 길이 비례 선형 생성 + 정규노이즈 (입력 block 집계 계약 보존)
   · 두께 = Pearson ρ 직접 부여(선형 조건부)
 
 사용법
   from shipyard_data_generator import ShipyardGenerator
-  gen = ShipyardGenerator(wo_xlsx, blk_xlsx, mode='spearman')   # 또는 'pearson'
+  gen = ShipyardGenerator(wo_xlsx, blk_xlsx, mode='spearman', series='FN')
   gen.fit()
   wo_df, blk_df = gen.generate(n_blocks=800, seed=2026)
   gen.compare(wo_df, blk_df, method='spearman')   # 'pearson'도 가능
 
-  또는 CLI:  python shipyard_data_generator.py WO.xlsx 블록.xlsx --mode pearson --n 800
+  NP 고정식 CLI: python shipyard_data_generator.py --series NP --n 800
+  다계열 적합 CLI: python shipyard_data_generator.py --wo_xlsx WO.xlsx --blk_xlsx 블록.xlsx --series FN --mode pearson --n 800
 """
 import argparse
+import json
+from pathlib import Path
+import sys
+import warnings
 import numpy as np
 import pandas as pd
 from scipy import optimize
+from scipy.spatial import cKDTree
 from scipy.stats import spearmanr, rankdata, norm, skewnorm
 
-WCOLS = ['LTH', 'THK', 'MARK_LTH', 'CUT_LTH', 'BVL_LTH', 'BV_QTY', 'PTLST_QTY', 'TACT_TIME']
-BCOLS = ['LTH', 'THK', 'MARK_LTH', 'CUT_LTH', 'BVL_LTH', 'BV_QTY', 'PTLST_QTY', 'STL_QTY', 'TACT_TIME']
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-# --- 확정식 상수 (사용자 지정) ---
-BLK_LEN_MU, BLK_LEN_SD = 13380.9, 5376.4
-BLK_MARK_A, BLK_MARK_B, BLK_MARK_SD = 0.03386, -172.90, 238.4
-BLK_CUT_A, BLK_CUT_B, BLK_CUT_SD = 1.70636, 58.76, 218.7
-BLK_STL_A, BLK_STL_B = 0.01203, 2.014
-# WO 택트타임 계수: 0.3037·CUT + 0.1325·MARK + 0.4790·THK + 0.3840·PT
-TACT_CUT, TACT_MARK, TACT_THK, TACT_PT = 0.3037, 0.1325, 0.4790, 0.3840
+from Utils.data.report_formula_data_generator import (
+    BTH_FORMULA_FEATURES,
+    TACT_A_CUT,
+    TACT_A_MARK,
+    TACT_A_PTLST,
+    TACT_A_THK,
+    fit_bth_formula,
+    generate_report_formula_data,
+    sample_bth_formula,
+)
+
+CONDITIONAL_FEATURES = ['LTH', 'THK', 'MARK_LTH', 'CUT_LTH', 'BVL_LTH', 'BV_QTY', 'PTLST_QTY']
+WCOLS = CONDITIONAL_FEATURES + ['BTH', 'STL_QTY', 'TACT_TIME']
+BCOLS = CONDITIONAL_FEATURES + ['BTH', 'STL_QTY', 'WO_QTY', 'TACT_TIME']
+COMPARISON_WCOLS = CONDITIONAL_FEATURES + ['BTH', 'STL_QTY']
+COMPARISON_BCOLS = CONDITIONAL_FEATURES + ['BTH', 'STL_QTY', 'WO_QTY']
+
+# 발표자료 27쪽 Case 6 계수를 canonical NP 생성기에서 직접 공유한다.
+TACT_CUT = TACT_A_CUT
+TACT_MARK = TACT_A_MARK
+TACT_THK = TACT_A_THK
+TACT_PT = TACT_A_PTLST
+TACT_FORMULA_SCOPE = 'all_series_shared_np_ppt_case6'
+STL_LOCAL_WEIGHT = 0.75
+EMPIRICAL_SERIES = ('FN', 'FL', 'NC')
 
 
 def _powf(u, a, b):
@@ -83,13 +110,553 @@ def _cluster_rel(vs, rel=0.05):
     return idx
 
 
+def _adjacent_merge_bin(adjacent_index, wo_count):
+    """인접 W/O 위치를 적합·생성에서 공통으로 쓰는 10구간 index로 변환한다."""
+
+    if wo_count < 2 or adjacent_index < 0 or adjacent_index >= wo_count - 1:
+        print(
+            "[ERROR][shipyard_data_generator._adjacent_merge_bin] "
+            f"cause=invalid_adjacent_position index={adjacent_index} wo_count={wo_count}"
+        )
+        raise RuntimeError("invalid_adjacent_merge_position")
+    return min(int(adjacent_index / (wo_count - 1) * 10), 9)
+
+
+def _select_series_rows(wo, block, series):
+    """다계열 입력을 한 계열로 엄격히 분리한다."""
+
+    wo_has_series = 'GYEL' in wo.columns
+    block_has_series = 'GYEL' in block.columns
+    if wo_has_series != block_has_series:
+        print(
+            "[ERROR][shipyard_data_generator._select_series_rows] "
+            f"cause=inconsistent_gyel_columns wo_has_gyel={wo_has_series} "
+            f"block_has_gyel={block_has_series}"
+        )
+        raise RuntimeError("inconsistent_gyel_columns")
+    if not wo_has_series:
+        if series is not None:
+            print(
+                "[ERROR][shipyard_data_generator._select_series_rows] "
+                f"cause=series_column_missing requested_series={series}"
+            )
+            raise RuntimeError("series_column_missing")
+        return wo.copy(), block.copy(), None
+
+    wo_series = set(wo['GYEL'].dropna().astype(str).str.strip())
+    block_series = set(block['GYEL'].dropna().astype(str).str.strip())
+    available = sorted(wo_series | block_series)
+    if series is None:
+        if len(available) != 1:
+            print(
+                "[ERROR][shipyard_data_generator._select_series_rows] "
+                f"cause=series_required_for_multi_series_input available={available}"
+            )
+            raise RuntimeError("series_required_for_multi_series_input")
+        series = available[0]
+    series = str(series).strip()
+    if series not in wo_series or series not in block_series:
+        print(
+            "[ERROR][shipyard_data_generator._select_series_rows] "
+            f"cause=requested_series_missing requested={series} "
+            f"wo_series={sorted(wo_series)} block_series={sorted(block_series)}"
+        )
+        raise RuntimeError("requested_series_missing")
+
+    selected_wo = wo[wo['GYEL'].astype(str).str.strip().eq(series)].copy()
+    selected_block = block[block['GYEL'].astype(str).str.strip().eq(series)].copy()
+    print(
+        "[CHECK][shipyard_data_generator._select_series_rows] "
+        f"series={series} wo_rows={len(selected_wo)} block_rows={len(selected_block)}"
+    )
+    return selected_wo, selected_block, series
+
+
+def _resolve_mark_aggregation(work_orders, blocks, block_keys):
+    """입력 block의 MARK_LTH가 W/O 최댓값인지 합계인지 전수검사한다."""
+
+    required = set(block_keys) | {'MARK_LTH'}
+    for label, frame in (('wo', work_orders), ('block', blocks)):
+        missing = sorted(required - set(frame.columns))
+        if missing:
+            print(
+                "[ERROR][shipyard_data_generator._resolve_mark_aggregation] "
+                f"cause=missing_columns table={label} columns={missing}"
+            )
+            raise RuntimeError(f"missing_mark_aggregation_columns[{label}]: {missing}")
+    duplicate_blocks = blocks.duplicated(block_keys, keep=False)
+    if duplicate_blocks.any():
+        examples = blocks.loc[duplicate_blocks, block_keys].head(5).to_dict('records')
+        print(
+            "[ERROR][shipyard_data_generator._resolve_mark_aggregation] "
+            f"cause=duplicate_block_keys input={examples}"
+        )
+        raise RuntimeError(f"duplicate_mark_aggregation_block_keys: {examples}")
+
+    aggregate = (
+        work_orders.groupby(block_keys, as_index=False, dropna=False)
+        .agg(MARK_MAX=('MARK_LTH', 'max'), MARK_SUM=('MARK_LTH', 'sum'))
+    )
+    compared = blocks[block_keys + ['MARK_LTH']].merge(
+        aggregate,
+        on=block_keys,
+        how='outer',
+        validate='one_to_one',
+        indicator=True,
+    )
+    unmatched = compared['_merge'].ne('both')
+    if unmatched.any():
+        examples = compared.loc[unmatched, block_keys + ['_merge']].head(5).to_dict('records')
+        print(
+            "[ERROR][shipyard_data_generator._resolve_mark_aggregation] "
+            f"cause=block_reference_mismatch input={examples}"
+        )
+        raise RuntimeError(f"mark_aggregation_block_reference_mismatch: {examples}")
+    numeric = compared[['MARK_LTH', 'MARK_MAX', 'MARK_SUM']].apply(pd.to_numeric, errors='coerce')
+    if numeric.isna().any().any() or not np.isfinite(numeric.to_numpy(dtype=float)).all():
+        print(
+            "[ERROR][shipyard_data_generator._resolve_mark_aggregation] "
+            "cause=non_numeric_or_missing_mark_length"
+        )
+        raise RuntimeError("invalid_mark_aggregation_values")
+
+    actual = numeric['MARK_LTH'].to_numpy(dtype=float)
+    max_matches = np.isclose(actual, numeric['MARK_MAX'], rtol=1e-9, atol=1e-6)
+    sum_matches = np.isclose(actual, numeric['MARK_SUM'], rtol=1e-9, atol=1e-6)
+    max_all = bool(max_matches.all())
+    sum_all = bool(sum_matches.all())
+    if max_all == sum_all:
+        cause = 'ambiguous_contract' if max_all else 'unsupported_contract'
+        print(
+            "[ERROR][shipyard_data_generator._resolve_mark_aggregation] "
+            f"cause={cause} blocks={len(compared)} max_matches={int(max_matches.sum())} "
+            f"sum_matches={int(sum_matches.sum())}"
+        )
+        raise RuntimeError(f"mark_aggregation_{cause}")
+    contract = 'max' if max_all else 'sum'
+    print(
+        "[VALIDATION][shipyard_data_generator._resolve_mark_aggregation] "
+        f"passed=true contract={contract} blocks={len(compared)} "
+        f"max_matches={int(max_matches.sum())} sum_matches={int(sum_matches.sum())}"
+    )
+    return contract
+
+
+def _fit_block_chain_parameters(blocks):
+    """공통 블록 생성식의 계수와 정규 잔차를 선택 계열에서 적합한다."""
+
+    required = {'LTH', 'MARK_LTH', 'CUT_LTH', 'WO_QTY'}
+    missing = sorted(required - set(blocks.columns))
+    if missing:
+        print(
+            "[ERROR][shipyard_data_generator._fit_block_chain_parameters] "
+            f"cause=missing_columns columns={missing}"
+        )
+        raise RuntimeError(f"missing_block_chain_columns: {missing}")
+    values = blocks[list(sorted(required))].apply(pd.to_numeric, errors='coerce')
+    invalid_rows = int(values.isna().any(axis=1).sum())
+    if invalid_rows:
+        print(
+            "[ERROR][shipyard_data_generator._fit_block_chain_parameters] "
+            f"cause=non_numeric_or_missing rows={invalid_rows}"
+        )
+        raise RuntimeError("invalid_block_chain_rows")
+    if len(values) < 3:
+        print(
+            "[ERROR][shipyard_data_generator._fit_block_chain_parameters] "
+            f"cause=insufficient_blocks rows={len(values)} required=3"
+        )
+        raise RuntimeError("insufficient_block_chain_rows")
+    if (values['LTH'] <= 0).any() or (values['CUT_LTH'] < 0).any() or (values['WO_QTY'] < 1).any():
+        print(
+            "[ERROR][shipyard_data_generator._fit_block_chain_parameters] "
+            "cause=out_of_domain_block_chain_value"
+        )
+        raise RuntimeError("out_of_domain_block_chain_value")
+
+    def fit_linear(y_name, x_name):
+        x = values[x_name].to_numpy(dtype=float)
+        y = values[y_name].to_numpy(dtype=float)
+        design = np.column_stack([x, np.ones(len(x))])
+        slope, intercept = np.linalg.lstsq(design, y, rcond=None)[0]
+        residual_sd = float(np.std(y - (slope * x + intercept), ddof=0))
+        return float(slope), float(intercept), residual_sd
+
+    mark_a, mark_b, mark_sd = fit_linear('MARK_LTH', 'LTH')
+    cut_a, cut_b, cut_sd = fit_linear('CUT_LTH', 'MARK_LTH')
+    count_a, count_b, count_sd = fit_linear('WO_QTY', 'CUT_LTH')
+    return {
+        'length_mean': float(values['LTH'].mean()),
+        'length_sd': float(values['LTH'].std(ddof=0)),
+        'length_min': float(values['LTH'].min()),
+        'length_max': float(values['LTH'].max()),
+        'mark_a': mark_a,
+        'mark_b': mark_b,
+        'mark_residual_sd': mark_sd,
+        'mark_min': float(values['MARK_LTH'].min()),
+        'cut_a': cut_a,
+        'cut_b': cut_b,
+        'cut_residual_sd': cut_sd,
+        'cut_min': float(values['CUT_LTH'].min()),
+        'wo_count_a': count_a,
+        'wo_count_b': count_b,
+        'wo_count_residual_sd': count_sd,
+        'wo_count_min': int(values['WO_QTY'].min()),
+        'wo_count_max': int(values['WO_QTY'].max()),
+    }
+
+
+def _sample_wo_count(expected_count, residual_sd, minimum, maximum, rng):
+    """계열별 W/O 수 회귀식에서 정수 개수를 생성하고 실적 지원 범위로 제한한다."""
+
+    sampled = expected_count + rng.normal(0.0, residual_sd)
+    return int(np.clip(round(sampled), minimum, maximum))
+
+
+def _fit_conditional_bth_stl_model(actual_wos):
+    """BTH 로그선형식과 STL_QTY 조건부 범주확률을 계열별로 적합한다."""
+
+    required = set(CONDITIONAL_FEATURES) | {'BTH', 'STL_QTY'}
+    missing = sorted(required - set(actual_wos.columns))
+    if missing:
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            f"cause=missing_columns columns={missing}"
+        )
+        raise RuntimeError(f"missing_conditional_bth_stl_columns: {missing}")
+
+    numeric = actual_wos[list(CONDITIONAL_FEATURES) + ['BTH', 'STL_QTY']].apply(
+        pd.to_numeric,
+        errors='coerce',
+    )
+    invalid_rows = int(numeric.isna().any(axis=1).sum())
+    if invalid_rows:
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            f"cause=non_numeric_or_missing rows={invalid_rows}"
+        )
+        raise RuntimeError("invalid_conditional_bth_stl_rows")
+    if (numeric['BTH'] <= 0).any() or (numeric['STL_QTY'] < 0).any():
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            "cause=out_of_domain_target"
+        )
+        raise RuntimeError("out_of_domain_conditional_bth_stl_target")
+    if not np.allclose(numeric['STL_QTY'], np.round(numeric['STL_QTY'])):
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            "cause=non_integer_stl_quantity"
+        )
+        raise RuntimeError("non_integer_stl_quantity")
+
+    series_values = actual_wos['GYEL'].astype(str).str.strip().str.upper().unique()
+    if len(series_values) != 1:
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            f"cause=non_unique_series values={series_values.tolist()}"
+        )
+        raise RuntimeError("conditional BTH/STL model requires exactly one series")
+    bth_formula = fit_bth_formula(actual_wos, series=str(series_values[0]))
+    feature_values = numeric[CONDITIONAL_FEATURES].to_numpy(dtype=float)
+    feature_mean = feature_values.mean(axis=0)
+    feature_scale = feature_values.std(axis=0, ddof=0)
+    active = feature_scale > 0
+    if not active.any():
+        print(
+            "[ERROR][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            "cause=all_conditioning_features_constant"
+        )
+        raise RuntimeError("all_conditioning_features_constant")
+    active_features = np.asarray(CONDITIONAL_FEATURES)[active].tolist()
+    excluded_features = np.asarray(CONDITIONAL_FEATURES)[~active].tolist()
+    if excluded_features:
+        print(
+            "[CHECK][shipyard_data_generator._fit_conditional_bth_stl_model] "
+            f"excluded_constant_features={excluded_features}"
+        )
+    normalized_features = (feature_values[:, active] - feature_mean[active]) / feature_scale[active]
+    stl_quantity = numeric['STL_QTY'].to_numpy(dtype=int)
+    stl_classes = np.unique(stl_quantity)
+    stl_priors = np.array([(stl_quantity == value).mean() for value in stl_classes])
+    return {
+        'features': active_features,
+        'mean': feature_mean[active],
+        'scale': feature_scale[active],
+        'tree': cKDTree(normalized_features),
+        'bth_formula': bth_formula,
+        'stl_quantity': stl_quantity,
+        'stl_classes': stl_classes,
+        'stl_priors': stl_priors,
+    }
+
+
+def _sample_conditional_bth_stl(generated_features, model, rng, neighbor_count=32):
+    """계열별 식의 BTH와 조건부 STL_QTY를 별도로 생성한다."""
+
+    if neighbor_count < 1:
+        print(
+            "[ERROR][shipyard_data_generator._sample_conditional_bth_stl] "
+            f"cause=invalid_neighbor_count value={neighbor_count}"
+        )
+        raise RuntimeError("invalid_neighbor_count")
+    missing = sorted(set(model['features']) - set(generated_features.columns))
+    if missing:
+        print(
+            "[ERROR][shipyard_data_generator._sample_conditional_bth_stl] "
+            f"cause=missing_generated_features columns={missing}"
+        )
+        raise RuntimeError(f"missing_generated_conditioning_features: {missing}")
+
+    target = generated_features[model['features']].apply(pd.to_numeric, errors='coerce')
+    if target.isna().any(axis=None):
+        print(
+            "[ERROR][shipyard_data_generator._sample_conditional_bth_stl] "
+            f"cause=non_numeric_or_missing rows={int(target.isna().any(axis=1).sum())}"
+        )
+        raise RuntimeError("invalid_generated_conditioning_features")
+    target_normalized = (target.to_numpy(dtype=float) - model['mean']) / model['scale']
+    k = min(int(neighbor_count), len(model['stl_quantity']))
+    _, nearest = model['tree'].query(target_normalized, k=k)
+    nearest = np.asarray(nearest, dtype=int)
+    if nearest.ndim == 1:
+        nearest = nearest.reshape(-1, 1)
+    local_probabilities = np.column_stack([
+        (model['stl_quantity'][nearest] == value).mean(axis=1)
+        for value in model['stl_classes']
+    ])
+    probabilities = (
+        STL_LOCAL_WEIGHT * local_probabilities
+        + (1.0 - STL_LOCAL_WEIGHT) * model['stl_priors']
+    )
+    expected_counts = model['stl_priors'] * len(nearest)
+    target_counts = np.floor(expected_counts).astype(int)
+    remainder = len(nearest) - int(target_counts.sum())
+    if remainder:
+        fractional_order = np.argsort(-(expected_counts - target_counts), kind='stable')
+        target_counts[fractional_order[:remainder]] += 1
+
+    majority_class = int(np.argmax(target_counts))
+    class_indices = np.full(len(nearest), majority_class, dtype=int)
+    available = np.ones(len(nearest), dtype=bool)
+    minority_classes = [
+        index for index in np.argsort(target_counts)
+        if index != majority_class and target_counts[index] > 0
+    ]
+    for class_index in minority_classes:
+        candidate_rows = np.flatnonzero(available)
+        score = (
+            np.log(probabilities[candidate_rows, class_index] + 1e-12)
+            - np.log(probabilities[candidate_rows, majority_class] + 1e-12)
+            + rng.gumbel(size=len(candidate_rows))
+        )
+        count = int(target_counts[class_index])
+        selected_rows = candidate_rows[np.argpartition(score, -count)[-count:]]
+        class_indices[selected_rows] = class_index
+        available[selected_rows] = False
+    stl_quantity = model['stl_classes'][class_indices]
+    bth = sample_bth_formula(
+        generated_features[list(BTH_FORMULA_FEATURES)],
+        model['bth_formula'],
+        rng,
+    )
+    return bth, stl_quantity
+
+
+def _calculate_tact_time(cut_length, mark_length, thickness, part_quantity, bevel_quantity):
+    """발표자료 27쪽 Case 6 고정식으로 W/O 택트타임(분)을 계산한다."""
+
+    values = [
+        np.asarray(cut_length, dtype=float),
+        np.asarray(mark_length, dtype=float),
+        np.asarray(thickness, dtype=float),
+        np.asarray(part_quantity, dtype=float),
+        np.asarray(bevel_quantity, dtype=float),
+    ]
+    if any((~np.isfinite(value)).any() or (value < 0).any() for value in values):
+        print(
+            "[ERROR][shipyard_data_generator._calculate_tact_time] "
+            "cause=non_finite_or_negative_input"
+        )
+        raise RuntimeError("invalid_tact_formula_input")
+    return (
+        TACT_CUT * values[0]
+        + TACT_MARK * values[1]
+        + TACT_THK * values[2]
+        + TACT_PT * values[3]
+    )
+
+
+def _scale_to_max(values, maximum, lower_bound):
+    """값의 순서를 유지하면서 최댓값을 목표 block MARK_LTH에 정확히 맞춘다."""
+
+    values = np.asarray(values, dtype=float).copy()
+    maximum = float(maximum)
+    lower_bound = float(lower_bound)
+    if (
+        values.size == 0
+        or not np.isfinite(values).all()
+        or not np.isfinite(maximum)
+        or not np.isfinite(lower_bound)
+        or maximum < 0.0
+        or lower_bound < 0.0
+    ):
+        print(
+            "[ERROR][shipyard_data_generator._scale_to_max] "
+            f"cause=invalid_input size={values.size} maximum={maximum} lower_bound={lower_bound}"
+        )
+        raise RuntimeError("invalid_scale_to_max_input")
+    # 실적에 MARK_LTH=0인 블록이 있으므로 목표 최대값 0은 W/O 전체 0으로 보존한다.
+    if maximum == 0.0:
+        values.fill(0.0)
+        return values
+    if maximum < lower_bound:
+        print(
+            "[ERROR][shipyard_data_generator._scale_to_max] "
+            f"cause=maximum_below_positive_floor maximum={maximum} lower_bound={lower_bound}"
+        )
+        raise RuntimeError("maximum_below_scale_to_max_floor")
+    values = np.maximum(values, lower_bound)
+    current_maximum = float(values.max())
+    maximum_index = int(np.argmax(values))
+    if current_maximum <= lower_bound:
+        values.fill(lower_bound)
+    else:
+        values = lower_bound + (
+            (values - lower_bound)
+            * (maximum - lower_bound)
+            / (current_maximum - lower_bound)
+        )
+    values[maximum_index] = maximum
+    return values
+
+
+def _apply_zero_inflated_floor(value, positive_floor):
+    """0과 관측 양수 지원범위를 분리해 블록 마킹길이를 제한한다."""
+
+    value = float(value)
+    positive_floor = float(positive_floor)
+    if not np.isfinite(value) or not np.isfinite(positive_floor) or positive_floor <= 0.0:
+        print(
+            "[ERROR][shipyard_data_generator._apply_zero_inflated_floor] "
+            f"cause=invalid_input value={value} positive_floor={positive_floor}"
+        )
+        raise RuntimeError("invalid_zero_inflated_floor_input")
+    return 0.0 if value <= 0.0 else max(value, positive_floor)
+
+
+def _aggregate_generated_block(generated_wos, mark_aggregation):
+    """W/O 생성값을 현장 계층 계약에 맞게 블록 특성으로 집계한다."""
+
+    required = set(WCOLS)
+    missing = sorted(required - set(generated_wos.columns))
+    if missing:
+        print(
+            "[ERROR][shipyard_data_generator._aggregate_generated_block] "
+            f"cause=missing_columns columns={missing}"
+        )
+        raise RuntimeError(f"missing_generated_wo_columns: {missing}")
+    if generated_wos.empty:
+        print(
+            "[ERROR][shipyard_data_generator._aggregate_generated_block] "
+            "cause=empty_generated_wos"
+        )
+        raise RuntimeError("empty_generated_wos")
+    if mark_aggregation not in {'max', 'sum'}:
+        print(
+            "[ERROR][shipyard_data_generator._aggregate_generated_block] "
+            f"cause=unsupported_mark_aggregation input={mark_aggregation}"
+        )
+        raise RuntimeError(f"unsupported_mark_aggregation: {mark_aggregation}")
+    stl_quantity = pd.to_numeric(generated_wos['STL_QTY'], errors='coerce')
+    if stl_quantity.isna().any() or not np.allclose(stl_quantity, np.round(stl_quantity)):
+        print(
+            "[ERROR][shipyard_data_generator._aggregate_generated_block] "
+            "cause=invalid_stl_quantity"
+        )
+        raise RuntimeError("invalid_generated_stl_quantity")
+    return {
+        'LTH': float(generated_wos['LTH'].max()),
+        'THK': float(generated_wos['THK'].max()),
+        'MARK_LTH': float(getattr(generated_wos['MARK_LTH'], mark_aggregation)()),
+        'CUT_LTH': float(generated_wos['CUT_LTH'].sum()),
+        'BVL_LTH': float(generated_wos['BVL_LTH'].sum()),
+        'BV_QTY': float(generated_wos['BV_QTY'].sum()),
+        'PTLST_QTY': float(generated_wos['PTLST_QTY'].sum()),
+        'BTH': float(generated_wos['BTH'].max()),
+        'STL_QTY': int(stl_quantity.sum()),
+        'WO_QTY': int(len(generated_wos)),
+        'TACT_TIME': float(generated_wos['TACT_TIME'].max()),
+    }
+
+
+def _fit_thickness_ratio_profiles(centers, means, standard_deviations):
+    """길이비 구간 중 실제 관측치가 있는 구간만 두께 곡선에 적합한다.
+
+    희소 계열에서 빈 구간의 통계량을 임의 값으로 대체하지 않는다. 관측 구간이
+    삼 개 미만이면 지수 평균 곡선과 2차 표준편차 곡선을 식별할 수 없으므로 실패시킨다.
+    """
+
+    centers = np.asarray(centers, dtype=float)
+    means = np.asarray(means, dtype=float)
+    standard_deviations = np.asarray(standard_deviations, dtype=float)
+    observed = np.isfinite(centers) & np.isfinite(means) & np.isfinite(standard_deviations)
+    observed_count = int(observed.sum())
+    if observed_count < 3:
+        print(
+            "[ERROR][shipyard_data_generator._fit_thickness_ratio_profiles] "
+            f"cause=insufficient_observed_thickness_ratio_bins observed={observed_count} required=3"
+        )
+        raise RuntimeError("insufficient_observed_thickness_ratio_bins")
+
+    mean_parameters, _ = optimize.curve_fit(
+        lambda x, inf, amp, k: inf + amp * np.exp(-k * x),
+        centers[observed],
+        means[observed],
+        p0=[12, 6, 3],
+        maxfev=5000,
+    )
+    standard_deviation_parameters = np.polyfit(
+        centers[observed],
+        standard_deviations[observed],
+        2,
+    )
+    return mean_parameters, standard_deviation_parameters, observed_count
+
+
 class ShipyardGenerator:
-    def __init__(self, wo_xlsx, blk_xlsx, mode='spearman'):
-        assert mode in ('spearman', 'pearson'), "mode는 'spearman' 또는 'pearson'"
+    def __init__(self, wo_xlsx, blk_xlsx, mode='spearman', series=None):
+        if mode not in ('spearman', 'pearson'):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.__init__] "
+                f"cause=unsupported_mode mode={mode}"
+            )
+            raise RuntimeError(f"unsupported_mode: {mode}")
+        normalized_series = str(series or '').strip().upper()
+        if normalized_series == 'NP':
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.__init__] "
+                "cause=np_fixed_formula_required use=generate_report_formula_data"
+            )
+            raise RuntimeError("np_fixed_formula_required")
+        if normalized_series not in EMPIRICAL_SERIES:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.__init__] "
+                f"cause=empirical_series_required allowed={EMPIRICAL_SERIES} input={series}"
+            )
+            raise RuntimeError("empirical_series_required")
         self.mode = mode
-        self.wo = pd.read_excel(wo_xlsx)
-        self.blk = pd.read_excel(blk_xlsx)
-        g = self.wo.groupby(['PROJ_NO', 'BLK_NO'])
+        raw_wo = pd.read_excel(wo_xlsx)
+        raw_block = pd.read_excel(blk_xlsx)
+        self.wo, self.blk, self.series = _select_series_rows(
+            raw_wo,
+            raw_block,
+            normalized_series,
+        )
+        self.block_keys = ['PROJ_NO', 'BLK_NO']
+        if 'GYEL' in self.wo.columns:
+            self.block_keys.insert(1, 'GYEL')
+        self.mark_aggregation = _resolve_mark_aggregation(self.wo, self.blk, self.block_keys)
+        g = self.wo.groupby(self.block_keys)
         self.wo['n_wo'] = g['LTH'].transform('size')
         self.woF = self.wo[self.wo['n_wo'] >= 2].copy()
         self._fitted = False
@@ -97,11 +664,28 @@ class ShipyardGenerator:
     # ================= 적합 =================
     def fit(self):
         woF = self.woF
-        g = woF.groupby(['PROJ_NO', 'BLK_NO'])
+        g = woF.groupby(self.block_keys)
+
+        # 블록 식의 형태는 모든 계열이 공유하고 계수·잔차는 현재 계열에서만 적합한다.
+        block_chain = self.wo.groupby(self.block_keys).agg(
+            LTH=('LTH', 'max'),
+            MARK_LTH=('MARK_LTH', self.mark_aggregation),
+            CUT_LTH=('CUT_LTH', 'sum'),
+            WO_QTY=('LTH', 'size'),
+        ).reset_index()
+        self.block_chain = _fit_block_chain_parameters(block_chain)
+        self.conditional_bth_stl = _fit_conditional_bth_stl_model(self.wo)
+        print(
+            "[CHECK][shipyard_data_generator.fit] "
+            f"series={self.series} block_chain_rows={len(block_chain)} "
+            f"wo_count_range={self.block_chain['wo_count_min']}..{self.block_chain['wo_count_max']}"
+        )
 
         # --- WO 길이: 블록별 (a,b) 적합 후 n에 대한 경향 ---
         NB = []
-        for _, b in g:
+        fit_failures = []
+        fit_warnings = []
+        for block_id, b in g:
             vs = np.sort(b['LTH'].values)[::-1]
             n = len(vs)
             if n < 3 or len(np.unique(vs)) < 2:
@@ -111,12 +695,31 @@ class ShipyardGenerator:
             gm = np.array([vs[grp].mean() for grp in idx])
             M = vs.max()
             try:
-                fab, _ = optimize.curve_fit(
-                    lambda u, a, bb: M * _powf(u, a, bb), gpos, gm,
-                    p0=[0.7, 1.0], bounds=([0.01, 0.1], [1.5, 3.0]), maxfev=5000)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter('always', optimize.OptimizeWarning)
+                    fab, _ = optimize.curve_fit(
+                        lambda u, a, bb: M * _powf(u, a, bb), gpos, gm,
+                        p0=[0.7, 1.0], bounds=([0.01, 0.1], [1.5, 3.0]), maxfev=5000)
                 NB.append((n, fab[0], fab[1]))
-            except Exception:
-                pass
+                fit_warnings.extend((block_id, str(item.message)) for item in caught)
+            except (RuntimeError, ValueError) as exc:
+                fit_failures.append((block_id, str(exc)))
+        if fit_failures:
+            print(
+                "[CHECK][shipyard_data_generator.fit] "
+                f"wo_length_curve_excluded={len(fit_failures)} examples={fit_failures[:3]}"
+            )
+        if fit_warnings:
+            print(
+                "[CHECK][shipyard_data_generator.fit] "
+                f"wo_length_curve_warnings={len(fit_warnings)} examples={fit_warnings[:3]}"
+            )
+        if len(NB) < 3:
+            print(
+                "[ERROR][shipyard_data_generator.fit] "
+                f"cause=insufficient_wo_length_curve_fits fitted={len(NB)} required=3 series={self.series}"
+            )
+            raise RuntimeError("insufficient_wo_length_curve_fits")
         NB = np.array(NB)
         nns, aa, bbv = NB[:, 0], NB[:, 1], NB[:, 2]
         self.pa, _ = optimize.curve_fit(lambda n, inf, c: inf - c / n, nns, aa, p0=[0.9, 1])
@@ -131,9 +734,24 @@ class ShipyardGenerator:
             vs = np.sort(b['LTH'].values)[::-1]
             nn = len(vs)
             for i in range(nn - 1):
-                mp[min(int(i / (nn - 1) * 10), 9)].append(
+                mp[_adjacent_merge_bin(i, nn)].append(
                     (vs[i] - vs[i + 1]) / max(vs[i], 1e-9) <= 0.05)
-        self.puL = np.array([np.mean(mp[i]) if mp[i] else 0.3 for i in range(10)])
+        reachable_bins = {
+            _adjacent_merge_bin(index, wo_count)
+            for wo_count in range(
+                max(2, int(self.block_chain['wo_count_min'])),
+                int(self.block_chain['wo_count_max']) + 1,
+            )
+            for index in range(wo_count - 1)
+        }
+        missing_bins = sorted(index for index in reachable_bins if not mp[index])
+        if missing_bins:
+            print(
+                "[ERROR][shipyard_data_generator.fit] "
+                f"cause=missing_reachable_merge_bins series={self.series} bins={missing_bins}"
+            )
+            raise RuntimeError("missing_reachable_merge_bins")
+        self.puL = np.array([np.mean(mp[index]) if mp[index] else np.nan for index in range(10)])
         self.floorL = max(int(woF['LTH'].quantile(.005)), 1)
 
         # --- WO 두께: μ(rL), σ(rL), 잔차 분포 ---
@@ -142,10 +760,20 @@ class ShipyardGenerator:
         THKv = woF['THK'].values
         edg = np.linspace(0, 1, 11)
         cen = (edg[:-1] + edg[1:]) / 2
-        mu_pts = np.array([THKv[(rLv >= edg[i]) & ((rLv < edg[i + 1]) if i < 9 else (rLv <= 1))].mean() for i in range(10)])
-        sd_pts = np.array([THKv[(rLv >= edg[i]) & ((rLv < edg[i + 1]) if i < 9 else (rLv <= 1))].std() for i in range(10)])
-        self.pmu, _ = optimize.curve_fit(lambda x, inf, amp, k: inf + amp * np.exp(-k * x), cen, mu_pts, p0=[12, 6, 3])
-        self.psd = np.polyfit(cen, sd_pts, 2)
+        ratio_bin_values = [
+            THKv[(rLv >= edg[i]) & ((rLv < edg[i + 1]) if i < 9 else (rLv <= 1))]
+            for i in range(10)
+        ]
+        mu_pts = np.array([values.mean() if len(values) else np.nan for values in ratio_bin_values])
+        sd_pts = np.array([values.std() if len(values) else np.nan for values in ratio_bin_values])
+        self.pmu, self.psd, observed_ratio_bins = _fit_thickness_ratio_profiles(cen, mu_pts, sd_pts)
+        if observed_ratio_bins < len(cen):
+            excluded = np.flatnonzero(~(np.isfinite(mu_pts) & np.isfinite(sd_pts))).tolist()
+            print(
+                "[CHECK][shipyard_data_generator.fit] "
+                f"thickness_ratio_observed_bins={observed_ratio_bins} "
+                f"total_bins={len(cen)} excluded_empty_bins={excluded}"
+            )
         self.zTp = skewnorm.fit((THKv - self._muf(rLv)) / self._sdf(rLv))
         # 0.5mm 격자 (빈도가중 스냅용)
         vc = pd.Series(THKv).value_counts()
@@ -172,7 +800,7 @@ class ShipyardGenerator:
         Lw = self.wo['LTH'].values.astype(float)
         MKw = self.wo['MARK_LTH'].values.astype(float)
         CTw = self.wo['CUT_LTH'].values.astype(float)
-        # 합 보정 시 사용할 하한(실적 최소값) — 0/음수 방지
+        # block 집계 보정 시 사용할 W/O 양수 지원범위 하한
         self.mk_lo = float(MKw[MKw > 0].min())
         self.ct_lo = float(CTw[CTw > 0].min())
         if self.mode == 'pearson':
@@ -208,16 +836,16 @@ class ShipyardGenerator:
             self.cQlin, self.sQlin = self._fit_lin(BVQ[m], BVL[m], CUT[m])             # 베벨수량 = a·베벨길이+b·절단+c
             self.cPlin, self.sPlin = self._fit_lin(PT, CUT, L, MK)                    # 부재수량 = a·절단+b·길이+c·마킹+d
 
-        # 블록 두께 = f(강재수량 n) — 강재가 사슬 끝(길이→마킹→절단→강재)이라
-        # 두께를 강재로 피팅하면 두께가 길이·마킹·절단·부재와 자동 연결된다.
-        # 블록 두께 = MAX(WO두께), 강재수량 = 블록당 WO 개수
-        bagg = self.wo.groupby(['PROJ_NO', 'BLK_NO']).agg(THK=('THK', 'max'), STL=('LTH', 'size'))
+        # 블록 두께 = f(W/O 수 n). W/O 수가 사슬 끝에 있으므로 두께도
+        # 길이·마킹·절단과 연결된다. W/O 수를 강재수량과 혼용하지 않는다.
+        bagg = self.wo.groupby(self.block_keys).agg(THK=('THK', 'max'), STL=('LTH', 'size'))
         vc = bagg['THK'].value_counts(normalize=True)
         self.blk_thk_vals = np.array(sorted(vc.index))     # 두께 규격 격자 (스냅용)
         # 두께 ~ a·ln(강재) + b + N(0, σ²)
         self.thk_a, self.thk_b = np.polyfit(np.log(bagg['STL']), bagg['THK'], 1)
         self.thk_sig = float((bagg['THK'] - (self.thk_a * np.log(bagg['STL']) + self.thk_b)).std())
-        self.n_max = int(woF.groupby(['PROJ_NO', 'BLK_NO']).size().max())
+        self.n_min = self.block_chain['wo_count_min']
+        self.n_max = self.block_chain['wo_count_max']
         self._fitted = True
         return self
 
@@ -235,7 +863,7 @@ class ShipyardGenerator:
     def _fit_beta(self, var, pc):
         """블록 내 점유율 log-log 회귀: log(share_var) ~ β·log(share_pred)"""
         bx, by = [], []
-        for _, b in self.woF.groupby(['PROJ_NO', 'BLK_NO']):
+        for _, b in self.woF.groupby(self.block_keys):
             P = b[pc].values.astype(float)
             v = b[var].values.astype(float)
             if v.sum() <= 0 or P.sum() <= 0 or len(b) < 2:
@@ -299,20 +927,37 @@ class ShipyardGenerator:
         sel = (self.thk_grid >= 6) & (self.thk_grid <= MT)
         cand, cf = self.thk_grid[sel], self.thk_freq[sel]
         if len(cand) == 0:
-            return min(max(round(t * 2) / 2, 6), MT)
-        w = cf * np.exp(-((cand - t) / 0.6) ** 2)
-        return float(rng.choice(cand, p=w / w.sum())) if w.sum() > 0 else cand[np.argmin(np.abs(cand - t))]
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator._snap_thk] "
+                f"cause=no_allowed_thickness_spec target={t} maximum={MT}"
+            )
+            raise RuntimeError("no_allowed_thickness_spec")
+        log_weights = np.log(cf) - ((cand - t) / 0.6) ** 2
+        weights = np.exp(log_weights - np.max(log_weights))
+        if not np.isfinite(weights).all() or weights.sum() <= 0:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator._snap_thk] "
+                f"cause=invalid_thickness_weights target={t} maximum={MT}"
+            )
+            raise RuntimeError("invalid_thickness_weights")
+        return float(rng.choice(cand, p=weights / weights.sum()))
 
     # ================= 생성 =================
     def _gen_one(self, rng):
-        # 1) 블록 속성: 길이 → 마킹 → 절단 → 강재(n)  (확정 사슬 유지)
-        ML = float(np.clip(rng.normal(BLK_LEN_MU, BLK_LEN_SD), self.floorL + 500, 30000))
-        bMARK = max(BLK_MARK_A * ML + BLK_MARK_B + rng.normal(0, BLK_MARK_SD), 1.0)
-        bCUT = max(BLK_CUT_A * bMARK + BLK_CUT_B + rng.normal(0, BLK_CUT_SD), 1.0)
-        STL = BLK_STL_A * bCUT + BLK_STL_B
-        n = int(np.clip(round(STL + rng.normal(0, 1.2)), 2, self.n_max))
-        # 블록 두께 = f(강재수량 n): a·ln(n)+b + 잔차 → 가장 가까운 규격으로 스냅
-        #   강재가 사슬 끝이라, 두께가 길이·마킹·절단·부재와 자동 연결됨
+        # 1) 블록 속성: 식의 형태는 공통이고 모든 값은 선택 계열의 실적 적합값이다.
+        p = self.block_chain
+        ML = float(np.clip(rng.normal(p['length_mean'], p['length_sd']), p['length_min'], p['length_max']))
+        bMARK = max(p['mark_a'] * ML + p['mark_b'] + rng.normal(0, p['mark_residual_sd']), p['mark_min'])
+        bMARK = _apply_zero_inflated_floor(bMARK, self.mk_lo)
+        bCUT = max(p['cut_a'] * bMARK + p['cut_b'] + rng.normal(0, p['cut_residual_sd']), p['cut_min'])
+        n = _sample_wo_count(
+            expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
+            residual_sd=p['wo_count_residual_sd'],
+            minimum=self.n_min,
+            maximum=self.n_max,
+            rng=rng,
+        )
+        # 블록 두께 = f(W/O 수 n): a·ln(n)+b + 잔차 → 가장 가까운 규격으로 스냅
         thk_cont = self.thk_a * np.log(max(n, 1)) + self.thk_b + rng.normal(0, self.thk_sig)
         MT = float(self.blk_thk_vals[np.argmin(np.abs(self.blk_thk_vals - thk_cont))])
 
@@ -322,7 +967,15 @@ class ShipyardGenerator:
         else:
             sizes = [1]
             for i in range(1, n):
-                if rng.random() < self.puL[min(int(i / (n - 1) * 10), 9)]:
+                merge_bin = _adjacent_merge_bin(i - 1, n)
+                merge_probability = self.puL[merge_bin]
+                if not np.isfinite(merge_probability):
+                    print(
+                        "[ERROR][shipyard_data_generator.ShipyardGenerator._gen_one] "
+                        f"cause=unfitted_merge_probability series={self.series} bin={merge_bin} n={n}"
+                    )
+                    raise RuntimeError("unfitted_merge_probability")
+                if rng.random() < merge_probability:
                     sizes[-1] += 1
                 else:
                     sizes.append(1)
@@ -360,22 +1013,27 @@ class ShipyardGenerator:
         else:
             THK[np.argmax(THK)] = MT
 
-        # 4) WO 마킹·절단: WO 길이로 자유 생성 → 합 제약 후처리 보정
-        #    (배분 대신 자유생성+스케일 → 마킹↔절단 동조 해소, 길이↔마킹 회복)
+        # 4) WO 마킹·절단: WO 길이로 자유 생성한 뒤 입력 실적의 block 집계 계약을 보존한다.
         if self.mode == 'pearson':
             MARK = self.mkA * L + self.mkB + rng.normal(0, self.mkS, n)
             CUT = self.ctA * L + self.ctB + rng.normal(0, self.ctS, n)
-            # 길이가중 가법 + 하한 보장 (음수·0 방지, 합 정확히 보존)
-            MARK = self._scale_to_sum(MARK, bMARK, L, self.mk_lo)
+            MARK = (
+                _scale_to_max(MARK, bMARK, self.mk_lo)
+                if self.mark_aggregation == 'max'
+                else self._scale_to_sum(MARK, bMARK, L, self.mk_lo)
+            )
             CUT = self._scale_to_sum(CUT, bCUT, L, self.ct_lo)
         else:
             MARK = np.exp(self.mkA * np.log(L) + self.mkB + rng.normal(0, self.mkS, n))
             CUT = np.exp(self.ctA * np.log(L) + self.ctB + rng.normal(0, self.ctS, n))
-            # 곱셈 스케일 후 하한 가법 보정 (실적 최소값 미만 방지, 합 보존)
-            MARK = self._scale_to_sum(MARK * bMARK / MARK.sum(), bMARK, L, self.mk_lo)
+            MARK = (
+                _scale_to_max(MARK, bMARK, self.mk_lo)
+                if self.mark_aggregation == 'max'
+                else self._scale_to_sum(MARK * bMARK / MARK.sum(), bMARK, L, self.mk_lo)
+            )
             CUT = self._scale_to_sum(CUT * bCUT / CUT.sum(), bCUT, L, self.ct_lo)
 
-        # 5) WO 베벨·부재·택트 (WO 직접 생성)
+        # 5) WO 베벨·부재 (WO 직접 생성)
         pH = 1 / (1 + np.exp(-(self.bH[0] + self.bH[1] * (THK - self.Tm) / self.Ts)))
         hv = rng.random(n) < pH                            # 베벨 발생 허들 (공통)
         if self.mode == 'spearman':
@@ -388,51 +1046,66 @@ class ShipyardGenerator:
             # 선형. 베벨길이 ← 두께+길이+마킹, 부재 ← 절단+길이+마킹
             BVL = np.where(hv, np.maximum(self.cBlin[0] + self.cBlin[1] * THK + self.cBlin[2] * L + self.cBlin[3] * MARK + rng.normal(0, self.sBlin, n), 0.1), 0.0)
             BVQ = np.where(BVL > 0, np.maximum(np.round(self.cQlin[0] + self.cQlin[1] * BVL + self.cQlin[2] * CUT + rng.normal(0, self.sQlin, n)), 1), 0.0)
-            PT = np.maximum(np.round(self.cPlin[0] + self.cPlin[1] * CUT + self.cPlin[2] * 0.7 * L + self.cPlin[3] * MARK + rng.normal(0, self.sPlin, n)), 1)
-        TACT = TACT_CUT * CUT + TACT_MARK * MARK + TACT_THK * THK + TACT_PT * PT
-
+            PT = np.maximum(np.round(self.cPlin[0] + self.cPlin[1] * CUT + self.cPlin[2] * L + self.cPlin[3] * MARK + rng.normal(0, self.sPlin, n)), 1)
         wodf = pd.DataFrame({'LTH': L, 'THK': THK, 'MARK_LTH': MARK, 'CUT_LTH': CUT,
-                             'BVL_LTH': BVL, 'BV_QTY': BVQ, 'PTLST_QTY': PT, 'TACT_TIME': TACT})
-        bl = {'LTH': L.max(), 'THK': THK.max(), 'MARK_LTH': MARK.sum(), 'CUT_LTH': CUT.sum(),
-              'BVL_LTH': BVL.sum(), 'BV_QTY': BVQ.sum(), 'PTLST_QTY': PT.sum(),
-              'STL_QTY': n, 'TACT_TIME': TACT.max()}
-        return wodf, bl
+                             'BVL_LTH': BVL, 'BV_QTY': BVQ, 'PTLST_QTY': PT})
+        wodf['TACT_TIME'] = _calculate_tact_time(CUT, MARK, THK, PT, BVQ)
+        return wodf
 
     def generate(self, n_blocks=800, seed=2026):
         """합성 블록 n_blocks개 생성. 반환: (wo_df, blk_df). wo_df엔 BLK_ID 부여."""
         if not self._fitted:
             self.fit()
         rng = np.random.default_rng(seed)
-        wos, bls = [], []
+        wos = []
         for bid in range(n_blocks):
-            w, b = self._gen_one(rng)
+            w = self._gen_one(rng)
             w = w.copy()
             w.insert(0, 'BLK_ID', bid)
+            if self.series is not None:
+                w.insert(1, 'GYEL', self.series)
             wos.append(w)
-            b = dict(b)
-            b['BLK_ID'] = bid
-            bls.append(b)
         wo_df = pd.concat(wos, ignore_index=True)
-        blk_df = pd.DataFrame(bls)[['BLK_ID'] + BCOLS]
+        BTH, STL = _sample_conditional_bth_stl(
+            wo_df,
+            self.conditional_bth_stl,
+            rng,
+        )
+        wo_df['BTH'] = BTH
+        wo_df['STL_QTY'] = STL
+
+        bls = []
+        for bid, block_wos in wo_df.groupby('BLK_ID', sort=True):
+            block = _aggregate_generated_block(block_wos, self.mark_aggregation)
+            block['BLK_ID'] = bid
+            if self.series is not None:
+                block['GYEL'] = self.series
+            bls.append(block)
+        identity_columns = ['BLK_ID'] + (['GYEL'] if self.series is not None else [])
+        wo_df = wo_df[identity_columns + WCOLS]
+        blk_df = pd.DataFrame(bls)[identity_columns + BCOLS]
         return wo_df, blk_df
 
     # ================= 검증 =================
     def _actuals(self):
-        act_wo = self.wo[WCOLS]
-        act_blk = self.wo.groupby(['PROJ_NO', 'BLK_NO']).agg(
-            LTH=('LTH', 'max'), THK=('THK', 'max'), MARK_LTH=('MARK_LTH', 'sum'),
+        act_wo = self.wo[COMPARISON_WCOLS]
+        act_blk = self.wo.groupby(self.block_keys).agg(
+            LTH=('LTH', 'max'), THK=('THK', 'max'), MARK_LTH=('MARK_LTH', self.mark_aggregation),
             CUT_LTH=('CUT_LTH', 'sum'), BVL_LTH=('BVL_LTH', 'sum'), BV_QTY=('BV_QTY', 'sum'),
-            PTLST_QTY=('PTLST_QTY', 'sum'), STL_QTY=('LTH', 'size'), TACT_TIME=('TACT_TIME', 'max')
+            PTLST_QTY=('PTLST_QTY', 'sum'), BTH=('BTH', 'max'), STL_QTY=('STL_QTY', 'sum'),
+            WO_QTY=('LTH', 'size')
         ).reset_index()
         return act_wo, act_blk
 
     def compare(self, wo_df, blk_df, method='spearman'):
         """생성 vs 실적 상관행렬 MAE(상삼각) 출력 및 반환."""
         act_wo, act_blk = self._actuals()
-        cwa, cwg = act_wo[WCOLS].corr(method), wo_df[WCOLS].corr(method)
-        cba, cbg = act_blk[BCOLS].corr(method), blk_df[BCOLS].corr(method)
-        wmae = np.abs((cwg.values - cwa.values)[np.triu_indices(len(WCOLS), 1)]).mean()
-        bmae = np.abs((cbg.values - cba.values)[np.triu_indices(len(BCOLS), 1)]).mean()
+        cwa = act_wo[COMPARISON_WCOLS].corr(method)
+        cwg = wo_df[COMPARISON_WCOLS].corr(method)
+        cba = act_blk[COMPARISON_BCOLS].corr(method)
+        cbg = blk_df[COMPARISON_BCOLS].corr(method)
+        wmae = np.abs((cwg.values - cwa.values)[np.triu_indices(len(COMPARISON_WCOLS), 1)]).mean()
+        bmae = np.abs((cbg.values - cba.values)[np.triu_indices(len(COMPARISON_BCOLS), 1)]).mean()
         print(f"[{method}] WO 상관행렬 MAE={wmae:.3f} / 블록 MAE={bmae:.3f}")
         return {'wo_mae': wmae, 'blk_mae': bmae,
                 'wo_actual': cwa, 'wo_gen': cwg, 'blk_actual': cba, 'blk_gen': cbg}
@@ -444,16 +1117,89 @@ def main():
     ap.add_argument('--blk_xlsx', help='실적 블록 엑셀 경로')
     ap.add_argument('--mode', choices=['spearman', 'pearson'], default='spearman',
                     help="생성 모드: spearman(길이직접,기본) / pearson(선형식)")
+    ap.add_argument('--series', help='적합할 계열: NP, FN, FL, NC. 다계열 입력에서는 필수')
     ap.add_argument('--n', type=int, default=800, help='생성 블록 수 (기본 800)')
     ap.add_argument('--seed', type=int, default=2026)
     ap.add_argument('--out', default='generated', help='출력 파일 접두사')
     args = ap.parse_args()
 
-    gen = ShipyardGenerator(args.wo_xlsx, args.blk_xlsx, mode=args.mode).fit()
+    normalized_series = str(args.series or '').strip().upper()
+    print(
+        "[CHECK][shipyard_data_generator.main] "
+        f"wo={args.wo_xlsx} block={args.blk_xlsx} series={normalized_series} "
+        f"mode={args.mode} blocks={args.n} output={args.out}"
+    )
+    if normalized_series == 'NP':
+        generated = generate_report_formula_data(n_blocks=args.n, seed=args.seed, gyel='NP')
+        wo_df = generated.wo_df
+        blk_df = generated.block_df
+        wo_df.to_csv(f'{args.out}_wo.csv', index=False, encoding='utf-8-sig')
+        blk_df.to_csv(f'{args.out}_blk.csv', index=False, encoding='utf-8-sig')
+        with open(f'{args.out}_metadata.json', 'w', encoding='utf-8') as file:
+            json.dump(
+                {
+                    'series': 'NP',
+                    'mode': 'np_ppt_fixed_formula',
+                    'generated_blocks': len(blk_df),
+                    'generated_wos': len(wo_df),
+                    'tact_formula_scope': TACT_FORMULA_SCOPE,
+                    'tact_formula_coefficients': {
+                        'CUT_LTH': TACT_CUT,
+                        'MARK_LTH': TACT_MARK,
+                        'THK': TACT_THK,
+                        'PTLST_QTY': TACT_PT,
+                    },
+                },
+                file,
+                ensure_ascii=False,
+                indent=2,
+            )
+        print(
+            "[VALIDATION][shipyard_data_generator.main] passed=true "
+            f"series=NP generated_wos={len(wo_df)} generated_blocks={len(blk_df)} "
+            f"source=np_ppt_fixed_formula tact_formula_scope={TACT_FORMULA_SCOPE}"
+        )
+        return
+    if not args.wo_xlsx or not args.blk_xlsx:
+        print(
+            "[ERROR][shipyard_data_generator.main] "
+            f"cause=missing_empirical_source series={normalized_series}"
+        )
+        raise RuntimeError("FN/FL/NC generation requires --wo_xlsx and --blk_xlsx")
+    gen = ShipyardGenerator(args.wo_xlsx, args.blk_xlsx, mode=args.mode, series=args.series).fit()
     wo_df, blk_df = gen.generate(n_blocks=args.n, seed=args.seed)
     wo_df.to_csv(f'{args.out}_wo.csv', index=False, encoding='utf-8-sig')
     blk_df.to_csv(f'{args.out}_blk.csv', index=False, encoding='utf-8-sig')
-    print(f"[mode={args.mode}] 생성 완료: {args.out}_wo.csv ({len(wo_df)} WO), {args.out}_blk.csv ({len(blk_df)} 블록)")
+    with open(f'{args.out}_metadata.json', 'w', encoding='utf-8') as file:
+        json.dump(
+            {
+                'series': gen.series,
+                'mode': gen.mode,
+                'generated_blocks': len(blk_df),
+                'generated_wos': len(wo_df),
+                'bth_source': 'series_log_linear_formula_observed_spec_rounding',
+                'stl_quantity_source': (
+                    f'series_conditional_class_probability_local_weight_{STL_LOCAL_WEIGHT}_exact_marginal'
+                ),
+                'tact_formula_scope': TACT_FORMULA_SCOPE,
+                'mark_aggregation': gen.mark_aggregation,
+                'tact_formula_coefficients': {
+                    'CUT_LTH': TACT_CUT,
+                    'MARK_LTH': TACT_MARK,
+                    'THK': TACT_THK,
+                    'PTLST_QTY': TACT_PT,
+                },
+            },
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print(
+        "[VALIDATION][shipyard_data_generator.main] passed=true "
+        f"series={gen.series} generated_wos={len(wo_df)} generated_blocks={len(blk_df)} "
+        "tact_time_generated=true bth_generated=true stl_qty_generated=true "
+        f"tact_formula_scope={TACT_FORMULA_SCOPE}"
+    )
     gen.compare(wo_df, blk_df, 'spearman')
     gen.compare(wo_df, blk_df, 'pearson')
 

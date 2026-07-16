@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
+
+from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_BAY
 
 
 MULTI_SERIES_RULE_PROFILE = "multi_series_260711"
-LEGACY_NP_RULE_PROFILE = "legacy_np"
+PHASE1_MULTI_SERIES_SCOPE_VERSION = "joint_five_bay_v2_mapped_eqp"
 
 SERIES_BALANCING_GROUP = {
     "NP": "NP",
@@ -24,13 +26,32 @@ SERIES_ALLOWED_BAYS = {
     "NC": ("22", "23", "24"),
 }
 
-# 최신 Q&A의 설비 수를 Phase 1 capacity 분모로 사용한다. EQP_NM의 실제
-# identity 매핑과 별개인 planning capacity 계약이며, 실제 매핑 수령 후 대조한다.
+# 확정 PLS/PLP identity 수를 Phase 1 capacity 분모로 사용한다.
 GROUP_BAY_CAPACITY_WEIGHTS = {
-    "NP": {"22": 4.0, "23": 4.0, "24": 3.0},
-    "NC": {"22": 4.0, "23": 4.0, "24": 3.0},
-    "FN_FL": {"25": 2.0, "trans": 2.0},
+    "NP": {
+        bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
+        for bay_id in ("22", "23", "24")
+    },
+    "NC": {
+        bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
+        for bay_id in ("22", "23", "24")
+    },
+    "FN_FL": {
+        bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
+        for bay_id in ("25", "trans")
+    },
 }
+
+PHASE1_BALANCING_GROUP_ORDER = ("NP", "FN_FL", "NC")
+JOINT_PHASE1_BAY_CAPACITY_WEIGHTS = {
+    bay_id: float(len(machine_ids))
+    for bay_id, machine_ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.items()
+}
+MULTI_SERIES_LOAD_METRICS = (
+    "wo_count",
+    "cut_length_sum",
+    "bevel_quantity_sum",
+)
 
 
 @dataclass(frozen=True)
@@ -61,6 +82,128 @@ def bay_capacity_weights_for_group(group: object) -> dict[str, float]:
         )
         raise RuntimeError(f"unknown Phase 1 balancing group: {group}")
     return dict(GROUP_BAY_CAPACITY_WEIGHTS[normalized])
+
+
+def joint_phase1_bay_capacity_weights() -> dict[str, float]:
+    """다계열 joint episode의 다섯 Bay와 설비 수 계약을 반환한다."""
+
+    return dict(JOINT_PHASE1_BAY_CAPACITY_WEIGHTS)
+
+
+def multi_series_group_load_field(group: object, metric: object) -> str:
+    """Bay load row에 저장할 그룹별 부하 field 이름을 엄격히 만든다."""
+
+    normalized_group = str(group).strip().upper()
+    normalized_metric = str(metric).strip()
+    if normalized_group not in GROUP_BAY_CAPACITY_WEIGHTS:
+        print(
+            "[ERROR][multi_series_rules.multi_series_group_load_field] "
+            f"cause=unknown_balancing_group group={group}"
+        )
+        raise RuntimeError(f"unknown Phase 1 balancing group: {group}")
+    if normalized_metric not in MULTI_SERIES_LOAD_METRICS:
+        print(
+            "[ERROR][multi_series_rules.multi_series_group_load_field] "
+            f"cause=unknown_load_metric metric={metric}"
+        )
+        raise RuntimeError(f"unknown Phase 1 multi-series load metric: {metric}")
+    return f"group_{normalized_group.lower()}_{normalized_metric}"
+
+
+def initialize_multi_series_group_loads(
+    bay_loads: dict[str, dict[str, int | float]],
+) -> None:
+    """다섯 Bay row에 모든 평준화 그룹의 누적 부하 field를 0으로 추가한다."""
+
+    expected_bays = set(JOINT_PHASE1_BAY_CAPACITY_WEIGHTS)
+    if set(bay_loads) != expected_bays:
+        print(
+            "[ERROR][multi_series_rules.initialize_multi_series_group_loads] "
+            f"cause=joint_bay_scope_mismatch expected={sorted(expected_bays)} "
+            f"actual={sorted(bay_loads)}"
+        )
+        raise RuntimeError("multi-series Phase 1 group loads require the five-Bay joint scope")
+    for bay_id, row in bay_loads.items():
+        expected_weight = JOINT_PHASE1_BAY_CAPACITY_WEIGHTS[bay_id]
+        try:
+            actual_weight = float(row["capacity_weight"])
+        except (KeyError, TypeError, ValueError) as exc:
+            print(
+                "[ERROR][multi_series_rules.initialize_multi_series_group_loads] "
+                f"cause=invalid_capacity_weight bay_id={bay_id} row={row}"
+            )
+            raise RuntimeError(f"invalid Phase 1 capacity weight: {bay_id}") from exc
+        if not math.isclose(actual_weight, expected_weight, rel_tol=0.0, abs_tol=1e-9):
+            print(
+                "[ERROR][multi_series_rules.initialize_multi_series_group_loads] "
+                f"cause=capacity_weight_mismatch bay_id={bay_id} "
+                f"expected={expected_weight} actual={actual_weight}"
+            )
+            raise RuntimeError(f"Phase 1 capacity weight mismatch: {bay_id}")
+        for group in PHASE1_BALANCING_GROUP_ORDER:
+            row[multi_series_group_load_field(group, "wo_count")] = 0
+            row[multi_series_group_load_field(group, "cut_length_sum")] = 0.0
+            row[multi_series_group_load_field(group, "bevel_quantity_sum")] = 0
+
+
+def add_multi_series_group_load(
+    row: dict[str, int | float],
+    *,
+    group: object,
+    wo_count: int,
+    cut_length_sum: float,
+    bevel_quantity_sum: int,
+) -> None:
+    """한 block의 부하를 해당 평준화 그룹 field에만 누적한다."""
+
+    normalized_group = str(group).strip().upper()
+    values = {
+        "wo_count": wo_count,
+        "cut_length_sum": cut_length_sum,
+        "bevel_quantity_sum": bevel_quantity_sum,
+    }
+    for metric, value in values.items():
+        field = multi_series_group_load_field(normalized_group, metric)
+        if field not in row:
+            print(
+                "[ERROR][multi_series_rules.add_multi_series_group_load] "
+                f"cause=uninitialized_group_load group={normalized_group} metric={metric}"
+            )
+            raise RuntimeError(
+                f"multi-series group load is not initialized: {normalized_group}/{metric}"
+            )
+        row[field] += value
+
+
+def multi_series_group_load_value(
+    row: Mapping[str, int | float],
+    group: object,
+    metric: object,
+) -> float:
+    """초기화된 그룹별 Bay 부하를 숫자로 읽고 누락 시 실패한다."""
+
+    field = multi_series_group_load_field(group, metric)
+    if field not in row:
+        print(
+            "[ERROR][multi_series_rules.multi_series_group_load_value] "
+            f"cause=missing_group_load field={field}"
+        )
+        raise RuntimeError(f"missing multi-series group load: {field}")
+    try:
+        value = float(row[field])
+    except (TypeError, ValueError) as exc:
+        print(
+            "[ERROR][multi_series_rules.multi_series_group_load_value] "
+            f"cause=non_numeric_group_load field={field} value={row[field]}"
+        )
+        raise RuntimeError(f"non-numeric multi-series group load: {field}") from exc
+    if not math.isfinite(value) or value < 0:
+        print(
+            "[ERROR][multi_series_rules.multi_series_group_load_value] "
+            f"cause=invalid_group_load field={field} value={value}"
+        )
+        raise RuntimeError(f"invalid multi-series group load: {field}")
+    return value
 
 
 def apply_phase1_series_bay_mask(

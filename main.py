@@ -27,6 +27,7 @@ import csv
 import json
 # LINE-BY-LINE: `collections` 모듈에서 `Counter, defaultdict`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from collections import Counter, defaultdict
+from dataclasses import asdict
 # LINE-BY-LINE: `pathlib` 모듈에서 `Path`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -47,17 +48,15 @@ from Phase2.merged import (
     PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK,
     PHASE2_BATCH_MACHINE_NORMALIZED_SCORE_FIELD_NAMES,
     PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES,
+    build_mixed_phase2_training_machines,
     train_phase2_batch_machine_self_labeling,
 )
 from Phase2.run_spec import build_phase2_run_spec, require_matching_phase2_run_spec
-from Phase1.imitation import train_phase1_pointer_imitation
 from Phase1.pair_self_labeling import run_phase1_pair_policy_rollout, train_phase1_pair_self_labeling
-from Phase1.self_labeling import (
-    PHASE1_SELF_LABEL_HEURISTIC_BANK,
-    PPB_LCP6_HEURISTIC_BANK,
-    _score_bay_loads,
+from Phase1.heuristics import (
+    PHASE1_HEURISTIC_BANK,
+    score_phase1_bay_loads,
     run_phase1_heuristic_candidate,
-    train_phase1_pointer_self_labeling,
 )
 # LINE-BY-LINE: `Utils.config` 모듈에서 `load_config`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.config import load_config
@@ -67,7 +66,10 @@ from Utils.data.cutting_start_date import (
     audit_cutting_start_dates,
     write_cutting_start_date_audit,
 )
-from Utils.data.multi_series_cutting_data import load_multi_series_cutting_data
+from Utils.data.multi_series_cutting_data import (
+    MIXED_PLANNING_MACHINE_IDS_BY_BAY,
+    load_multi_series_cutting_data,
+)
 # LINE-BY-LINE: `Utils.data.cutting_scenario_builder` 모듈에서 `build_scenario_from_cutting_records`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
 # LINE-BY-LINE: `Utils.data.factory_builder` 모듈에서 `build_factory_scenario_parts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
@@ -81,41 +83,38 @@ from Utils.learning.phase_agent_checkpoints import (
     load_phase2_checkpoint_run_spec,
     load_phase2_set_pointer_checkpoint,
 )
-from Utils.phase1.phase1_block_data_generator import (
-    load_phase1_actual_blocks,
-    write_phase1_block_generation_package,
-)
-from Utils.phase1.phase1_episode_dataset import (
-    build_phase1_actual_workday_jobs,
-    build_phase1_candidate_workbook_jobs,
-    build_phase1_episode_jobs,
-    jobs_from_phase1_episode_blocks,
-    write_phase1_episode_dataset,
-)
+from Utils.phase1.phase1_episode_dataset import build_phase1_episode_jobs
 from Utils.phase1.phase1_bay_balancer import (
-    CANONICAL_PHASE1_HEURISTIC,
-    LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-    MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-    PRIORITY_GREEDY_PHASE1_HEURISTIC,
-    PRIORITY_SWEEP_PHASE1_HEURISTIC,
     apply_phase1_plan_to_scenario,
-    build_phase1_bay_plan,
     write_phase1_bay_plan,
 )
 from Utils.phase1.multi_series_planner import (
     build_multi_series_phase1_daily_plans,
     write_multi_series_phase1_daily_plans,
 )
+from Utils.phase1.multi_series_rules import (
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    joint_phase1_bay_capacity_weights,
+)
 from Utils.learning.phase1_phase2_communication import (
     apply_phase1_messages_to_scenario,
     load_communication_jsonl,
     write_phase1_phase2_communication_package,
 )
-from Utils.data.phase2_candidate_workbook import load_phase2_candidate_workbook_problems
-from Utils.phase1.phase1_mdp import write_phase1_mdp_trace_package
 from Utils.data.report_formula_data_generator import (
-    build_report_formula_episode_jobs,
+    BTH_FORMULA_FEATURES,
+    DEFAULT_MULTI_SERIES_WO_SOURCE,
+    TACT_A_CUT,
+    TACT_A_MARK,
+    TACT_A_PTLST,
+    TACT_A_THK,
+    load_bth_formula_profile,
     scenario_jobs_from_report_formula_jobs,
+)
+from Utils.data.multi_series_formula_data_generator import (
+    generate_multi_series_formula_data,
+    load_physical_block_joint_profile,
 )
 # LINE-BY-LINE: `Utils.reporting.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.reporting.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
@@ -407,62 +406,6 @@ def _phase1_bay_capacity_weights_from_env(env: CuttingShopEnvironment, bay_ids: 
     return weights
 
 
-def command_phase1(args: argparse.Namespace) -> None:
-    """Run Phase 1 only: block-level cutting Bay assignment."""
-
-    print("[phase1]")
-    print(f"- config: {args.config}")
-    print(f"- mode: {args.mode}")
-    print(f"- algorithm: {args.algorithm}")
-    print(f"- requested_bay_ids: {args.bay_ids}")
-    if args.mode != "heuristic":
-        print(
-            "[ERROR][main.command_phase1] "
-            f"cause=phase1_mode_not_implemented mode={args.mode} "
-            "implemented_modes=['heuristic']"
-        )
-        raise RuntimeError(f"Phase 1 mode is not implemented yet: {args.mode}")
-
-    env = build_environment(args.config)
-    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
-    bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, bay_ids)
-    output_dir = args.output_dir
-    if output_dir is None:
-        output_dir = str(Path("output") / f"phase1_{Path(args.config).stem}_{args.algorithm}")
-
-    plan = build_phase1_bay_plan(
-        jobs=env.jobs,
-        bay_ids=bay_ids,
-        algorithm=args.algorithm,
-        bay_capacity_weights=bay_capacity_weights,
-    )
-    paths = write_phase1_bay_plan(plan, output_dir)
-    summary = plan["summary"]
-
-    print(f"- resolved_bay_ids: {bay_ids}")
-    print(f"- bay_capacity_weights: {bay_capacity_weights}")
-    print(f"- output_dir: {output_dir}")
-    print(f"- job_count: {summary['job_count']}")
-    print(f"- block_count: {summary['block_count']}")
-    print(f"- assigned_block_count: {summary['assigned_block_count']}")
-    print(f"- steel_quantity_total: {summary['steel_quantity_total']}")
-    print(f"- steel_quantity_gap: {summary['steel_quantity_gap']}")
-    if "cut_length_gap" in summary:
-        print(f"- cut_length_total: {summary['cut_length_total']}")
-        print(f"- cut_length_gap: {summary['cut_length_gap']}")
-    if "bevel_quantity_gap" in summary:
-        print(f"- bevel_quantity_total: {summary['bevel_quantity_total']}")
-        print(f"- bevel_quantity_gap: {summary['bevel_quantity_gap']}")
-    if "long_cut_bay24_count" in summary:
-        print(f"- long_cut_bay24_count: {summary['long_cut_bay24_count']}")
-    print(f"- wo_count_total: {summary['wo_count_total']}")
-    print(f"- wo_count_gap: {summary['wo_count_gap']}")
-    print(f"- block_count_gap: {summary['block_count_gap']}")
-    print(f"- plan_json: {paths['json']}")
-    print(f"- assignments_csv: {paths['assignments_csv']}")
-    print(f"- bay_loads_csv: {paths['bay_loads_csv']}")
-
-
 def command_phase1_plan_multi_series(args: argparse.Namespace) -> None:
     """신규 다계열 Excel을 검증하고 날짜 audit와 Phase 1 계획을 저장한다."""
 
@@ -489,422 +432,113 @@ def command_phase1_plan_multi_series(args: argparse.Namespace) -> None:
     print(f"- bay_loads_csv: {plan_paths['bay_loads_csv']}")
 
 
-def command_phase1_mdp_trace(args: argparse.Namespace) -> None:
-    """Build Phase 1 SELECT_BLOCK -> SELECT_BAY self-label trace."""
-
-    print("[phase1-mdp-trace-cli]")
-    print(f"- config: {args.config}")
-    print(f"- algorithm: {args.algorithm}")
-    print(f"- requested_bay_ids: {args.bay_ids}")
-    env = build_environment(args.config)
-    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
-    output_dir = args.output_dir
-    if output_dir is None:
-        output_dir = str(Path("output") / f"phase1_mdp_trace_{Path(args.config).stem}_{args.algorithm}")
-
-    paths = write_phase1_mdp_trace_package(
-        jobs=env.jobs,
-        bay_ids=bay_ids,
-        algorithm=args.algorithm,
-        output_dir=output_dir,
-    )
-
-    print(f"- resolved_bay_ids: {bay_ids}")
-    print(f"- output_dir: {output_dir}")
-    print(f"- trace_csv: {paths['trace_csv']}")
-    print(f"- action_table_jsonl: {paths['action_table_jsonl']}")
-    print(f"- manifest_json: {paths['manifest_json']}")
-    print(f"- plan_json: {paths['plan_json']}")
-
-
-def command_phase1_train_imitation(args: argparse.Namespace) -> None:
-    """Train Phase 1 pointer policy from a self-label action table."""
-
-    print("[phase1-train-imitation]")
-    print(f"- action_table: {args.action_table}")
-    print(f"- eval_action_table: {args.eval_action_table}")
-    print(f"- output_dir: {args.output_dir}")
-    print(f"- epochs: {args.epochs}")
-    print(f"- lr: {args.lr}")
-    print(f"- hidden_dim: {args.hidden_dim}")
-    summary = train_phase1_pointer_imitation(
-        action_table_path=args.action_table,
-        output_dir=args.output_dir,
-        eval_action_table_path=args.eval_action_table,
-        epochs=args.epochs,
-        lr=args.lr,
-        hidden_dim=args.hidden_dim,
-        seed=args.seed,
-    )
-    print(f"- checkpoint_path: {summary['checkpoint_path']}")
-    print(f"- metrics_csv: {summary['metrics_csv']}")
-    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
-    print(f"- best_assignment_csv: {summary['best_assignment_csv']}")
-    print(f"- best_machine_load_csv: {summary['best_machine_load_csv']}")
-    print(f"- summary_json: {summary['summary_json']}")
-    print(f"- final_loss: {summary['final_loss']}")
-    print(f"- final_accuracy: {summary['final_accuracy']}")
-    if "eval_accuracy" in summary:
-        print(f"- eval_loss: {summary['eval_loss']}")
-        print(f"- eval_accuracy: {summary['eval_accuracy']}")
-
-
-def command_phase1_train_self_labeling(args: argparse.Namespace) -> None:
-    """Train Phase 1 pointer policy with best-of-K self-labeling."""
-
-    print("[phase1-train-self-labeling-cli]")
-    print(f"- config: {args.config}")
-    print(f"- episode_mode: {args.episode_mode}")
-    print(f"- block_xlsx: {args.block_xlsx}")
-    print(f"- gyel: {args.gyel}")
-    print(f"- min_blocks: {args.min_blocks}")
-    print(f"- max_blocks: {args.max_blocks}")
-    print(f"- noise_ratio: {args.noise_ratio}")
-    print(f"- requested_bay_ids: {args.bay_ids}")
-    print(f"- output_dir: {args.output_dir}")
-    print(f"- episodes: {args.episodes}")
-    print(f"- rollout_samples: {args.rollout_samples}")
-    print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
-    print(f"- score_mode: {args.score_mode}")
-    env = build_environment(args.config)
-    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
-    heuristic_algorithms = [
-        item.strip()
-        for item in str(args.heuristic_algorithms).split(",")
-        if item.strip()
-    ]
-    if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
-        heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
-    if str(args.heuristic_algorithms).strip().lower() in {"business6", "all6", "ppb_lcp6"}:
-        heuristic_algorithms = list(PPB_LCP6_HEURISTIC_BANK)
-    fixed_jobs = None
-    episode_jobs = None
-    episode_metadata = None
-    if args.episode_mode == "fixed":
-        fixed_jobs = env.jobs
-    else:
-        actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
-        episode_specs = build_phase1_episode_jobs(
-            actual_blocks=actual_blocks,
-            episode_count=args.episodes,
-            min_blocks=args.min_blocks,
-            max_blocks=args.max_blocks,
-            seed=args.seed,
-            noise_ratio=args.noise_ratio,
-        )
-        episode_jobs = [spec["jobs"] for spec in episode_specs]
-        episode_metadata = [
-            {
-                "episode_id": spec["episode_id"],
-                "problem_id": spec["problem_id"],
-                "block_count": spec["block_count"],
-                "seed": spec["seed"],
-            }
-            for spec in episode_specs
-        ]
-    summary = train_phase1_pointer_self_labeling(
-        jobs=fixed_jobs,
-        episode_jobs=episode_jobs,
-        episode_metadata=episode_metadata,
-        bay_ids=bay_ids,
-        output_dir=args.output_dir,
-        episodes=args.episodes,
-        rollout_samples=args.rollout_samples,
-        heuristic_algorithms=heuristic_algorithms,
-        score_mode=args.score_mode,
-        lr=args.lr,
-        hidden_dim=args.hidden_dim,
-        temperature=args.temperature,
-        seed=args.seed,
-    )
-    print(f"- resolved_bay_ids: {bay_ids}")
-    print(f"- checkpoint_path: {summary['checkpoint_path']}")
-    print(f"- metrics_csv: {summary['metrics_csv']}")
-    print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
-    print(f"- best_action_table_jsonl: {summary['best_action_table_jsonl']}")
-    print(f"- learning_data_manifest_json: {summary['learning_data_manifest_json']}")
-    print(f"- loss_curve_png: {summary['loss_curve_png']}")
-    print(f"- best_source_counts_png: {summary['best_source_counts_png']}")
-    print(f"- best_score0_curve_png: {summary['best_score0_curve_png']}")
-    print(f"- summary_json: {summary['summary_json']}")
-    print(f"- best_source_counts: {summary['best_source_counts']}")
-
-
 def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
-    """Train Phase 1 direct pair-action policy with best-of-K self-labeling."""
+    """MIXED 물리 블록 episode로 Phase 1 pair-policy를 학습한다."""
 
-    print("[phase1-train-pair-self-labeling-cli]")
-    print(f"- config: {args.config}")
-    print(f"- block_xlsx: {args.block_xlsx}")
-    print(f"- gyel: {args.gyel}")
-    print(f"- min_blocks: {args.min_blocks}")
-    print(f"- max_blocks: {args.max_blocks}")
-    print(f"- noise_ratio: {args.noise_ratio}")
-    print(f"- hard_case_ratio: {args.hard_case_ratio}")
-    print(f"- hard_case_mode: {args.hard_case_mode}")
-    print(f"- hard_case_target_corr: {args.hard_case_target_corr}")
-    print(f"- hard_case_max_attempts: {args.hard_case_max_attempts}")
-    print(f"- requested_bay_ids: {args.bay_ids}")
-    print(f"- output_dir: {args.output_dir}")
-    print(f"- episodes: {args.episodes}")
-    print(f"- rollout_samples: {args.rollout_samples}")
+    capacity_weights = joint_phase1_bay_capacity_weights()
+    bay_ids = tuple(capacity_weights)
     validation_rollout_samples = (
         args.rollout_samples
         if args.validation_rollout_samples is None
         else args.validation_rollout_samples
     )
-    print(f"- rollout_samples_validation: {validation_rollout_samples}")
-    validation_hard_case_ratio = (
-        args.hard_case_ratio
-        if args.validation_hard_case_ratio is None
-        else args.validation_hard_case_ratio
-    )
-    print(f"- validation_hard_case_ratio: {validation_hard_case_ratio}")
-    print(f"- heuristic_algorithms: {args.heuristic_algorithms}")
-    print(f"- score_mode: {args.score_mode}")
-    print(f"- actual_validation_candidate_xlsx: {args.actual_validation_candidate_xlsx}")
-    print(f"- actual_validation_workdays: {args.actual_validation_workdays}")
-    print(f"- resume_checkpoint: {args.resume_checkpoint}")
-    print(f"- device: {args.device}")
-    print(f"- enable_phase2_feedback_score: {args.enable_phase2_feedback_score}")
-    print(f"- phase2_feedback_checkpoint: {args.phase2_feedback_checkpoint}")
-    env = build_environment(args.config)
-    config = load_config(args.config)
-    bay_ids = _phase1_bay_ids_from_env(env, args.bay_ids)
-    bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, bay_ids)
-    phase2_feedback_checkpoint = _optional_non_empty_cli_value(
+    heuristic_alias = str(args.heuristic_algorithms).strip().lower()
+    if heuristic_alias in {"all", "mixed3"}:
+        heuristic_algorithms = list(PHASE1_HEURISTIC_BANK)
+    else:
+        heuristic_algorithms = [
+            item.strip()
+            for item in str(args.heuristic_algorithms).split(",")
+            if item.strip()
+        ]
+    unknown_heuristics = sorted(set(heuristic_algorithms) - set(PHASE1_HEURISTIC_BANK))
+    if not heuristic_algorithms or unknown_heuristics:
+        print(
+            "[ERROR][main.command_phase1_train_pair_self_labeling] "
+            f"cause=invalid_mixed_heuristics requested={heuristic_algorithms} "
+            f"allowed={list(PHASE1_HEURISTIC_BANK)}"
+        )
+        raise RuntimeError("Phase 1 MIXED training received unsupported heuristics")
+    feedback_requested = bool(args.enable_phase2_feedback_score)
+    feedback_checkpoint = _optional_non_empty_cli_value(
         args.phase2_feedback_checkpoint,
         "phase2_feedback_checkpoint",
     )
-    if args.enable_phase2_feedback_score != (phase2_feedback_checkpoint is not None):
+    if feedback_requested != (feedback_checkpoint is not None):
         print(
             "[ERROR][main.command_phase1_train_pair_self_labeling] "
-            f"cause=feedback_flag_checkpoint_mismatch enabled={args.enable_phase2_feedback_score} "
-            f"checkpoint={phase2_feedback_checkpoint or ''}"
+            f"cause=phase2_feedback_option_mismatch enabled={feedback_requested} "
+            f"checkpoint={feedback_checkpoint}"
         )
         raise RuntimeError(
-            "--enable-phase2-feedback-score and --phase2-feedback-checkpoint must be used together"
+            "Phase 2 feedback requires both --enable-phase2-feedback-score and "
+            "--phase2-feedback-checkpoint"
         )
-    heuristic_algorithms = [
-        item.strip()
-        for item in str(args.heuristic_algorithms).split(",")
-        if item.strip()
-    ]
-    if str(args.heuristic_algorithms).strip().lower() in {"all", "all8"}:
-        heuristic_algorithms = list(PHASE1_SELF_LABEL_HEURISTIC_BANK)
-    if str(args.heuristic_algorithms).strip().lower() in {"business6", "all6", "ppb_lcp6"}:
-        heuristic_algorithms = list(PPB_LCP6_HEURISTIC_BANK)
-    actual_blocks = (
-        None
-        if args.enable_phase2_feedback_score
-        else load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
-    )
-
-    def episode_factory(episode: int):
-        episode_id = f"EP{episode:05d}"
-        if args.enable_phase2_feedback_score:
-            spec = build_report_formula_episode_jobs(
-                episode_count=1,
-                min_blocks=args.min_blocks,
-                max_blocks=args.max_blocks,
-                seed=args.seed + episode * 1_000_003,
-                gyel=args.gyel,
-            )[0]
-            return {
-                "jobs": spec["jobs"],
-                "metadata": {
-                    "episode_id": episode_id,
-                    "problem_id": episode_id,
-                    "block_count": spec["block_count"],
-                    "job_count": spec["job_count"],
-                    "seed": spec["seed"],
-                    "case_type": "report_formula_wo",
-                    "hard_case_mode": "none",
-                    "hard_case_ratio": 0.0,
-                },
-            }
-        if actual_blocks is None:
-            print("[ERROR][main.episode_factory] cause=missing_phase1_actual_blocks")
-            raise RuntimeError("Phase 1 block bootstrap source is missing")
-        specs = build_phase1_episode_jobs(
-            actual_blocks=actual_blocks,
-            episode_count=1,
-            min_blocks=args.min_blocks,
-            max_blocks=args.max_blocks,
-            seed=args.seed + episode - 1,
-            noise_ratio=args.noise_ratio,
-            hard_case_ratio=args.hard_case_ratio,
-            hard_case_mode=args.hard_case_mode,
-            hard_case_target_corr=args.hard_case_target_corr,
-            hard_case_max_attempts=args.hard_case_max_attempts,
-            verbose=False,
-        )
-        spec = specs[0]
-        return {
-            "jobs": jobs_from_phase1_episode_blocks(spec["blocks"], episode_id),
-            "metadata": {
-                "episode_id": episode_id,
-                "problem_id": episode_id,
-                "block_count": spec["block_count"],
-                "seed": spec["seed"],
-                "case_type": spec.get("case_type", "normal"),
-                "hard_case_mode": spec.get("hard_case_mode", "none"),
-                "hard_case_ratio": spec.get("hard_case_ratio", args.hard_case_ratio),
-                "hard_case_corr_steel_cut_before": spec.get("hard_case_corr_steel_cut_before"),
-                "hard_case_corr_steel_cut_after": spec.get("hard_case_corr_steel_cut_after"),
-            },
-        }
-
-    def synthetic_validation_episode_factory(validation_episode: int):
-        episode_id = f"VAL{validation_episode:05d}"
-        if args.enable_phase2_feedback_score:
-            spec = build_report_formula_episode_jobs(
-                episode_count=1,
-                min_blocks=args.min_blocks,
-                max_blocks=args.max_blocks,
-                seed=args.seed + 10_000_000 + validation_episode * 1_000_003,
-                gyel=args.gyel,
-            )[0]
-            return {
-                "jobs": spec["jobs"],
-                "metadata": {
-                    "episode_id": episode_id,
-                    "problem_id": episode_id,
-                    "block_count": spec["block_count"],
-                    "job_count": spec["job_count"],
-                    "seed": spec["seed"],
-                    "case_type": "report_formula_wo",
-                    "hard_case_mode": "none",
-                    "hard_case_ratio": 0.0,
-                    "validation_source": "synthetic",
-                    "evaluation_input_type": "report_formula_wo",
-                },
-            }
-        if actual_blocks is None:
-            print("[ERROR][main.synthetic_validation_episode_factory] cause=missing_phase1_actual_blocks")
-            raise RuntimeError("Phase 1 validation block bootstrap source is missing")
-        specs = build_phase1_episode_jobs(
-            actual_blocks=actual_blocks,
-            episode_count=1,
-            min_blocks=args.min_blocks,
-            max_blocks=args.max_blocks,
-            seed=args.seed + 10_000_000 + validation_episode - 1,
-            noise_ratio=args.noise_ratio,
-            hard_case_ratio=validation_hard_case_ratio,
-            hard_case_mode=args.hard_case_mode,
-            hard_case_target_corr=args.hard_case_target_corr,
-            hard_case_max_attempts=args.hard_case_max_attempts,
-            verbose=False,
-        )
-        spec = specs[0]
-        return {
-            "jobs": jobs_from_phase1_episode_blocks(spec["blocks"], episode_id),
-            "metadata": {
-                "episode_id": episode_id,
-                "problem_id": episode_id,
-                "block_count": spec["block_count"],
-                "seed": spec["seed"],
-                "case_type": spec.get("case_type", "normal"),
-                "hard_case_mode": spec.get("hard_case_mode", "none"),
-                "hard_case_ratio": spec.get("hard_case_ratio", validation_hard_case_ratio),
-                "hard_case_corr_steel_cut_before": spec.get("hard_case_corr_steel_cut_before"),
-                "hard_case_corr_steel_cut_after": spec.get("hard_case_corr_steel_cut_after"),
-                "validation_source": "synthetic",
-                "evaluation_input_type": "synthetic_generated",
-            },
-        }
-
-    actual_validation_workdays = [
-        item.strip()
-        for item in str(args.actual_validation_workdays).split(",")
-        if item.strip()
-    ]
-    actual_validation_payloads = []
-    if actual_validation_workdays:
-        if args.enable_phase2_feedback_score:
-            source_data_path = config.get("paths", {}).get("source_data_path")
-            if not source_data_path:
-                print(
-                    "[ERROR][main.command_phase1_train_pair_self_labeling] "
-                    "cause=missing_source_data_path_for_actual_feedback_validation"
-                )
-                raise RuntimeError("Phase 2 feedback actual validation requires paths.source_data_path")
-            phase2_actual_payloads = load_phase2_candidate_workbook_problems(
-                wo_path=source_data_path,
-                candidate_path=args.actual_validation_candidate_xlsx,
-                workdays=actual_validation_workdays,
-                bay_ids=bay_ids,
-                gyel=args.gyel,
-                factory_config=config.get("factory"),
-            )
-            actual_validation_payloads = [
-                {
-                    "jobs": _scenario_jobs_by_id(payload["scenario"]),
-                    "metadata": {
-                        **dict(payload.get("phase1_metadata", {})),
-                        "problem_id": payload["problem_id"],
-                        "episode_id": payload["problem_id"],
-                        "block_count": payload["candidate_block_count"],
-                        "job_count": payload["wo_count"],
-                        "validation_source": "actual_8days",
-                        "evaluation_input_type": "candidate_workbook_wo_expanded",
-                    },
-                }
-                for payload in phase2_actual_payloads
-            ]
-        else:
-            actual_validation_payloads = build_phase1_candidate_workbook_jobs(
-                candidate_path=args.actual_validation_candidate_xlsx,
-                workdays=actual_validation_workdays,
-                bay_ids=bay_ids,
-            )
-    total_validation_episodes = args.validation_episodes + len(actual_validation_payloads)
-
-    def validation_episode_factory(validation_episode: int):
-        if validation_episode <= args.validation_episodes:
-            return synthetic_validation_episode_factory(validation_episode)
-        actual_index = validation_episode - args.validation_episodes - 1
-        payload = actual_validation_payloads[actual_index]
-        return {"jobs": payload["jobs"], "metadata": payload["metadata"]}
 
     phase2_feedback_scorer = None
     phase2_feedback_contract = None
-    if args.enable_phase2_feedback_score:
-        enabled_machines = {
-            machine_id: machine
-            for machine_id, machine in env.machines.items()
-            if machine.enabled and str(machine.bay_id) in set(bay_ids)
-        }
-        if not enabled_machines:
-            print("[ERROR][main.command_phase1_train_pair_self_labeling] cause=no_enabled_machines_for_phase2_feedback")
-            raise RuntimeError("Phase 2 feedback scoring requires at least one enabled machine")
-        phase2_constraint_profile = load_phase_constraint_profile(config, "phase2")
-        phase2_feedback_model = load_phase2_set_pointer_checkpoint(
-            phase2_feedback_checkpoint,
-            context="phase1_feedback",
+    if feedback_requested:
+        phase2_context = "phase1_frozen_phase2_feedback"
+        phase2_constraint_profile = load_phase_constraint_profile(load_config(args.config), "phase2")
+        phase2_model = load_phase2_set_pointer_checkpoint(
+            checkpoint_path=feedback_checkpoint,
+            context=phase2_context,
         )
-        phase2_feedback_run_spec = load_phase2_checkpoint_run_spec(
-            phase2_feedback_checkpoint,
-            context="phase1_feedback",
+        phase2_run_spec = load_phase2_checkpoint_run_spec(
+            feedback_checkpoint,
+            context=phase2_context,
         )
-        if not bool(phase2_feedback_run_spec["phase1_long_cut_hard_mask"]):
-            print(
-                "[ERROR][main.command_phase1_train_pair_self_labeling] "
-                "cause=phase1_long_cut_mask_mismatch training=True checkpoint=False"
-            )
-            raise RuntimeError(
-                "Phase 1 feedback training uses the long-cut hard mask, but the Phase 2 RunSpec does not"
-            )
         phase2_feedback_scorer = build_frozen_phase2_schedule_feedback_scorer(
-            model=phase2_feedback_model,
-            machines=enabled_machines,
-            run_spec=phase2_feedback_run_spec,
+            model=phase2_model,
+            machines=build_mixed_phase2_training_machines(),
+            run_spec=phase2_run_spec,
             constraint_profile=phase2_constraint_profile,
         )
         phase2_feedback_contract = build_phase2_feedback_contract(
-            phase2_feedback_checkpoint,
-            phase2_feedback_run_spec,
+            feedback_checkpoint,
+            phase2_run_spec,
         )
+
+    print("[phase1-train-pair-self-labeling-cli]")
+    print(f"- config: {args.config}")
+    print("- synthetic_source: mixed_physical_block_joint_distribution")
+    print("- rule_profile: multi_series_260711")
+    print("- score_mode: wo_first")
+    print(f"- episode_scope: {PHASE1_MULTI_SERIES_SCOPE_VERSION}")
+    print(f"- bay_ids: {','.join(bay_ids)}")
+    print(f"- bay_capacity_weights: {capacity_weights}")
+    print(f"- min_physical_blocks: {args.min_blocks}")
+    print(f"- max_physical_blocks: {args.max_blocks}")
+    print(f"- episodes: {args.episodes}")
+    print(f"- rollout_samples: {args.rollout_samples}")
+    print(f"- rollout_samples_validation: {validation_rollout_samples}")
+    print(f"- heuristic_algorithms: {','.join(heuristic_algorithms)}")
+    print(f"- resume_checkpoint: {args.resume_checkpoint}")
+    print(f"- phase2_feedback_enabled: {phase2_feedback_scorer is not None}")
+    print(f"- phase2_feedback_checkpoint: {feedback_checkpoint or ''}")
+    print(f"- device: {args.device}")
+    print(f"- output_dir: {args.output_dir}")
+
+    def episode_payload(episode: int, *, validation: bool) -> dict:
+        seed_offset = 10_000_000 if validation else 0
+        payload = build_phase1_episode_jobs(
+            episode_count=1,
+            min_blocks=args.min_blocks,
+            max_blocks=args.max_blocks,
+            seed=args.seed + seed_offset + episode * 1_000_003,
+            verbose=False,
+        )[0]
+        episode_id = f"VAL{episode:05d}" if validation else f"EP{episode:05d}"
+        metadata = dict(payload["metadata"])
+        metadata.update(
+            {
+                "episode_id": episode_id,
+                "problem_id": episode_id,
+                "validation_source": "synthetic" if validation else "training",
+                "evaluation_input_type": "mixed_physical_block_joint_distribution_wo",
+            }
+        )
+        return {"jobs": payload["jobs"], "metadata": metadata}
 
     summary = train_phase1_pair_self_labeling(
         episode_jobs=None,
@@ -914,90 +548,49 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         episodes=args.episodes,
         rollout_samples=args.rollout_samples,
         heuristic_algorithms=heuristic_algorithms,
-        score_mode=args.score_mode,
         lr=args.lr,
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
         seed=args.seed,
-        episode_factory=episode_factory,
+        episode_factory=lambda episode: episode_payload(episode, validation=False),
         checkpoint_every=args.checkpoint_every,
         validation_every=args.validation_every,
-        validation_episodes=total_validation_episodes,
+        validation_episodes=args.validation_episodes,
         validation_episode_factory=(
-            validation_episode_factory if total_validation_episodes > 0 else None
+            (lambda episode: episode_payload(episode, validation=True))
+            if args.validation_episodes > 0
+            else None
         ),
         validation_rollout_samples=validation_rollout_samples,
         resume_checkpoint=args.resume_checkpoint,
         phase2_feedback_scorer=phase2_feedback_scorer,
         phase2_feedback_contract=phase2_feedback_contract,
-        bay_capacity_weights=bay_capacity_weights,
+        bay_capacity_weights=capacity_weights,
         device=args.device,
     )
-    print(f"- resolved_bay_ids: {bay_ids}")
-    print(f"- bay_capacity_weights: {bay_capacity_weights}")
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
     print(f"- metrics_csv: {summary['metrics_csv']}")
     print(f"- candidate_summary_csv: {summary['candidate_summary_csv']}")
     print(f"- best_action_table_jsonl: {summary['best_action_table_jsonl']}")
     print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
-    print(f"- validation_candidate_summary_csv: {summary.get('validation_candidate_summary_csv', '')}")
-    print(f"- validation_steel_gap_png: {summary.get('validation_steel_gap_png', '')}")
+    print(f"- validation_candidate_summary_csv: {summary['validation_candidate_summary_csv']}")
+    print(f"- validation_wo_gap_png: {summary.get('validation_wo_gap_png', '')}")
     print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
     print(f"- validation_bevel_gap_png: {summary.get('validation_bevel_gap_png', '')}")
-    print(f"- validation_best_source_counts_png: {summary.get('validation_best_source_counts_png', '')}")
-    print(f"- validation_agent_rank_png: {summary.get('validation_agent_rank_png', '')}")
-    print(f"- actual_validation_problem_count: {len(actual_validation_payloads)}")
     print(f"- summary_json: {summary['summary_json']}")
     print(f"- best_source_counts: {summary['best_source_counts']}")
 
 
-def command_phase1_build_episode_dataset(args: argparse.Namespace) -> None:
-    """Build variable-size Phase 1 train/test self-label episodes."""
-
-    print("[phase1-build-episode-dataset]")
-    print(f"- block_xlsx: {args.block_xlsx}")
-    print(f"- gyel: {args.gyel}")
-    print(f"- episode_count: {args.episode_count}")
-    print(f"- min_blocks: {args.min_blocks}")
-    print(f"- max_blocks: {args.max_blocks}")
-    print(f"- train_ratio: {args.train_ratio}")
-    print(f"- bay_ids: {args.bay_ids}")
-    print(f"- algorithm: {args.algorithm}")
-    print(f"- seed: {args.seed}")
-    print(f"- noise_ratio: {args.noise_ratio}")
-    print(f"- output_dir: {args.output_dir}")
-    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
-    bay_ids = [bay_id.strip() for bay_id in args.bay_ids.split(",") if bay_id.strip()]
-    paths = write_phase1_episode_dataset(
-        actual_blocks=actual_blocks,
-        output_dir=args.output_dir,
-        episode_count=args.episode_count,
-        min_blocks=args.min_blocks,
-        max_blocks=args.max_blocks,
-        train_ratio=args.train_ratio,
-        bay_ids=bay_ids,
-        algorithm=args.algorithm,
-        seed=args.seed,
-        noise_ratio=args.noise_ratio,
-    )
-    print(f"- train_action_table_jsonl: {paths['train_action_table_jsonl']}")
-    print(f"- test_action_table_jsonl: {paths['test_action_table_jsonl']}")
-    print(f"- manifest_json: {paths['manifest_json']}")
-    print(f"- episode_summary_csv: {paths['episode_summary_csv']}")
-
-
 def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -> None:
-    """Train merged Phase 2 policy that selects W/O batch and machine together."""
+    """MIXED 공동분포 episode로 merged Phase 2 policy를 학습한다."""
 
     print("[phase2-train-batch-machine-self-labeling-cli]")
     print(f"- config: {args.config}")
-    print(f"- scenario_path_override: {args.scenario_path}")
     print(f"- phase1_heuristic: {args.phase1_heuristic}")
     print(f"- phase1_checkpoint: {args.phase1_checkpoint}")
     print(f"- phase1_samples: {args.phase1_samples}")
     print(f"- phase1_temperature: {args.phase1_temperature}")
-    print(f"- phase1_bay_ids: {args.phase1_bay_ids}")
     print(f"- output_dir: {args.output_dir}")
     print(f"- episodes: {args.episodes}")
     print(f"- hidden_dim: {args.hidden_dim}")
@@ -1018,19 +611,14 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     print(f"- checkpoint_every: {args.checkpoint_every}")
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
     print(f"- action_pool_limit: {args.action_pool_limit}")
-    print(f"- synthetic_source: {args.synthetic_source}")
-    print(f"- synthetic_block_range: {args.min_blocks}..{args.max_blocks}")
+    print(f"- synthetic_source: mixed_physical_block_joint_distribution")
+    print(f"- synthetic_physical_block_range: {args.min_blocks}..{args.max_blocks}")
 
-    env = build_environment(args.config, scenario_path=args.scenario_path)
-    phase2_constraint_profile = load_phase_constraint_profile(load_config(args.config), "phase2")
-    enabled_machines = {
-        machine_id: machine
-        for machine_id, machine in env.machines.items()
-        if machine.enabled
-    }
-    if not enabled_machines:
-        print("[ERROR][main.command_phase2_train_batch_machine_self_labeling] cause=no_enabled_machines")
-        raise RuntimeError("Phase 2 training requires at least one enabled machine")
+    config = load_config(args.config)
+    phase2_constraint_profile = load_phase_constraint_profile(config, "phase2")
+    training_machines = build_mixed_phase2_training_machines()
+    phase1_bay_capacity_weights = joint_phase1_bay_capacity_weights()
+    phase1_bay_ids = tuple(phase1_bay_capacity_weights)
     requested_phase1_heuristic = _optional_non_empty_cli_value(args.phase1_heuristic, "phase1_heuristic")
     phase1_checkpoint = _optional_non_empty_cli_value(args.phase1_checkpoint, "phase1_checkpoint")
     if requested_phase1_heuristic is not None and phase1_checkpoint is not None:
@@ -1043,20 +631,19 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     phase1_heuristic = requested_phase1_heuristic if phase1_checkpoint is None else None
     if phase1_heuristic is None and phase1_checkpoint is None:
         phase1_heuristic = "bevel_first_balanced"
-    phase1_bay_ids = _resolve_phase1_training_bay_ids(args.phase1_bay_ids, enabled_machines)
-    training_machines = _filter_machines_by_bay_ids(enabled_machines, phase1_bay_ids)
-    phase1_bay_capacity_weights = _phase1_bay_capacity_weights_from_env(env, phase1_bay_ids)
+    if phase1_heuristic is not None and phase1_heuristic not in PHASE1_HEURISTIC_BANK:
+        print(
+            "[ERROR][main.command_phase2_train_batch_machine_self_labeling] "
+            f"cause=unsupported_mixed_phase1_heuristic value={phase1_heuristic}"
+        )
+        raise RuntimeError(f"unsupported MIXED Phase 1 heuristic: {phase1_heuristic}")
     phase1_assignment_builder = None
     if phase1_checkpoint is not None:
         phase1_assignment_builder = _phase1_agent_assignment_builder(
             checkpoint=phase1_checkpoint,
-            bay_ids=phase1_bay_ids,
             sample_count=args.phase1_samples,
             temperature=args.phase1_temperature,
             seed=args.seed,
-            score_mode=args.phase1_score_mode,
-            long_cut_hard_mask=not args.phase1_no_long_cut_hard_mask,
-            bay_capacity_weights=phase1_bay_capacity_weights,
         )
     print(f"- resolved_phase1_mode: {'checkpoint' if phase1_checkpoint is not None else 'heuristic'}")
     print(f"- resolved_phase1_heuristic: {phase1_heuristic or ''}")
@@ -1066,38 +653,25 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
         "- phase2_hard_constraints: "
         + ",".join(name for name, enabled in phase2_constraint_profile.hard_enabled.items() if enabled)
     )
-    training_jobs = env.jobs
-    episode_jobs = None
-    episode_job_factory = None
-    validation_episode_jobs = None
-    validation_episode_job_factory = None
-    if args.synthetic_source == "report_formula":
-        def episode_job_factory(episode: int):
-            spec = build_report_formula_episode_jobs(
-                episode_count=1,
-                min_blocks=args.min_blocks,
-                max_blocks=args.max_blocks,
-                seed=args.seed + episode * 1_000_003,
-                gyel=args.gyel,
-            )[0]
-            return spec["jobs"]
+    def mixed_jobs(seed_value: int) -> Mapping[str, object]:
+        payload = build_phase1_episode_jobs(
+            episode_count=1,
+            min_blocks=args.min_blocks,
+            max_blocks=args.max_blocks,
+            seed=seed_value,
+            verbose=False,
+        )[0]
+        return payload["jobs"]
 
-        if args.validation_episodes > 0:
-            def validation_episode_job_factory(validation_episode: int):
-                spec = build_report_formula_episode_jobs(
-                    episode_count=1,
-                    min_blocks=args.min_blocks,
-                    max_blocks=args.max_blocks,
-                    seed=args.seed + 10_000_000 + validation_episode * 1_000_003,
-                    gyel=args.gyel,
-                )[0]
-                return spec["jobs"]
-    elif args.synthetic_source != "config":
-        print(
-            "[ERROR][main.command_phase2_train_batch_machine_self_labeling] "
-            f"cause=unknown_synthetic_source value={args.synthetic_source}"
-        )
-        raise RuntimeError(f"unknown synthetic source: {args.synthetic_source}")
+    training_jobs = mixed_jobs(args.seed)
+
+    def episode_job_factory(episode: int) -> Mapping[str, object]:
+        return mixed_jobs(args.seed + episode * 1_000_003)
+
+    validation_episode_job_factory = None
+    if args.validation_episodes > 0:
+        def validation_episode_job_factory(validation_episode: int) -> Mapping[str, object]:
+            return mixed_jobs(args.seed + 10_000_000 + validation_episode * 1_000_003)
 
     summary = train_phase2_batch_machine_self_labeling(
         jobs=training_jobs,
@@ -1117,15 +691,14 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
         max_wo_count=args.max_wo_count,
         max_length_sum=args.max_length_sum,
         action_pool_limit=args.action_pool_limit,
-        episode_jobs=episode_jobs,
+        episode_jobs=None,
         episode_job_factory=episode_job_factory,
-        validation_episode_jobs=validation_episode_jobs,
+        validation_episode_jobs=None,
         validation_episode_job_factory=validation_episode_job_factory,
         phase1_heuristic=phase1_heuristic,
         phase1_bay_ids=phase1_bay_ids,
         phase1_assignment_builder=phase1_assignment_builder,
         phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-        phase1_long_cut_hard_mask=not args.phase1_no_long_cut_hard_mask,
         device=args.device,
         write_candidate_summary=args.write_candidate_summary,
         score_mode=args.phase2_score_mode,
@@ -1164,38 +737,25 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
 
 
 def command_phase2_run_full_workflow(args: argparse.Namespace) -> None:
-    """Run merged Phase 2 batch-machine workflow, then export CSVs."""
+    """MIXED 물리 블록 episode를 Phase 1과 merged Phase 2로 연속 실행한다."""
 
     print("[phase2-run-full-workflow-cli]")
     print(f"- config: {args.config}")
-    print(f"- scenario_path_override: {args.scenario_path}")
+    print("- synthetic_source: mixed_physical_block_joint_distribution")
+    print(f"- synthetic_physical_blocks: {args.synthetic_blocks}")
     print(f"- phase1_plan: {args.phase1_plan}")
     print(f"- phase1_checkpoint: {args.phase1_checkpoint}")
     print(f"- phase1_heuristic: {args.phase1_heuristic}")
-    print(f"- phase1_bay_ids: {args.phase1_bay_ids}")
     print(f"- phase1_samples: {args.phase1_samples}")
-    print(f"- assignment_mode: {args.assignment_mode}")
     print(f"- batch_machine_heuristic: {args.batch_machine_heuristic}")
     print(f"- batch_machine_checkpoint: {args.batch_machine_checkpoint}")
     print(f"- output_dir: {args.output_dir}")
-    print(f"- synthetic_source: {args.synthetic_source}")
-    print(f"- synthetic_blocks: {args.synthetic_blocks}")
 
     config = load_config(args.config)
-    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
-    if args.synthetic_source == "report_formula":
-        scenario = _replace_scenario_jobs_with_report_formula(
-            scenario=scenario,
-            block_count=args.synthetic_blocks,
-            seed=args.seed,
-            gyel=args.gyel,
-        )
-    elif args.synthetic_source != "config":
-        print(
-            "[ERROR][main.command_phase2_run_full_workflow] "
-            f"cause=unknown_synthetic_source value={args.synthetic_source}"
-        )
-        raise RuntimeError(f"unknown synthetic source: {args.synthetic_source}")
+    scenario = _build_mixed_full_flow_scenario(
+        physical_block_count=args.synthetic_blocks,
+        seed=args.seed,
+    )
     phase2_constraint_profile = load_phase_constraint_profile(config, "phase2")
     batch_machine_heuristic = _optional_non_empty_cli_value(
         args.batch_machine_heuristic,
@@ -1224,40 +784,13 @@ def command_phase2_run_full_workflow(args: argparse.Namespace) -> None:
         if checkpoint_path is not None
         else None
     )
-    requested_bay_ids = (
-        parse_csv_argument(args.phase1_bay_ids, default=())
-        if hasattr(args, "phase1_bay_ids")
-        else tuple(checkpoint_run_spec["phase1_bay_capacity_weights"])
-        if checkpoint_run_spec is not None
-        else ("22", "23", "24")
-    )
-    if not requested_bay_ids:
-        print("[ERROR][main.command_phase2_run_full_workflow] cause=no_phase1_bay_ids")
-        raise RuntimeError("full-flow requires Phase 1 Bay IDs")
-    if checkpoint_run_spec is not None and set(requested_bay_ids) != set(
-        checkpoint_run_spec["phase1_bay_capacity_weights"]
-    ):
-        print(
-            "[ERROR][main.command_phase2_run_full_workflow] "
-            f"cause=phase1_bay_id_mismatch checkpoint={sorted(checkpoint_run_spec['phase1_bay_capacity_weights'])} "
-            f"requested={sorted(requested_bay_ids)}"
-        )
-        raise RuntimeError("Phase 1 Bay IDs differ from the Phase 2 checkpoint RunSpec")
-    phase1_bay_capacity_weights = _phase1_bay_capacity_weights_from_scenario(
-        scenario,
-        requested_bay_ids,
-    )
-    phase1_long_cut_hard_mask = (
-        bool(checkpoint_run_spec["phase1_long_cut_hard_mask"])
-        if checkpoint_run_spec is not None and not args.phase1_no_long_cut_hard_mask
-        else not args.phase1_no_long_cut_hard_mask
-    )
+    phase1_bay_capacity_weights = joint_phase1_bay_capacity_weights()
+    requested_bay_ids = tuple(phase1_bay_capacity_weights)
     effective_run_spec = _resolve_phase2_full_flow_run_spec(
         args=args,
         checkpoint_spec=checkpoint_run_spec,
         constraint_profile=phase2_constraint_profile,
         phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-        phase1_long_cut_hard_mask=phase1_long_cut_hard_mask,
         heuristic=batch_machine_heuristic,
     )
     phase1_checkpoint_path = _optional_non_empty_cli_value(
@@ -1288,11 +821,9 @@ def command_phase2_run_full_workflow(args: argparse.Namespace) -> None:
         scenario,
         bay_ids=requested_bay_ids,
         bay_capacity_weights=phase1_bay_capacity_weights,
-        long_cut_hard_mask=phase1_long_cut_hard_mask,
     )
     print(f"- resolved_phase1_bay_ids: {requested_bay_ids}")
     print(f"- phase1_bay_capacity_weights: {phase1_bay_capacity_weights}")
-    print(f"- phase1_long_cut_hard_mask: {phase1_long_cut_hard_mask}")
     print(f"- phase2_score_mode: {effective_run_spec['score_mode']}")
     print(f"- action_pool_limit: {effective_run_spec['action_pool_limit']}")
     print(f"- max_wo_count: {effective_run_spec['max_wo_count']}")
@@ -1301,7 +832,7 @@ def command_phase2_run_full_workflow(args: argparse.Namespace) -> None:
     result = run_phase2_full_graph_workflow(
         scenario=scenario,
         phase1_plan=phase1_plan,
-        assignment_mode=args.assignment_mode,
+        assignment_mode="allowed_bay_ids",
         model=batch_machine_model,
         max_wo_count=int(effective_run_spec["max_wo_count"]),
         max_length_sum=float(effective_run_spec["max_length_sum"]),
@@ -1442,15 +973,11 @@ def _phase1_checkpoint_path(value: str) -> Path:
 
 def _phase1_agent_assignment_builder(
     checkpoint: str,
-    bay_ids: Sequence[str],
     sample_count: int,
     temperature: float,
     seed: int,
-    score_mode: str,
-    long_cut_hard_mask: bool,
-    bay_capacity_weights: Mapping[str, int | float],
 ) -> Callable[[Mapping[str, object], int], Mapping[str, str]]:
-    """Build frozen Phase 1 agent inference used as Phase 2 upstream input."""
+    """MIXED Phase 1 frozen agent를 Phase 2 upstream assignment로 연결한다."""
 
     if sample_count <= 0:
         print(f"[ERROR][main._phase1_agent_assignment_builder] cause=non_positive_sample_count value={sample_count}")
@@ -1460,7 +987,8 @@ def _phase1_agent_assignment_builder(
         raise RuntimeError("--phase1-temperature must be positive")
     checkpoint_path = _phase1_checkpoint_path(checkpoint)
     model = load_phase1_pair_pointer_checkpoint(checkpoint_path)
-    normalized_bay_ids = tuple(str(bay_id) for bay_id in bay_ids)
+    capacity_weights = joint_phase1_bay_capacity_weights()
+    bay_ids = tuple(capacity_weights)
 
     def build(jobs: Mapping[str, object], assignment_seed: int) -> Mapping[str, str]:
         candidates = []
@@ -1468,14 +996,13 @@ def _phase1_agent_assignment_builder(
             candidates.append(
                 run_phase1_pair_policy_rollout(
                     jobs=jobs,
-                    bay_ids=normalized_bay_ids,
+                    bay_ids=bay_ids,
                     model=model,
                     temperature=temperature,
                     seed=seed + assignment_seed,
                     source="phase1_agent_greedy",
                     selection="greedy",
-                    long_cut_hard_mask=long_cut_hard_mask,
-                    bay_capacity_weights=bay_capacity_weights,
+                    bay_capacity_weights=capacity_weights,
                 )
             )
         else:
@@ -1483,21 +1010,20 @@ def _phase1_agent_assignment_builder(
                 candidates.append(
                     run_phase1_pair_policy_rollout(
                         jobs=jobs,
-                        bay_ids=normalized_bay_ids,
+                        bay_ids=bay_ids,
                         model=model,
                         temperature=temperature,
                         seed=seed + assignment_seed * 10_000 + sample_index,
                         source=f"phase1_agent_sample_{sample_index}",
                         selection="sample",
-                        long_cut_hard_mask=long_cut_hard_mask,
-                        bay_capacity_weights=bay_capacity_weights,
+                        bay_capacity_weights=capacity_weights,
                     )
                 )
-        best = min(candidates, key=lambda candidate: _score_bay_loads(candidate.bay_loads, score_mode))
+        best = min(candidates, key=lambda candidate: score_phase1_bay_loads(candidate.bay_loads))
         print(
             "[CHECK][main._phase1_agent_assignment_builder] "
             f"assignment_seed={assignment_seed} source={best.source} samples={sample_count} "
-            f"score={_score_bay_loads(best.bay_loads, score_mode)}",
+            f"score={score_phase1_bay_loads(best.bay_loads)}",
             flush=True,
         )
         return dict(best.assignments)
@@ -1505,53 +1031,56 @@ def _phase1_agent_assignment_builder(
     return build
 
 
-def _replace_scenario_jobs_with_report_formula(
-    scenario: Mapping[str, Any],
-    block_count: int,
+def _build_mixed_full_flow_scenario(
+    physical_block_count: int,
     seed: int,
-    gyel: str,
-) -> dict:
-    """Return a scenario whose jobs come from the PDF fixed formulas.
+) -> dict[str, Any]:
+    """Phase 1/2가 같은 MIXED episode와 확정 PLS/PLP 설비를 사용하는 scenario를 만든다."""
 
-    Full-flow still needs the real/configured machine layout.  Therefore this
-    helper preserves every scenario field except `jobs`, which is replaced by
-    generated W/O rows that follow the report formulas exactly.
-    """
-
-    if block_count <= 0:
+    if physical_block_count <= 0:
         print(
-            "[ERROR][main._replace_scenario_jobs_with_report_formula] "
-            f"cause=invalid_block_count value={block_count}"
+            "[ERROR][main._build_mixed_full_flow_scenario] "
+            f"cause=invalid_physical_block_count value={physical_block_count}"
         )
         raise RuntimeError("--synthetic-blocks must be positive")
-    if "machines" not in scenario:
-        print("[ERROR][main._replace_scenario_jobs_with_report_formula] cause=missing_machines")
-        raise RuntimeError("base scenario must contain machines for PDF synthetic full-flow")
-    episode = build_report_formula_episode_jobs(
+    episode = build_phase1_episode_jobs(
         episode_count=1,
-        min_blocks=block_count,
-        max_blocks=block_count,
+        min_blocks=physical_block_count,
+        max_blocks=physical_block_count,
         seed=seed,
-        gyel=gyel,
+        verbose=False,
     )[0]
-    scenario_copy = dict(scenario)
-    scenario_copy["jobs"] = scenario_jobs_from_report_formula_jobs(episode["jobs"])
-    metadata = dict(scenario_copy.get("metadata") or {})
-    metadata.update(
-        {
-            "job_source": "report_formula",
-            "synthetic_block_count": block_count,
-            "synthetic_job_count": len(scenario_copy["jobs"]),
+    jobs = scenario_jobs_from_report_formula_jobs(episode["jobs"])
+    machines = [
+        asdict(machine)
+        for machine in build_mixed_phase2_training_machines().values()
+    ]
+    scenario = {
+        "metadata": {
+            "job_source": "mixed_physical_block_joint_distribution",
+            "physical_block_count": int(episode["physical_block_count"]),
+            "series_block_count": int(episode["block_count"]),
+            "synthetic_job_count": len(jobs),
             "synthetic_seed": seed,
-            "synthetic_gyel": gyel,
-        }
-    )
-    scenario_copy["metadata"] = metadata
+            "machine_source": "confirmed_eqp_pls_plp_mapping",
+            "actual_eqp_mapping_available": True,
+            "actual_only_eqp_ids": ["EQP_3"],
+        },
+        "jobs": jobs,
+        "machines": machines,
+    }
+    if len(machines) != sum(len(ids) for ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.values()):
+        print(
+            "[ERROR][main._build_mixed_full_flow_scenario] "
+            f"cause=machine_count_mismatch actual={len(machines)}"
+        )
+        raise RuntimeError("MIXED full-flow mapped machine count mismatch")
     print(
-        "[VALIDATION][main._replace_scenario_jobs_with_report_formula] "
-        f"passed=true blocks={block_count} jobs={len(scenario_copy['jobs'])} seed={seed}"
+        "[VALIDATION][main._build_mixed_full_flow_scenario] "
+        f"passed=true physical_blocks={physical_block_count} "
+        f"series_blocks={episode['block_count']} jobs={len(jobs)} machines={len(machines)} seed={seed}"
     )
-    return scenario_copy
+    return scenario
 
 
 def _load_or_build_phase1_plan_for_full_flow(
@@ -1560,7 +1089,6 @@ def _load_or_build_phase1_plan_for_full_flow(
     *,
     bay_ids: Sequence[str],
     bay_capacity_weights: Mapping[str, int | float],
-    long_cut_hard_mask: bool,
 ) -> dict:
     """Load Phase 1 plan or build it from a checkpoint/heuristic for full-flow."""
 
@@ -1591,7 +1119,6 @@ def _load_or_build_phase1_plan_for_full_flow(
             loaded_plan,
             bay_ids=bay_ids,
             bay_capacity_weights=bay_capacity_weights,
-            long_cut_hard_mask=long_cut_hard_mask,
         )
         print(
             "[CHECK][main._load_or_build_phase1_plan_for_full_flow] "
@@ -1608,15 +1135,12 @@ def _load_or_build_phase1_plan_for_full_flow(
             jobs=jobs,
             bay_ids=bay_ids,
             algorithm=phase1_heuristic,
-            long_cut_hard_mask=long_cut_hard_mask,
             bay_capacity_weights=bay_capacity_weights,
         )
         plan = candidate_to_phase1_plan(
             jobs=jobs,
             bay_ids=bay_ids,
             candidate=candidate,
-            score_mode=args.phase1_score_mode,
-            long_cut_hard_mask=long_cut_hard_mask,
         )
         plan_dir = Path(args.output_dir) / "phase1_heuristic_plan"
         plan_paths = write_phase1_bay_plan(plan, plan_dir)
@@ -1650,9 +1174,8 @@ def _load_or_build_phase1_plan_for_full_flow(
                 temperature=args.phase1_temperature,
                 seed=args.seed,
                 source="phase1_agent_greedy",
-                    selection="greedy",
-                    long_cut_hard_mask=long_cut_hard_mask,
-                    bay_capacity_weights=bay_capacity_weights,
+                selection="greedy",
+                bay_capacity_weights=bay_capacity_weights,
             )
         )
     else:
@@ -1673,17 +1196,14 @@ def _load_or_build_phase1_plan_for_full_flow(
                     seed=args.seed + sample_index,
                     source=f"phase1_agent_sample_{sample_number}",
                     selection="sample",
-                    long_cut_hard_mask=long_cut_hard_mask,
                     bay_capacity_weights=bay_capacity_weights,
                 )
             )
-    best = min(candidates, key=lambda candidate: _score_bay_loads(candidate.bay_loads, args.phase1_score_mode))
+    best = min(candidates, key=lambda candidate: score_phase1_bay_loads(candidate.bay_loads))
     plan = candidate_to_phase1_plan(
         jobs=jobs,
         bay_ids=bay_ids,
         candidate=best,
-        score_mode=args.phase1_score_mode,
-        long_cut_hard_mask=long_cut_hard_mask,
     )
     plan_dir = Path(args.output_dir) / "phase1_agent_plan"
     plan_paths = write_phase1_bay_plan(plan, plan_dir)
@@ -1695,59 +1215,13 @@ def _load_or_build_phase1_plan_for_full_flow(
     return plan
 
 
-def _phase1_bay_capacity_weights_from_scenario(
-    scenario: Mapping[str, Any],
-    bay_ids: Sequence[str],
-) -> dict[str, float]:
-    """Scenario의 enabled machine 수로 Phase 1 Bay 용량비를 계산한다."""
-
-    machines = scenario.get("machines")
-    if not isinstance(machines, list) or not machines:
-        print("[ERROR][main._phase1_bay_capacity_weights_from_scenario] cause=no_machines")
-        raise RuntimeError("full-flow scenario requires machines")
-    normalized_bays = tuple(str(bay_id) for bay_id in bay_ids)
-    weights = {bay_id: 0.0 for bay_id in normalized_bays}
-    for index, machine in enumerate(machines):
-        if not isinstance(machine, Mapping):
-            print(
-                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
-                f"cause=invalid_machine_row index={index} type={type(machine).__name__}"
-            )
-            raise RuntimeError(f"invalid full-flow machine row at index={index}")
-        enabled = machine.get("enabled")
-        if not isinstance(enabled, bool):
-            print(
-                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
-                f"cause=non_boolean_enabled index={index} value={enabled}"
-            )
-            raise RuntimeError(f"full-flow machine enabled must be boolean at index={index}")
-        bay_id = str(machine.get("bay_id") or "").strip()
-        if not bay_id:
-            print(
-                "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
-                f"cause=missing_bay_id index={index}"
-            )
-            raise RuntimeError(f"full-flow machine bay_id is missing at index={index}")
-        if enabled and bay_id in weights:
-            weights[bay_id] += 1.0
-    missing = sorted(bay_id for bay_id, value in weights.items() if value <= 0)
-    if missing:
-        print(
-            "[ERROR][main._phase1_bay_capacity_weights_from_scenario] "
-            f"cause=bay_without_enabled_machine bay_ids={missing}"
-        )
-        raise RuntimeError(f"full-flow selected Bays have no enabled machines: {missing}")
-    return weights
-
-
 def _validate_phase1_plan_execution_contract(
     plan: Mapping[str, Any],
     *,
     bay_ids: Sequence[str],
     bay_capacity_weights: Mapping[str, int | float],
-    long_cut_hard_mask: bool,
 ) -> None:
-    """외부 Phase 1 plan이 현재 full-flow 계약과 같은지 검증한다."""
+    """외부 Phase 1 plan이 MIXED joint 5-Bay 계약과 같은지 검증한다."""
 
     plan_weights = plan.get("bay_capacity_weights")
     expected_weights = {str(key): float(value) for key, value in bay_capacity_weights.items()}
@@ -1761,16 +1235,25 @@ def _validate_phase1_plan_execution_contract(
             f"cause=capacity_weight_mismatch expected={expected_weights} actual={normalized_plan_weights}"
         )
         raise RuntimeError("Phase 1 plan capacity weights differ from full-flow")
-    plan_mask = plan.get("long_cut_hard_mask")
-    if not isinstance(plan_mask, bool):
-        print("[ERROR][main._validate_phase1_plan_execution_contract] cause=missing_long_cut_mask")
-        raise RuntimeError("Phase 1 plan is missing long_cut_hard_mask")
-    if plan_mask is not bool(long_cut_hard_mask):
+    if "long_cut_hard_mask" in plan:
         print(
             "[ERROR][main._validate_phase1_plan_execution_contract] "
-            f"cause=long_cut_mask_mismatch expected={bool(long_cut_hard_mask)} actual={plan_mask}"
+            "cause=legacy_long_cut_toggle_present"
         )
-        raise RuntimeError("Phase 1 plan long-cut mask differs from full-flow")
+        raise RuntimeError("legacy Phase 1 plan is not compatible with MIXED full-flow")
+    expected_contract = {
+        "rule_profile": MULTI_SERIES_RULE_PROFILE,
+        "scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
+        "score_mode": "wo_first",
+    }
+    for field_name, expected_value in expected_contract.items():
+        if plan.get(field_name) != expected_value:
+            print(
+                "[ERROR][main._validate_phase1_plan_execution_contract] "
+                f"cause=phase1_contract_mismatch field={field_name} "
+                f"expected={expected_value} actual={plan.get(field_name)}"
+            )
+            raise RuntimeError(f"Phase 1 plan {field_name} differs from MIXED full-flow")
 
 
 def _load_phase2_full_flow_model(
@@ -1800,7 +1283,6 @@ def _resolve_phase2_full_flow_run_spec(
     checkpoint_spec: Mapping[str, Any] | None,
     constraint_profile: object,
     phase1_bay_capacity_weights: Mapping[str, int | float],
-    phase1_long_cut_hard_mask: bool,
     heuristic: str | None,
 ) -> dict[str, Any]:
     """Full-flow의 평가 조건을 checkpoint 계약과 동일하게 확정한다."""
@@ -1859,7 +1341,6 @@ def _resolve_phase2_full_flow_run_spec(
         max_wo_count=max_wo_count,
         max_length_sum=max_length_sum,
         phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-        phase1_long_cut_hard_mask=phase1_long_cut_hard_mask,
         constraint_profile=constraint_profile,
         heuristic_algorithms=heuristic_algorithms,
         train_rollout_samples=train_rollout_samples,
@@ -2032,31 +1513,112 @@ def command_apply_phase1_messages_to_phase2(args: argparse.Namespace) -> None:
 
 
 def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
-    """Generate block-only synthetic data for Phase 1 training smoke tests."""
+    """물리 블록 공동분포를 보존한 MIXED block/W/O 파일을 만든다."""
 
     print("[generate-phase1-blocks]")
-    print(f"- block_xlsx: {args.block_xlsx}")
-    print(f"- gyel: {args.gyel}")
+    print("- gyel: MIXED")
     print(f"- n_blocks: {args.n_blocks}")
     print(f"- seed: {args.seed}")
-    print(f"- noise_ratio: {args.noise_ratio}")
-    print(f"- correlation_method: {args.correlation_method}")
+    synthetic_source = "mixed_physical_block_joint_distribution"
+    print(f"- synthetic_source: {synthetic_source}")
     print(f"- output_dir: {args.output_dir}")
-    actual_blocks = load_phase1_actual_blocks(args.block_xlsx, gyel=args.gyel)
-    paths = write_phase1_block_generation_package(
-        actual_blocks=actual_blocks,
-        output_dir=args.output_dir,
-        n_blocks=args.n_blocks,
+    generated = generate_multi_series_formula_data(
+        n_physical_blocks=args.n_blocks,
         seed=args.seed,
-        noise_ratio=args.noise_ratio,
-        method=args.correlation_method,
     )
-    print(f"- synthetic_csv: {paths['synthetic_csv']}")
-    print(f"- summary_json: {paths['summary_json']}")
-    print(f"- distribution_summary_csv: {paths['distribution_summary_csv']}")
-    print(f"- actual_correlation_csv: {paths['actual_correlation_csv']}")
-    print(f"- synthetic_correlation_csv: {paths['synthetic_correlation_csv']}")
-    print(f"- correlation_delta_csv: {paths['correlation_delta_csv']}")
+    physical_block_count = generated.physical_block_count
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    blocks_csv = output_dir / "phase1_synthetic_blocks.csv"
+    wos_csv = output_dir / "phase1_synthetic_wos.csv"
+    summary_json = output_dir / "summary.json"
+    generated.block_df.to_csv(blocks_csv, index=False, encoding="utf-8-sig")
+    generated.wo_df.to_csv(wos_csv, index=False, encoding="utf-8-sig")
+    aggregation = {
+        "max": ["LTH", "BTH", "THK", "MARK_LTH", "TACT_TIME"],
+        "sum": ["CUT_LTH", "BVL_LTH", "STL_QTY", "BV_QTY", "PTLST_QTY"],
+        "WO_QTY": "W/O row count",
+    }
+    formula_series = ("NP", "FN", "FL", "NC")
+    bth_profiles = {}
+    for series in formula_series:
+        profile = load_bth_formula_profile(
+            str(DEFAULT_MULTI_SERIES_WO_SOURCE.resolve()),
+            series,
+        )
+        bth_profiles[series] = {
+            "coefficients": {
+                "intercept": profile.coefficients[0],
+                **dict(zip(BTH_FORMULA_FEATURES, profile.coefficients[1:])),
+            },
+            "residual_std": profile.residual_std,
+            "r_squared": profile.r_squared,
+            "observed_spec_count": len(profile.observed_specs),
+            "observed_spec_min": min(profile.observed_specs),
+            "observed_spec_max": max(profile.observed_specs),
+        }
+    summary = {
+        "synthetic_source": synthetic_source,
+        "gyel": "MIXED",
+        "seed": args.seed,
+        "physical_block_count": physical_block_count,
+        "block_count": len(generated.block_df),
+        "wo_count": len(generated.wo_df),
+        "series_block_counts": {
+            str(series): int(count)
+            for series, count in generated.block_df["GYEL"].value_counts().sort_index().items()
+        },
+        "series_wo_counts": {
+            str(series): int(count)
+            for series, count in generated.wo_df["GYEL"].value_counts().sort_index().items()
+        },
+        "aggregation": aggregation,
+        "bth_formula": {
+            "equation": "ln(BTH)=b0+sum(bk*ln(1+xk))+epsilon",
+            "features": list(BTH_FORMULA_FEATURES),
+            "rounding": "nearest_observed_series_spec",
+            "profiles": bth_profiles,
+        },
+        "tact_time_formula": {
+            "equation": "0.3037*CUT_LTH+0.1325*MARK_LTH+0.4790*THK+0.3840*PTLST_QTY",
+            "coefficients": {
+                "CUT_LTH": TACT_A_CUT,
+                "MARK_LTH": TACT_A_MARK,
+                "THK": TACT_A_THK,
+                "PTLST_QTY": TACT_A_PTLST,
+            },
+            "scope": "all_series_shared_np_ppt_case6",
+        },
+    }
+    reference = load_physical_block_joint_profile()
+    generated_combination_counts = Counter(
+        "+".join(combination) for combination in generated.series_combinations
+    )
+    summary["actual_series_combination_distribution"] = {
+        "+".join(combination): {
+            "count": count,
+            "probability": probability,
+        }
+        for combination, count, probability in zip(
+            reference.combinations,
+            reference.counts,
+            reference.probabilities,
+        )
+    }
+    summary["generated_series_combination_counts"] = dict(
+        sorted(generated_combination_counts.items())
+    )
+    summary_json.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"- blocks_csv: {blocks_csv}")
+    print(f"- wos_csv: {wos_csv}")
+    print(f"- summary_json: {summary_json}")
+    print(
+        "[VALIDATION][main.command_generate_phase1_blocks] "
+        f"passed=true blocks={len(generated.block_df)} wos={len(generated.wo_df)}"
+    )
 
 
 # LINE-BY-LINE: `command_simulate(args: argparse.Namespace)` 함수를 정의합니다. 반환 타입: `None`. 사용: CLI 명령에서 사용자가 실행한 subcommand를 처리합니다.
@@ -3058,43 +2620,6 @@ def build_parser() -> argparse.ArgumentParser:
     # LINE-BY-LINE: `factory_summary_parser.set_defaults(func`에 `command_factory_summary)` 결과를 저장합니다. 의미/사용: `set_defaults(func` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     factory_summary_parser.set_defaults(func=command_factory_summary)
 
-    phase1_parser = subparsers.add_parser(
-        "phase1",
-        parents=[common_parser],
-        help="Run Phase 1 only: block-to-Bay workload balancing",
-    )
-    phase1_parser.add_argument(
-        "--mode",
-        default="heuristic",
-        choices=["heuristic", "train", "infer"],
-        help="Phase 1 execution mode. Only heuristic is implemented now.",
-    )
-    phase1_parser.add_argument(
-        "--algorithm",
-        default=CANONICAL_PHASE1_HEURISTIC,
-        choices=[
-            CANONICAL_PHASE1_HEURISTIC,
-            LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-            MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-            PRIORITY_SWEEP_PHASE1_HEURISTIC,
-            PRIORITY_GREEDY_PHASE1_HEURISTIC,
-            "lpt_steel_quantity",
-            "heuristic",
-        ],
-        help="Phase 1 heuristic algorithm",
-    )
-    phase1_parser.add_argument(
-        "--bay-ids",
-        default=None,
-        help="Optional comma-separated Bay IDs. Default uses enabled machine Bays from config.",
-    )
-    phase1_parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Directory for Phase 1 JSON/CSV outputs",
-    )
-    phase1_parser.set_defaults(func=command_phase1)
-
     phase1_multi_series_parser = subparsers.add_parser(
         "phase1-plan-multi-series",
         help="Validate multi-series Excel data and write daily Phase 1 Bay plans",
@@ -3116,170 +2641,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phase1_multi_series_parser.set_defaults(func=command_phase1_plan_multi_series)
 
-    phase1_mdp_trace_parser = subparsers.add_parser(
-        "phase1-mdp-trace",
-        parents=[common_parser],
-        help="Build Phase 1 SELECT_BLOCK -> SELECT_BAY self-label trace",
-    )
-    phase1_mdp_trace_parser.add_argument(
-        "--algorithm",
-        default=LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-        choices=[
-            CANONICAL_PHASE1_HEURISTIC,
-            LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-            MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-            PRIORITY_SWEEP_PHASE1_HEURISTIC,
-            PRIORITY_GREEDY_PHASE1_HEURISTIC,
-            "lpt_steel_quantity",
-            "heuristic",
-        ],
-        help="Phase 1 heuristic used as self-label teacher",
-    )
-    phase1_mdp_trace_parser.add_argument(
-        "--bay-ids",
-        default=None,
-        help="Optional comma-separated Bay IDs. Default uses enabled machine Bays from config.",
-    )
-    phase1_mdp_trace_parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Directory for Phase 1 MDP trace outputs",
-    )
-    phase1_mdp_trace_parser.set_defaults(func=command_phase1_mdp_trace)
-
-    phase1_train_imitation_parser = subparsers.add_parser(
-        "phase1-train-imitation",
-        help="Train Phase 1 pointer policy from phase1_action_table.jsonl",
-    )
-    phase1_train_imitation_parser.add_argument(
-        "--action-table",
-        required=True,
-        help="Path to phase1_action_table.jsonl from phase1-mdp-trace",
-    )
-    phase1_train_imitation_parser.add_argument(
-        "--eval-action-table",
-        default=None,
-        help="Optional holdout phase1_action_table.jsonl for eval metrics",
-    )
-    phase1_train_imitation_parser.add_argument(
-        "--output-dir",
-        default="output/phase1_imitation",
-        help="Directory for checkpoint and metrics",
-    )
-    phase1_train_imitation_parser.add_argument("--epochs", type=int, default=20, help="Training epochs")
-    phase1_train_imitation_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-    phase1_train_imitation_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
-    phase1_train_imitation_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
-    phase1_train_imitation_parser.set_defaults(func=command_phase1_train_imitation)
-
-    phase1_train_self_labeling_parser = subparsers.add_parser(
-        "phase1-train-self-labeling",
-        parents=[common_parser],
-        help="Train Phase 1 pointer policy with best-of-K self-labeling",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--bay-ids",
-        default="22,23,24",
-        help="Optional comma-separated Bay IDs. Default uses 22,23,24 for Phase 1.",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--output-dir",
-        default="output/phase1_self_labeling",
-        help="Directory for checkpoint and metrics",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--episode-mode",
-        choices=["sampled", "fixed"],
-        default="sampled",
-        help="sampled uses block-level synthetic episodes; fixed repeats config_np_100 for smoke/debug only",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--block-xlsx",
-        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
-        help="Actual block Excel/CSV path used for sampled self-labeling episodes",
-    )
-    phase1_train_self_labeling_parser.add_argument("--gyel", default="NP", help="Series filter for sampled episodes")
-    phase1_train_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per sampled episode")
-    phase1_train_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per sampled episode")
-    phase1_train_self_labeling_parser.add_argument(
-        "--noise-ratio",
-        type=float,
-        default=0.03,
-        help="Bootstrap jitter ratio for sampled episodes",
-    )
-    phase1_train_self_labeling_parser.add_argument("--episodes", type=int, default=20, help="Self-labeling episodes")
-    phase1_train_self_labeling_parser.add_argument(
-        "--rollout-samples",
-        type=int,
-        default=4,
-        help="Current-policy sampled candidates per episode",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--heuristic-algorithms",
-        default="all8",
-        help="Comma-separated heuristic candidates that compete with agent samples",
-    )
-    phase1_train_self_labeling_parser.add_argument(
-        "--score-mode",
-        choices=["steel_first"],
-        default="steel_first",
-        help="Fixed objective: capacity-normalized steel gap, cut gap, bevel gap",
-    )
-    phase1_train_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
-    phase1_train_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
-    phase1_train_self_labeling_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
-    phase1_train_self_labeling_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
-    phase1_train_self_labeling_parser.set_defaults(func=command_phase1_train_self_labeling)
-
     phase1_train_pair_self_labeling_parser = subparsers.add_parser(
         "phase1-train-pair-self-labeling",
         parents=[common_parser],
-        help="Train Phase 1 direct SELECT_PAIR(block,bay) policy with best-of-K self-labeling",
+        help="Train the MIXED physical-block SELECT_PAIR(block-series,bay) policy",
     )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--bay-ids",
-        default="22,23,24",
-        help="Optional comma-separated Bay IDs. Default uses 22,23,24 for Phase 1.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--block-xlsx",
-        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
-        help="Actual block Excel/CSV path used for sampled pair self-labeling episodes",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument("--gyel", default="NP", help="Series filter for sampled episodes")
-    phase1_train_pair_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per sampled episode")
-    phase1_train_pair_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per sampled episode")
-    phase1_train_pair_self_labeling_parser.add_argument("--noise-ratio", type=float, default=0.03, help="Bootstrap jitter ratio")
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--hard-case-ratio",
-        type=float,
-        default=0.0,
-        help="Probability that a sampled synthetic episode becomes a hard steel-cut decorrelation case.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--hard-case-mode",
-        choices=["none", "cut_shuffle"],
-        default="cut_shuffle",
-        help="Hard-case generator mode. Ratio 0 keeps the original bootstrap+jitter behavior.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--hard-case-target-corr",
-        type=float,
-        default=0.85,
-        help="Target maximum Pearson corr(STL_QTY,CUT_LTH) for cut_shuffle hard cases.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--hard-case-max-attempts",
-        type=int,
-        default=20,
-        help="Maximum cut-shuffle attempts before failing a hard-case episode.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--validation-hard-case-ratio",
-        type=float,
-        default=None,
-        help="Synthetic validation hard-case ratio. Default follows --hard-case-ratio; actual_8days is unchanged.",
-    )
+    phase1_train_pair_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum physical blocks per episode")
+    phase1_train_pair_self_labeling_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum physical blocks per episode")
     phase1_train_pair_self_labeling_parser.add_argument(
         "--output-dir",
         default="output/phase1_pair_self_labeling",
@@ -3297,14 +2665,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--heuristic-algorithms",
-        default="all8",
-        help="Comma-separated heuristic candidates, or all8",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--score-mode",
-        choices=["steel_first"],
-        default="steel_first",
-        help="Fixed objective: capacity-normalized steel gap, cut gap, bevel gap",
+        default="all",
+        help="all/mixed3 or a comma-separated subset of wo_first_balanced,cut_first_balanced,bevel_first_balanced",
     )
     phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     phase1_train_pair_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
@@ -3320,94 +2682,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume pair self-labeling from explicit checkpoint path or 'latest' in output-dir/checkpoints",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
-        "--actual-validation-candidate-xlsx",
-        default="착수일 후보 블록.xlsx",
-        help="Candidate block workbook used for fixed actual_8days Phase 1 validation.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
-        "--actual-validation-workdays",
-        default="20260331,20260407,20260408,20260413,20260414,20260415,20260424,20260429",
-        help="Comma-separated actual workdays for fixed validation. Empty string disables actual validation.",
-    )
-    phase1_train_pair_self_labeling_parser.add_argument(
         "--enable-phase2-feedback-score",
         action="store_true",
-        help="Prepend the frozen Phase 2 best-of-K schedule score to the Phase 1 objective.",
+        help="Prepend a frozen mapped-factory Phase 2 schedule score to the Phase 1 teacher score.",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--phase2-feedback-checkpoint",
-        default="",
+        default=None,
         help="Frozen Phase 2 set-pointer checkpoint. Required with --enable-phase2-feedback-score.",
     )
     phase1_train_pair_self_labeling_parser.set_defaults(func=command_phase1_train_pair_self_labeling)
 
-    phase1_episode_dataset_parser = subparsers.add_parser(
-        "phase1-build-episode-dataset",
-        help="Build variable-size Phase 1 train/test self-label episodes",
-    )
-    phase1_episode_dataset_parser.add_argument(
-        "--block-xlsx",
-        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
-        help="Actual block Excel/CSV path used as the block-only source distribution",
-    )
-    phase1_episode_dataset_parser.add_argument("--gyel", default="NP", help="Series filter")
-    phase1_episode_dataset_parser.add_argument("--episode-count", type=int, default=40, help="Number of episodes")
-    phase1_episode_dataset_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum blocks per episode")
-    phase1_episode_dataset_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum blocks per episode")
-    phase1_episode_dataset_parser.add_argument("--train-ratio", type=float, default=0.8, help="Train episode ratio")
-    phase1_episode_dataset_parser.add_argument("--bay-ids", default="22,23,24", help="Comma-separated Phase 1 Bay IDs")
-    phase1_episode_dataset_parser.add_argument(
-        "--algorithm",
-        default=LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-        choices=[
-            CANONICAL_PHASE1_HEURISTIC,
-            LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-            MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-            PRIORITY_SWEEP_PHASE1_HEURISTIC,
-            PRIORITY_GREEDY_PHASE1_HEURISTIC,
-            "lpt_steel_quantity",
-            "heuristic",
-        ],
-        help="Phase 1 teacher heuristic",
-    )
-    phase1_episode_dataset_parser.add_argument("--seed", type=int, default=2026, help="Dataset seed")
-    phase1_episode_dataset_parser.add_argument(
-        "--noise-ratio",
-        type=float,
-        default=0.03,
-        help="Bootstrap jitter ratio. Set 0 for exact empirical bootstrap.",
-    )
-    phase1_episode_dataset_parser.add_argument(
-        "--output-dir",
-        default="output/phase1_episode_dataset",
-        help="Output directory for episode dataset files",
-    )
-    phase1_episode_dataset_parser.set_defaults(func=command_phase1_build_episode_dataset)
-
     phase2_train_graph_parser = subparsers.add_parser(
         "phase2-train-batch-machine-self-labeling",
         parents=[common_parser],
-        help="Train merged Phase 2 policy that selects W/O batch and machine together",
-    )
-    phase2_train_graph_parser.add_argument(
-        "--scenario-path",
-        default=None,
-        help="Optional source scenario override. Default follows config/data-source loader.",
+        help="Train MIXED merged Phase 2 batch-machine policy",
     )
     phase2_train_graph_parser.add_argument(
         "--phase1-heuristic",
         default=None,
-        help="Phase 1 heuristic run in memory for every merged Phase 2 training episode. Default is bevel_first_balanced when --phase1-checkpoint is absent.",
+        help="MIXED Phase 1 heuristic run for every Phase 2 episode. Default: bevel_first_balanced.",
     )
     phase2_train_graph_parser.add_argument(
         "--phase1-checkpoint",
         default=None,
         help="Frozen Phase 1 pair-pointer checkpoint or output directory. Replaces --phase1-heuristic during Phase 2 training.",
-    )
-    phase2_train_graph_parser.add_argument(
-        "--phase1-bay-ids",
-        default=None,
-        help="Comma-separated Bay IDs for Phase 1 heuristic. Default uses enabled machine Bays.",
     )
     phase2_train_graph_parser.add_argument(
         "--phase1-samples",
@@ -3420,17 +2719,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Frozen Phase 1 checkpoint sampling temperature for --phase1-samples > 1.",
-    )
-    phase2_train_graph_parser.add_argument(
-        "--phase1-score-mode",
-        choices=["steel_first"],
-        default="steel_first",
-        help="Phase 1 checkpoint candidate score mode.",
-    )
-    phase2_train_graph_parser.add_argument(
-        "--phase1-no-long-cut-hard-mask",
-        action="store_true",
-        help="Disable Phase 1 long-cut Bay 24 hard mask during upstream heuristic generation.",
     )
     phase2_train_graph_parser.add_argument(
         "--output-dir",
@@ -3480,15 +2768,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write per-training-candidate audit rows. Disabled by default for long training speed.",
     )
-    phase2_train_graph_parser.add_argument(
-        "--synthetic-source",
-        choices=["report_formula", "config"],
-        default="report_formula",
-        help="Merged Phase 2 training episode source. report_formula uses the PDF fixed formulas; config reuses config jobs.",
-    )
-    phase2_train_graph_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum synthetic blocks per report-formula episode")
-    phase2_train_graph_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum synthetic blocks per report-formula episode")
-    phase2_train_graph_parser.add_argument("--gyel", default="NP", help="Synthetic series/family label")
+    phase2_train_graph_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum physical blocks per MIXED episode")
+    phase2_train_graph_parser.add_argument("--max-blocks", type=int, default=80, help="Maximum physical blocks per MIXED episode")
     phase2_train_graph_parser.add_argument("--max-wo-count", type=int, default=3, help="Maximum W/O count per machine batch")
     phase2_train_graph_parser.add_argument("--max-length-sum", type=float, default=55000.0, help="Maximum LTH sum per machine batch")
     phase2_train_graph_parser.add_argument(
@@ -3502,12 +2783,7 @@ def build_parser() -> argparse.ArgumentParser:
     phase2_run_full_parser = subparsers.add_parser(
         "phase2-run-full-workflow",
         parents=[common_parser],
-        help="Run merged Phase 2 batch-machine schedule export",
-    )
-    phase2_run_full_parser.add_argument(
-        "--scenario-path",
-        default=None,
-        help="Optional source scenario override. Default follows config/data-source loader.",
+        help="Run MIXED physical-block Phase 1 -> merged Phase 2 schedule export",
     )
     phase2_run_full_parser.add_argument(
         "--phase1-plan",
@@ -3522,12 +2798,8 @@ def build_parser() -> argparse.ArgumentParser:
     phase2_run_full_parser.add_argument(
         "--phase1-heuristic",
         default=None,
-        help="Optional fixed Phase 1 heuristic, e.g. mbf_ppb. Mutually exclusive with --phase1-plan/--phase1-checkpoint.",
-    )
-    phase2_run_full_parser.add_argument(
-        "--phase1-bay-ids",
-        default="22,23,24",
-        help="Comma-separated Bay IDs used when --phase1-checkpoint builds the upstream plan.",
+        choices=PHASE1_HEURISTIC_BANK,
+        help="Optional fixed MIXED Phase 1 heuristic. Mutually exclusive with --phase1-plan/--phase1-checkpoint.",
     )
     phase2_run_full_parser.add_argument(
         "--phase1-samples",
@@ -3540,23 +2812,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Phase 1 sampling temperature when --phase1-samples is greater than 1.",
-    )
-    phase2_run_full_parser.add_argument(
-        "--phase1-score-mode",
-        choices=["steel_first"],
-        default="steel_first",
-        help="Phase 1 checkpoint candidate score mode.",
-    )
-    phase2_run_full_parser.add_argument(
-        "--phase1-no-long-cut-hard-mask",
-        action="store_true",
-        help="Evaluation-only ablation: disable Phase 1 long-cut Bay 24 hard mask.",
-    )
-    phase2_run_full_parser.add_argument(
-        "--assignment-mode",
-        default="allowed_bay_ids",
-        choices=["allowed_bay_ids", "cut_bay"],
-        help="How to inject Phase 1 Bay assignments before Phase 2.",
     )
     phase2_run_full_parser.add_argument(
         "--batch-machine-heuristic",
@@ -3594,21 +2849,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Phase 2 score mode. A checkpoint run inherits this from RunSpec.",
     )
     phase2_run_full_parser.add_argument(
-        "--synthetic-source",
-        choices=["config", "report_formula"],
-        default="config",
-        help="Full-flow job source. report_formula replaces config jobs with PDF fixed-formula W/O rows.",
-    )
-    phase2_run_full_parser.add_argument(
         "--synthetic-blocks",
         type=int,
         default=30,
-        help="Block count for --synthetic-source report_formula.",
-    )
-    phase2_run_full_parser.add_argument(
-        "--gyel",
-        default="NP",
-        help="Synthetic series label for --synthetic-source report_formula.",
+        help="Physical block count for the MIXED joint-distribution episode.",
     )
     phase2_run_full_parser.add_argument(
         "--output-dir",
@@ -3715,23 +2959,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate_phase1_blocks_parser = subparsers.add_parser(
         "generate-phase1-blocks",
-        help="Generate block-only synthetic data for Phase 1 training",
-    )
-    generate_phase1_blocks_parser.add_argument(
-        "--block-xlsx",
-        default="input/절단03~04_NP물량_마스킹_블록_수정_260618.xlsx",
-        help="Actual block Excel/CSV path used as the block-only source distribution",
-    )
-    generate_phase1_blocks_parser.add_argument(
-        "--gyel",
-        default="NP",
-        help="Series filter. Use NP for the current Phase 1 scope.",
+        help="Generate MIXED physical-block joint-distribution block/W/O data",
     )
     generate_phase1_blocks_parser.add_argument(
         "--n-blocks",
         type=int,
         default=787,
-        help="Number of synthetic block rows to generate",
+        help="MIXED physical-block count to generate",
     )
     generate_phase1_blocks_parser.add_argument(
         "--seed",
@@ -3740,21 +2974,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Random seed for deterministic generation",
     )
     generate_phase1_blocks_parser.add_argument(
-        "--noise-ratio",
-        type=float,
-        default=0.03,
-        help="Small bootstrap jitter ratio. Set 0 for exact empirical bootstrap.",
-    )
-    generate_phase1_blocks_parser.add_argument(
-        "--correlation-method",
-        choices=["pearson", "spearman"],
-        default="pearson",
-        help="Correlation method for actual vs synthetic validation",
-    )
-    generate_phase1_blocks_parser.add_argument(
         "--output-dir",
-        default="output/generated/phase1_block_only_synthetic",
-        help="Output directory for synthetic CSV and validation reports",
+        default="output/generated/phase1_mixed_joint",
+        help="Output directory for block/W/O CSV and generation summary",
     )
     generate_phase1_blocks_parser.set_defaults(func=command_generate_phase1_blocks)
 

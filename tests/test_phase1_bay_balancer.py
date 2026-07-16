@@ -1,652 +1,125 @@
-"""Phase 1 block-to-Bay workload balancing tests.
+"""MIXED Phase 1 block-series 집계와 Bay 배정 회귀시험."""
 
-These tests define the first-stage planning problem:
-- one action assigns one block set to one cutting Bay;
-- every W/O in the same block set follows that Bay assignment;
-- the primary balancing load is the sum of steel quantity, not block count.
-"""
+from __future__ import annotations
 
-import csv
-import tempfile
-from types import SimpleNamespace
 import unittest
 
-from Utils.phase1.phase1_bay_balancer import (
-    LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-    MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-    PRIORITY_GREEDY_PHASE1_HEURISTIC,
-    PRIORITY_SWEEP_PHASE1_HEURISTIC,
-    Phase1Block,
-    apply_phase1_plan_to_scenario,
-    build_phase1_bay_plan,
-    _improve_multi_objective_assignment,
-    _collect_blocks,
-    _multi_objective_assignment_score,
-    _multi_objective_block_orders,
-    _multi_objective_load_score,
-    _priority_sweep_load_score,
-)
-from Utils.phase1.multi_series_rules import MULTI_SERIES_RULE_PROFILE
-from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_records
+from Phase1.heuristics import PHASE1_HEURISTIC_BANK, run_phase1_heuristic_candidate
+from Phase1.orchestrator import candidate_to_phase1_plan
+from Utils.phase1.multi_series_rules import joint_phase1_bay_capacity_weights
+from Utils.phase1.phase1_bay_balancer import apply_phase1_plan_to_scenario
 
 
 class Phase1BayBalancerTest(unittest.TestCase):
-    """Block-level Bay assignment must stay independent from machine scheduling."""
-
-    def test_wo_first_search_orders_blocks_by_wo_count_not_steel_quantity(self) -> None:
-        steel_heavy = Phase1Block(
-            block_set_id="P1::NP::STEEL",
-            project_no="P1",
-            block_no="STEEL",
-            job_ids=("WO_S",),
-            wo_count=1,
-            steel_quantity_sum=20,
-            cut_length_sum=100.0,
-            bevel_quantity_sum=1,
-            long_cut_over_1000=0,
-            allowed_bay_ids=("22", "23"),
-        )
-        wo_heavy = Phase1Block(
-            block_set_id="P1::NP::WO",
-            project_no="P1",
-            block_no="WO",
-            job_ids=("WO_1", "WO_2", "WO_3"),
-            wo_count=3,
-            steel_quantity_sum=3,
-            cut_length_sum=90.0,
-            bevel_quantity_sum=1,
-            long_cut_over_1000=0,
-            allowed_bay_ids=("22", "23"),
-        )
-
-        orders = _multi_objective_block_orders([steel_heavy, wo_heavy], score_mode="wo_first")
-
-        self.assertEqual(orders[0][0].block_set_id, wo_heavy.block_set_id)
-
-    def test_assigns_each_block_to_one_bay_using_steel_quantity_load(self) -> None:
-        """The heaviest block should be placed first and steel quantity should drive loads."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 5),
-            "WO_A2": self._job("WO_A2", "P1::B1", 4),
-            "WO_B1": self._job("WO_B1", "P1::B2", 6),
-            "WO_C1": self._job("WO_C1", "P1::B3", 3),
+    def setUp(self) -> None:
+        self.weights = joint_phase1_bay_capacity_weights()
+        self.bay_ids = tuple(self.weights)
+        self.jobs = {
+            "WO_NP_1": self._job("WO_NP_1", "P1::NP::BLK_1", "NP", cut=700.0),
+            "WO_NP_2": self._job("WO_NP_2", "P1::NP::BLK_1", "NP", cut=350.0),
+            "WO_NC_1": self._job("WO_NC_1", "P2::NC::BLK_2", "NC", cut=200.0),
+            "WO_FN_1": self._job("WO_FN_1", "P3::FN::BLK_3", "FN", cut=120.0),
+            "WO_FL_1": self._job("WO_FL_1", "P4::FL::BLK_4", "FL", cut=180.0),
         }
 
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23"],
-            algorithm="lpt_steel_quantity",
-        )
+    def test_all_public_heuristics_assign_every_block_with_same_hard_mask(self) -> None:
+        for algorithm in PHASE1_HEURISTIC_BANK:
+            candidate = run_phase1_heuristic_candidate(
+                jobs=self.jobs,
+                bay_ids=self.bay_ids,
+                algorithm=algorithm,
+                bay_capacity_weights=self.weights,
+            )
 
-        assignments = {row["block_set_id"]: row["assigned_bay"] for row in result["assignments"]}
+            self.assertEqual(len(candidate.assignments), 4)
+            self.assertIn(candidate.assignments["P1::NP::BLK_1"], {"22", "23"})
+            self.assertIn(candidate.assignments["P2::NC::BLK_2"], {"22", "23", "24"})
+            self.assertIn(candidate.assignments["P3::FN::BLK_3"], {"25", "trans"})
+            self.assertIn(candidate.assignments["P4::FL::BLK_4"], {"25", "trans"})
+            self.assertEqual(set(candidate.bay_loads), set(self.bay_ids))
 
-        self.assertEqual(result["summary"]["load_metric"], "steel_quantity_sum")
-        self.assertEqual(result["summary"]["block_count"], 3)
-        self.assertEqual(result["summary"]["job_count"], 4)
-        self.assertEqual(assignments["P1::B1"], "22")
-        self.assertEqual(assignments["P1::B2"], "23")
-        self.assertEqual(assignments["P1::B3"], "23")
-        self.assertEqual(result["bay_loads"]["22"]["steel_quantity_sum"], 9)
-        self.assertEqual(result["bay_loads"]["23"]["steel_quantity_sum"], 9)
-        self.assertEqual(result["bay_loads"]["22"]["wo_count"], 2)
-        self.assertEqual(result["bay_loads"]["23"]["wo_count"], 2)
-        self.assertEqual(result["bay_capacity_weights"], {"22": 1.0, "23": 1.0})
-        self.assertIs(result["long_cut_hard_mask"], True)
-
-    def test_respects_allowed_bay_ids_for_a_block(self) -> None:
-        """If a block is restricted to one Bay, Phase 1 must not assign another Bay."""
-
+    def test_np_long_cut_wide_plate_and_cnt_masks_exclude_bay24(self) -> None:
         jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 5, allowed_bay_ids=("23",)),
-            "WO_A2": self._job("WO_A2", "P1::B1", 4, allowed_bay_ids=("23",)),
-            "WO_B1": self._job("WO_B1", "P1::B2", 7),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23"],
-            algorithm="lpt_steel_quantity",
-        )
-
-        assignments = {row["block_set_id"]: row["assigned_bay"] for row in result["assignments"]}
-
-        self.assertEqual(assignments["P1::B1"], "23")
-
-    def test_long_cut_block_hard_masks_bay24_candidates(self) -> None:
-        """CUT_LTH > 1000 blocks must not expose Bay 24 as a generated planning candidate."""
-
-        jobs = {
-            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1200, bevel_quantity=1),
-            "WO_SHORT": self._job("WO_SHORT", "P1::SHORT", 5, cut_length=100, bevel_quantity=1),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-        )
-        long_row = next(row for row in result["assignments"] if row["block_set_id"] == "P1::LONG")
-
-        self.assertNotEqual(long_row["assigned_bay"], "24")
-        self.assertEqual(long_row["candidate_bays"], "22|23")
-        self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
-
-    def test_long_cut_hard_mask_can_be_disabled_for_baseline_comparison(self) -> None:
-        """Baseline heuristic comparison may inspect Bay 24 without changing Proposed planning."""
-
-        jobs = {
-            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1200, bevel_quantity=1),
-        }
-
-        masked = _collect_blocks(
-            jobs=jobs,
-            bay_ids=("22", "23", "24"),
-            require_multi_objective=True,
-            long_cut_hard_mask=True,
-        )
-        unmasked = _collect_blocks(
-            jobs=jobs,
-            bay_ids=("22", "23", "24"),
-            require_multi_objective=True,
-            long_cut_hard_mask=False,
-        )
-
-        self.assertEqual(masked[0].allowed_bay_ids, ("22", "23"))
-        self.assertEqual(unmasked[0].allowed_bay_ids, ("22", "23", "24"))
-
-    def test_long_cut_block_with_only_bay24_fails_without_fallback(self) -> None:
-        """Hard masking Bay 24 must fail loudly if no Bay 22/23 candidate remains."""
-
-        jobs = {
-            "WO_LONG": self._job(
-                "WO_LONG",
-                "P1::LONG",
-                10,
-                allowed_bay_ids=("24",),
-                cut_length=1200,
-                bevel_quantity=1,
+            "LONG": self._job("LONG", "P1::NP::BLK_LONG", "NP", cut=1_000.0),
+            "WIDE": self._job(
+                "WIDE", "P2::NP::BLK_WIDE", "NP", cut=100.0, width=4_501.0
             ),
+            "CNT": self._job("CNT", "P3::NP::CNT_BLK_1", "NP", cut=100.0),
+        }
+        candidate = run_phase1_heuristic_candidate(
+            jobs=jobs,
+            bay_ids=self.bay_ids,
+            algorithm="wo_first_balanced",
+            bay_capacity_weights=self.weights,
+        )
+
+        self.assertTrue(set(candidate.assignments.values()) <= {"22", "23"})
+
+    def test_same_block_series_work_orders_receive_one_committed_bay(self) -> None:
+        candidate = run_phase1_heuristic_candidate(
+            jobs=self.jobs,
+            bay_ids=self.bay_ids,
+            algorithm="wo_first_balanced",
+            bay_capacity_weights=self.weights,
+        )
+        plan = candidate_to_phase1_plan(self.jobs, self.bay_ids, candidate)
+        scenario = {"jobs": [dict(job) for job in self.jobs.values()]}
+
+        applied = apply_phase1_plan_to_scenario(scenario, plan)["scenario"]
+        np_bays = {
+            tuple(row["allowed_bay_ids"])
+            for row in applied["jobs"]
+            if row["block_set_id"] == "P1::NP::BLK_1"
         }
 
-        with self.assertRaisesRegex(RuntimeError, "long-cut hard mask"):
-            build_phase1_bay_plan(
+        self.assertEqual(len(np_bays), 1)
+        self.assertEqual(len(next(iter(np_bays))), 1)
+        self.assertEqual(plan["rule_profile"], "multi_series_260711")
+        self.assertEqual(plan["scope_version"], "joint_five_bay_v2_mapped_eqp")
+        self.assertEqual(plan["score_mode"], "wo_first")
+        self.assertEqual(len(plan["score"]), 3)
+
+    def test_mixed_family_inside_one_block_series_fails(self) -> None:
+        jobs = {
+            "WO_A": self._job("WO_A", "P1::NP::BLK_1", "NP", cut=100.0),
+            "WO_B": self._job("WO_B", "P1::NP::BLK_1", "FL", cut=100.0),
+        }
+
+        with self.assertRaises(RuntimeError):
+            run_phase1_heuristic_candidate(
                 jobs=jobs,
-                bay_ids=["22", "23", "24"],
-                algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
+                bay_ids=self.bay_ids,
+                algorithm="wo_first_balanced",
+                bay_capacity_weights=self.weights,
             )
-
-    def test_multi_series_profile_applies_np_masks_and_ignores_actual_cut_bay(self) -> None:
-        jobs = {
-            "WO_A": self._job(
-                "WO_A",
-                "P1::NP::CNT_BLK_1",
-                0,
-                cut_length=1000,
-                bevel_quantity=1,
-                family="NP",
-                plate_width=4600,
-                cut_bay="24",
-            ),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-            bay_capacity_weights={"22": 4, "23": 4, "24": 3},
-            score_mode="wo_first",
-            rule_profile=MULTI_SERIES_RULE_PROFILE,
-        )
-
-        row = result["assignments"][0]
-        self.assertIn(row["assigned_bay"], {"22", "23"})
-        self.assertEqual(row["candidate_bays"], "22|23")
-        self.assertEqual(row["family"], "NP")
-        self.assertEqual(row["balancing_group"], "NP")
-        self.assertEqual(row["wide_plate_over_4500"], 1)
-        self.assertEqual(row["cnt_block"], 1)
-        self.assertEqual(result["score_mode"], "wo_first")
-
-    def test_multi_series_profile_rejects_mixed_family_inside_one_block_key(self) -> None:
-        jobs = {
-            "WO_A": self._job(
-                "WO_A", "P1::NP::B1", 1, family="NP", plate_width=3000
-            ),
-            "WO_B": self._job(
-                "WO_B", "P1::NP::B1", 1, family="FL", plate_width=3000
-            ),
-        }
-
-        with self.assertRaisesRegex(RuntimeError, "mixed family"):
-            build_phase1_bay_plan(
-                jobs=jobs,
-                bay_ids=["22", "23", "24", "25", "trans"],
-                algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-                bay_capacity_weights={"22": 4, "23": 4, "24": 3, "25": 2, "trans": 2},
-                score_mode="wo_first",
-                rule_profile=MULTI_SERIES_RULE_PROFILE,
-            )
-
-    def test_wo_first_score_uses_capacity_normalized_wo_cut_bevel_order(self) -> None:
-        loads = {
-            "22": self._load(steel=1, cut_length=400, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
-            "23": self._load(steel=99, cut_length=400, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
-            "24": self._load(steel=5, cut_length=300, bevel_quantity=6, long_cut_bay24_count=0, capacity_weight=3),
-        }
-        loads["22"]["wo_count"] = 40
-        loads["23"]["wo_count"] = 40
-        loads["24"]["wo_count"] = 30
-
-        self.assertEqual(
-            _multi_objective_load_score(loads, score_mode="wo_first"),
-            (0.0, 0.0, 0.0),
-        )
-
-    def test_steel_lpt_greedy_insertion_is_canonical_heuristic_name(self) -> None:
-        """The visible heuristic name should describe sorting and insertion behavior."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 5),
-            "WO_B1": self._job("WO_B1", "P1::B2", 3),
-        }
-
-        canonical = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23"],
-            algorithm="steel_lpt_greedy_insertion",
-        )
-        legacy_alias = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23"],
-            algorithm="lpt_steel_quantity",
-        )
-
-        self.assertEqual(canonical["algorithm"], "steel_lpt_greedy_insertion")
-        self.assertEqual(legacy_alias["algorithm"], "steel_lpt_greedy_insertion")
-        self.assertEqual(canonical["summary"]["algorithm"], "steel_lpt_greedy_insertion")
-
-    def test_multi_objective_balanced_reports_three_phase1_objectives(self) -> None:
-        """The new Phase 1 heuristic balances steel, cut length, and bevel quantity."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 10, cut_length=1500, bevel_quantity=0),
-            "WO_B1": self._job("WO_B1", "P1::B2", 10, cut_length=10, bevel_quantity=10),
-            "WO_C1": self._job("WO_C1", "P1::B3", 10, cut_length=10, bevel_quantity=0),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-        )
-        assignments = {row["block_set_id"]: row["assigned_bay"] for row in result["assignments"]}
-
-        self.assertEqual(result["algorithm"], "multi_objective_balanced")
-        self.assertEqual(result["summary"]["load_metric"], "multi_objective_lexicographic")
-        self.assertEqual(result["summary"]["cut_length_total"], 1520.0)
-        self.assertEqual(result["summary"]["bevel_quantity_total"], 10)
-        self.assertEqual(assignments["P1::B1"], "22")
-        self.assertEqual(result["assignments"][0]["long_cut_over_1000"], 1)
-
-    def test_multi_objective_requires_bevel_quantity_without_fallback(self) -> None:
-        """BV_QTY is a required objective input for the multi-objective heuristic."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 10, cut_length=100, bevel_quantity=None),
-        }
-
-        with self.assertRaisesRegex(RuntimeError, "missing_bevel_quantity"):
-            build_phase1_bay_plan(
-                jobs=jobs,
-                bay_ids=["22", "23", "24"],
-                algorithm=MULTI_OBJECTIVE_PHASE1_HEURISTIC,
-            )
-
-    def test_multi_objective_local_search_can_improve_by_swapping_two_blocks(self) -> None:
-        """Some balanced plans need a two-block swap, not a one-block move."""
-
-        blocks = (
-            self._block("P1::A", steel=5, cut_length=100),
-            self._block("P1::B", steel=5, cut_length=900),
-            self._block("P1::C", steel=3, cut_length=100),
-            self._block("P1::D", steel=3, cut_length=900),
-        )
-        bay_ids = ("22", "23")
-        initial = {
-            "P1::A": "22",
-            "P1::B": "23",
-            "P1::C": "22",
-            "P1::D": "23",
-        }
-
-        improved = _improve_multi_objective_assignment(blocks, initial, bay_ids)
-
-        self.assertLess(
-            _multi_objective_assignment_score(blocks, improved, bay_ids),
-            _multi_objective_assignment_score(blocks, initial, bay_ids),
-        )
-
-    def test_priority_sweep_score_uses_fixed_gap_tuple(self) -> None:
-        """The public score tuple is steel/cut/bevel only; Bay24 long-cut is a mask."""
-
-        no_long_cut_bay24_but_uneven = {
-            "22": self._load(steel=1, cut_length=10.0, bevel_quantity=1, long_cut_bay24_count=0),
-            "23": self._load(steel=1, cut_length=10.0, bevel_quantity=1, long_cut_bay24_count=0),
-            "24": self._load(steel=98, cut_length=980.0, bevel_quantity=98, long_cut_bay24_count=0),
-        }
-        one_long_cut_bay24_but_balanced = {
-            "22": self._load(steel=33, cut_length=330.0, bevel_quantity=33, long_cut_bay24_count=0),
-            "23": self._load(steel=33, cut_length=330.0, bevel_quantity=33, long_cut_bay24_count=0),
-            "24": self._load(steel=34, cut_length=340.0, bevel_quantity=34, long_cut_bay24_count=1),
-        }
-
-        self.assertEqual(_priority_sweep_load_score(no_long_cut_bay24_but_uneven), (97, 970.0, 97))
-        self.assertEqual(_priority_sweep_load_score(one_long_cut_bay24_but_balanced), (1, 10.0, 1))
-        self.assertLess(
-            _priority_sweep_load_score(one_long_cut_bay24_but_balanced),
-            _priority_sweep_load_score(no_long_cut_bay24_but_uneven),
-        )
-
-    def test_multi_objective_score_normalizes_load_by_bay_capacity_weight(self) -> None:
-        """Bay loads must be balanced per machine capacity, not raw Bay totals only."""
-
-        proportional_loads = {
-            "22": self._load(steel=40, cut_length=400.0, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
-            "23": self._load(steel=30, cut_length=300.0, bevel_quantity=6, long_cut_bay24_count=0, capacity_weight=3),
-            "24": self._load(steel=40, cut_length=400.0, bevel_quantity=8, long_cut_bay24_count=0, capacity_weight=4),
-        }
-
-        self.assertEqual(_priority_sweep_load_score(proportional_loads), (0.0, 0.0, 0.0))
-
-    def test_bay_load_csv_reports_capacity_normalized_values(self) -> None:
-        """The Bay load CSV must expose the same per-capacity values used by scoring."""
-
-        jobs = {
-            "WO_A": self._job("WO_A", "P1::A", 40, cut_length=400.0, bevel_quantity=8),
-            "WO_B": self._job("WO_B", "P1::B", 30, cut_length=300.0, bevel_quantity=6),
-            "WO_C": self._job("WO_C", "P1::C", 40, cut_length=400.0, bevel_quantity=8),
-        }
-        plan = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=PRIORITY_SWEEP_PHASE1_HEURISTIC,
-            bay_capacity_weights={"22": 4, "23": 3, "24": 4},
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            from Utils.phase1.phase1_bay_balancer import write_phase1_bay_plan
-
-            paths = write_phase1_bay_plan(plan, tmpdir)
-            with open(paths["bay_loads_csv"], encoding="utf-8-sig", newline="") as file:
-                rows = {row["bay_id"]: row for row in csv.DictReader(file)}
-
-        self.assertEqual(rows["22"]["steel_quantity_sum_per_capacity"], "10.0")
-        self.assertEqual(rows["23"]["steel_quantity_sum_per_capacity"], "10.0")
-        self.assertEqual(rows["24"]["steel_quantity_sum_per_capacity"], "10.0")
-        self.assertEqual(rows["22"]["cut_length_sum_per_capacity"], "100.0")
-        self.assertEqual(rows["23"]["cut_length_sum_per_capacity"], "100.0")
-        self.assertEqual(rows["24"]["cut_length_sum_per_capacity"], "100.0")
-        self.assertEqual(rows["22"]["bevel_quantity_sum_per_capacity"], "2.0")
-        self.assertEqual(rows["23"]["bevel_quantity_sum_per_capacity"], "2.0")
-        self.assertEqual(rows["24"]["bevel_quantity_sum_per_capacity"], "2.0")
-
-    def test_priority_sweep_balanced_reports_fixed_objective_priority(self) -> None:
-        """Legacy heuristic names should still report the fixed public objective order."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", 10, cut_length=1500, bevel_quantity=0),
-            "WO_B1": self._job("WO_B1", "P1::B2", 10, cut_length=10, bevel_quantity=10),
-            "WO_C1": self._job("WO_C1", "P1::B3", 10, cut_length=10, bevel_quantity=0),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=PRIORITY_SWEEP_PHASE1_HEURISTIC,
-        )
-
-        self.assertEqual(result["algorithm"], "priority_sweep_balanced")
-        self.assertEqual(result["summary"]["load_metric"], "multi_objective_lexicographic")
-        self.assertEqual(
-            result["summary"]["objective_priority"],
-            [
-                "steel_quantity_sum_per_capacity",
-                "cut_length_sum_per_capacity",
-                "bevel_quantity_sum_per_capacity",
-            ],
-        )
-
-    def test_long_cut_preferred_balanced_exposes_field_preference_name(self) -> None:
-        """The official field heuristic should keep long-cut Bay 24 preference visible."""
-
-        jobs = {
-            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1500, bevel_quantity=3),
-            "WO_BEVEL": self._job("WO_BEVEL", "P1::BEVEL", 9, cut_length=100, bevel_quantity=20),
-            "WO_A": self._job("WO_A", "P1::A", 8, cut_length=100, bevel_quantity=1),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=LONG_CUT_PREFERRED_PHASE1_HEURISTIC,
-        )
-
-        priority_sweep = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=PRIORITY_SWEEP_PHASE1_HEURISTIC,
-        )
-
-        self.assertEqual(result["algorithm"], "long_cut_preferred_balanced")
-        self.assertEqual(result["summary"]["load_metric"], "multi_objective_lexicographic")
-        self.assertEqual(
-            result["summary"]["objective_priority"],
-            [
-                "steel_quantity_sum_per_capacity",
-                "cut_length_sum_per_capacity",
-                "bevel_quantity_sum_per_capacity",
-            ],
-        )
-        self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
-        self.assertEqual(result["bay_loads"], priority_sweep["bay_loads"])
-
-    def test_priority_greedy_insertion_assigns_one_bay_per_block_step_by_step(self) -> None:
-        """The presentation heuristic should use one deterministic greedy insertion pass."""
-
-        jobs = {
-            "WO_LONG": self._job("WO_LONG", "P1::LONG", 10, cut_length=1500, bevel_quantity=3),
-            "WO_A": self._job("WO_A", "P1::A", 9, cut_length=100, bevel_quantity=1),
-            "WO_B": self._job("WO_B", "P1::B", 8, cut_length=100, bevel_quantity=1),
-        }
-
-        result = build_phase1_bay_plan(
-            jobs=jobs,
-            bay_ids=["22", "23", "24"],
-            algorithm=PRIORITY_GREEDY_PHASE1_HEURISTIC,
-        )
-
-        assignments = {row["block_set_id"]: row["assigned_bay"] for row in result["assignments"]}
-
-        self.assertEqual(result["algorithm"], "priority_greedy_insertion")
-        self.assertEqual(result["summary"]["load_metric"], "priority_greedy_lexicographic")
-        self.assertEqual(
-            result["summary"]["block_selection_priority"],
-            [
-                "long_cut_over_1000_first",
-                "steel_quantity_sum_desc",
-                "cut_length_sum_desc",
-                "bevel_quantity_sum_desc",
-            ],
-        )
-        self.assertNotEqual(assignments["P1::LONG"], "24")
-        self.assertEqual(result["summary"]["long_cut_bay24_count"], 0)
-
-    def test_applies_phase1_plan_to_phase2_scenario_as_cut_bay(self) -> None:
-        """Phase 2 scenario injection should fix every W/O in a block to the assigned Bay."""
-
-        scenario = {
-            "metadata": {"scenario_name": "unit"},
-            "jobs": [
-                {"job_id": "WO_A1", "block_set_id": "P1::B1", "cut_bay": None},
-                {"job_id": "WO_A2", "block_set_id": "P1::B1", "cut_bay": None},
-                {"job_id": "WO_B1", "block_set_id": "P1::B2", "cut_bay": None},
-            ],
-        }
-        plan = {
-            "algorithm": "steel_lpt_greedy_insertion",
-            "assignments": [
-                {"block_set_id": "P1::B1", "assigned_bay": "22"},
-                {"block_set_id": "P1::B2", "assigned_bay": "23"},
-            ],
-        }
-
-        result = apply_phase1_plan_to_scenario(
-            scenario=scenario,
-            plan=plan,
-            assignment_mode="cut_bay",
-        )
-        phase2_jobs = {job["job_id"]: job for job in result["scenario"]["jobs"]}
-
-        self.assertEqual(phase2_jobs["WO_A1"]["cut_bay"], "22")
-        self.assertEqual(phase2_jobs["WO_A2"]["cut_bay"], "22")
-        self.assertEqual(phase2_jobs["WO_B1"]["cut_bay"], "23")
-        self.assertTrue(result["scenario"]["metadata"]["phase1_applied"])
-        self.assertEqual(result["summary"]["assigned_job_count"], 3)
-        self.assertEqual(result["summary"]["assigned_block_count"], 2)
-
-    def test_apply_phase1_plan_fails_when_a_job_block_is_unassigned(self) -> None:
-        """Phase 2 injection must not silently leave an unassigned block free."""
-
-        scenario = {
-            "jobs": [
-                {"job_id": "WO_A1", "block_set_id": "P1::B1"},
-                {"job_id": "WO_MISSING", "block_set_id": "P1::B9"},
-            ],
-        }
-        plan = {
-            "algorithm": "steel_lpt_greedy_insertion",
-            "assignments": [
-                {"block_set_id": "P1::B1", "assigned_bay": "22"},
-            ],
-        }
-
-        with self.assertRaisesRegex(RuntimeError, "missing_phase1_assignment"):
-            apply_phase1_plan_to_scenario(
-                scenario=scenario,
-                plan=plan,
-                assignment_mode="cut_bay",
-            )
-
-    def test_missing_steel_quantity_fails_without_wo_count_fallback(self) -> None:
-        """Phase 1 must not silently replace missing steel quantity with W/O count."""
-
-        jobs = {
-            "WO_A1": self._job("WO_A1", "P1::B1", None),
-        }
-
-        with self.assertRaisesRegex(RuntimeError, "missing_steel_quantity"):
-            build_phase1_bay_plan(
-                jobs=jobs,
-                bay_ids=["22", "23"],
-                algorithm="lpt_steel_quantity",
-            )
-
-    def test_scenario_builder_exposes_steel_quantity_for_environment_jobs(self) -> None:
-        """Scenario jobs must use the dataclass field name `steel_quantity`."""
-
-        scenario = build_scenario_from_cutting_records(
-            records=[
-                {
-                    "work_order_no": "WO_A1",
-                    "project_no": "P1",
-                    "block_no": "B1",
-                    "block_set_id": "P1::B1",
-                    "series": "NP",
-                    "length": 1000,
-                    "thickness": 10,
-                    "cut_length": 100,
-                    "mark_length": 0,
-                    "bevel_length": 0,
-                    "steel_qty": 4,
-                    "part_qty": 2,
-                    "tact_time": 3,
-                    "source_cut_bay": "22",
-                    "source_machine_id": "PLS21",
-                }
-            ],
-            process_time_source="tact_time",
-        )
-
-        self.assertEqual(scenario["jobs"][0]["steel_quantity"], 4)
 
     @staticmethod
     def _job(
         job_id: str,
         block_set_id: str,
-        steel_quantity: int | None,
-        allowed_bay_ids: tuple[str, ...] = (),
-        cut_length: float | None = 100.0,
-        bevel_quantity: int | None = 0,
-        family: str = "NP",
-        plate_width: float | None = None,
-        cut_bay: str | None = None,
-    ) -> SimpleNamespace:
-        """Create the smallest Job-like object needed by Phase 1 logic."""
-
-        return SimpleNamespace(
-            job_id=job_id,
-            block_set_id=block_set_id,
-            steel_quantity=steel_quantity,
-            family=family,
-            cut_length=cut_length,
-            bevel_quantity=bevel_quantity,
-            plate_width=plate_width,
-            cut_bay=cut_bay,
-            source_cut_bay=None,
-            allowed_bay_ids=allowed_bay_ids,
-            extra={
-                "source_project_no": block_set_id.split("::")[0],
-                "source_block_no": block_set_id.split("::")[1],
-                "source_wk_ord_no": job_id,
-            },
-        )
-
-    @staticmethod
-    def _block(block_set_id: str, steel: int, cut_length: float) -> Phase1Block:
-        """Create a small Phase 1 block for local-search tests."""
-
-        return Phase1Block(
-            block_set_id=block_set_id,
-            project_no=block_set_id.split("::")[0],
-            block_no=block_set_id.split("::")[1],
-            job_ids=(f"{block_set_id}_WO",),
-            wo_count=1,
-            steel_quantity_sum=steel,
-            cut_length_sum=cut_length,
-            bevel_quantity_sum=0,
-            long_cut_over_1000=0,
-            allowed_bay_ids=("22", "23"),
-        )
-
-    @staticmethod
-    def _load(
-        steel: int,
-        cut_length: float,
-        bevel_quantity: int,
-        long_cut_bay24_count: int,
-        capacity_weight: float = 1.0,
+        family: str,
+        *,
+        cut: float,
+        width: float = 3_000.0,
     ) -> dict:
-        """Create the Bay load shape used by Phase 1 score functions."""
-
         return {
-            "steel_quantity_sum": steel,
-            "cut_length_sum": cut_length,
-            "bevel_quantity_sum": bevel_quantity,
-            "long_cut_bay24_count": long_cut_bay24_count,
-            "wo_count": steel,
-            "block_count": steel,
-            "capacity_weight": capacity_weight,
+            "job_id": job_id,
+            "block_set_id": block_set_id,
+            "family": family,
+            "steel_quantity": 1,
+            "cut_length": cut,
+            "bevel_quantity": 2,
+            "plate_length": 10_000.0,
+            "plate_width": width,
+            "thickness": 20.0,
+            "processing_time": 30.0,
+            "base_stage_minutes": {"cut": 30.0},
+            "cut_bay": None,
+            "source_cut_bay": None,
+            "allowed_bay_ids": (),
+            "allowed_machine_ids": (),
+            "prohibited_machine_ids": (),
+            "extra": {"source_wk_ord_no": job_id},
         }
 
 

@@ -8,12 +8,21 @@ import unittest
 
 from Environment.constraints.profiles import default_phase2_constraint_profile
 from Phase2.feedback import build_frozen_phase2_schedule_feedback_scorer, build_phase2_feedback_contract
-from Phase2.merged import PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES, run_phase2_batch_machine_candidate
+from Phase2.merged import (
+    PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES,
+    build_mixed_phase2_training_machines,
+    run_phase2_batch_machine_candidate,
+)
 from Phase2.run_spec import build_phase2_run_spec
 from Phase2.set_pointer_policy import Phase2SetPointerPolicy
 from Phase1.pair_self_labeling import PHASE1_PAIR_ENV_FEATURE_NAMES, PHASE1_PAIR_FEATURE_NAMES
 from Phase1.pointer_policy import Phase1PairPointerPolicy
 from Utils.learning.phase_agent_checkpoints import load_phase1_feedback_contract
+from Utils.phase1.multi_series_rules import (
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    joint_phase1_bay_capacity_weights,
+)
 from main import _require_matching_phase1_feedback_contract
 
 
@@ -24,10 +33,7 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
             "WO_B": self._job("WO_B", "P1::A", 7.0, 500.0, 1),
             "WO_C": self._job("WO_C", "P1::B", 5.0, 300.0, 2),
         }
-        self.machines = {
-            "PLS21": self._machine("PLS21", "22"),
-            "PLS31": self._machine("PLS31", "23"),
-        }
+        self.machines = build_mixed_phase2_training_machines()
         self.profile = default_phase2_constraint_profile()
         self.model = Phase2SetPointerPolicy(hidden_dim=8)
         self.run_spec = build_phase2_run_spec(
@@ -36,12 +42,11 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
             action_pool_limit=None,
             max_wo_count=3,
             max_length_sum=55_000.0,
-            phase1_bay_capacity_weights={"22": 1.0, "23": 1.0},
-            phase1_long_cut_hard_mask=True,
+            phase1_bay_capacity_weights=joint_phase1_bay_capacity_weights(),
             constraint_profile=self.profile,
             heuristic_algorithms=("lpt_batch",),
             train_rollout_samples=1,
-            validation_rollout_samples=0,
+            validation_rollout_samples=1,
         )
 
     def test_frozen_feedback_equals_direct_greedy_phase2_schedule_score(self) -> None:
@@ -53,7 +58,11 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
             constraint_profile=self.profile,
         )
 
-        score = scorer(SimpleNamespace(assignments=assignments), self.jobs, ("22", "23"))
+        score = scorer(
+            SimpleNamespace(assignments=assignments),
+            self.jobs,
+            tuple(joint_phase1_bay_capacity_weights()),
+        )
         direct = run_phase2_batch_machine_candidate(
             jobs=self.jobs,
             machines=self.machines,
@@ -70,7 +79,8 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
         self.assertEqual(score, direct.score_tuple)
 
     def test_frozen_feedback_rejects_machine_capacity_that_differs_from_run_spec(self) -> None:
-        mismatched_machines = {"PLS21": self._machine("PLS21", "22")}
+        mismatched_machines = dict(self.machines)
+        mismatched_machines.pop(next(iter(mismatched_machines)))
 
         with self.assertRaises(RuntimeError):
             build_frozen_phase2_schedule_feedback_scorer(
@@ -112,6 +122,9 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
                     "pair_feature_names": PHASE1_PAIR_FEATURE_NAMES,
                     "env_feature_names": PHASE1_PAIR_ENV_FEATURE_NAMES,
                     "hidden_dim": 8,
+                    "rule_profile": MULTI_SERIES_RULE_PROFILE,
+                    "score_mode": "wo_first",
+                    "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
                     "phase2_feedback_contract": contract,
                 },
                 path,
@@ -144,6 +157,7 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
             family="NP",
             steel_quantity=1,
             plate_length=10_000.0,
+            plate_width=3_000.0,
             thickness=13.0,
             cut_length=cut,
             bevel_quantity=bevel,
@@ -156,19 +170,6 @@ class Phase2FrozenFeedbackTest(unittest.TestCase):
             prohibited_machine_ids=(),
             extra={"source_wk_ord_no": job_id},
         )
-
-    @staticmethod
-    def _machine(machine_id: str, bay_id: str) -> SimpleNamespace:
-        return SimpleNamespace(
-            machine_id=machine_id,
-            bay_id=bay_id,
-            enabled=True,
-            eligible_families=("NP",),
-            min_thickness=0.0,
-            max_thickness=100.0,
-            table_length_limit=55_000.0,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

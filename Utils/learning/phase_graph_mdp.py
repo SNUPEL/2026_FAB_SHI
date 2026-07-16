@@ -15,49 +15,23 @@ from Utils.phase1.phase1_bay_balancer import (
     Phase1Block,
     _add_block_load,
     _collect_blocks,
+    _empty_phase1_bay_loads,
     _job_attr,
     _multi_objective_load_score,
     _normalize_bay_capacity_weights,
     _normalize_bay_ids,
-    _normalize_rule_profile,
     _require_capacity_weight,
     _require_non_negative_float,
     _require_text,
     _validate_multi_series_plan_scope,
-    _validate_score_profile_contract,
 )
-from Utils.phase1.multi_series_rules import LEGACY_NP_RULE_PROFILE, MULTI_SERIES_RULE_PROFILE
+from Utils.phase1.multi_series_rules import (
+    GROUP_BAY_CAPACITY_WEIGHTS,
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_BALANCING_GROUP_ORDER,
+    multi_series_group_load_value,
+)
 
-
-PHASE1_BLOCK_NODE_FEATURES = [
-    "steel_quantity_ratio",
-    "cut_length_ratio",
-    "bevel_quantity_ratio",
-    "long_cut_over_1000",
-    "plate_length_avg_ratio",
-    "thickness_avg_ratio",
-]
-
-PHASE1_BAY_NODE_FEATURES = [
-    "current_steel_quantity_ratio",
-    "current_cut_length_ratio",
-    "current_bevel_quantity_ratio",
-    "current_block_count_ratio",
-    "capacity_weight_ratio",
-]
-
-PHASE1_BLOCK_BAY_EDGE_FEATURES = [
-    "block_steel_quantity_ratio",
-    "block_cut_length_ratio",
-    "block_bevel_quantity_ratio",
-    "bay_current_steel_quantity_ratio",
-    "bay_current_cut_length_ratio",
-    "bay_current_bevel_quantity_ratio",
-    "bay_capacity_weight_ratio",
-    "projected_steel_gap_ratio",
-    "projected_cut_gap_ratio",
-    "projected_bevel_gap_ratio",
-]
 
 PHASE1_MULTI_SERIES_BLOCK_NODE_FEATURES = [
     "wo_count_ratio",
@@ -136,12 +110,9 @@ def build_phase1_block_bay_graph(
     bay_ids: Sequence[str],
     bay_loads: Mapping[str, Mapping[str, int | float]] | None = None,
     assigned_block_ids: Iterable[str] | None = None,
-    long_cut_hard_mask: bool = True,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
-    score_mode: str = "steel_first",
-    rule_profile: str = LEGACY_NP_RULE_PROFILE,
 ) -> Dict:
-    """Build a variable-size Phase 1 graph state.
+    """확정된 MIXED joint 5-Bay Phase 1 graph state를 만든다.
 
     Nodes:
     - block nodes: one node per unassigned block.
@@ -152,40 +123,18 @@ def build_phase1_block_bay_graph(
     """
 
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
-    normalized_rule_profile = _normalize_rule_profile(rule_profile)
-    _validate_score_profile_contract(score_mode, normalized_rule_profile, long_cut_hard_mask)
-    if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE and bay_capacity_weights is None:
+    if bay_capacity_weights is None:
         print(
             "[ERROR][phase_graph_mdp.build_phase1_block_bay_graph] "
-            "cause=missing_multi_series_capacity_weights"
+            "cause=missing_capacity_weights"
         )
-        raise RuntimeError("multi-series Phase 1 graph requires Bay capacity weights")
-    if bay_capacity_weights is None and bay_loads is not None:
-        missing_bay_loads = [bay_id for bay_id in normalized_bay_ids if bay_id not in bay_loads]
-        if missing_bay_loads:
-            print(
-                "[ERROR][phase_graph_mdp.build_phase1_block_bay_graph] "
-                f"cause=missing_bay_loads bay_ids={missing_bay_loads}"
-            )
-            raise RuntimeError(f"Phase 1 graph Bay loads are missing: {missing_bay_loads}")
-        normalized_capacity_weights = {
-            bay_id: _require_capacity_weight(bay_loads[bay_id], f"graph_existing_load:{bay_id}")
-            for bay_id in normalized_bay_ids
-        }
-    else:
-        normalized_capacity_weights = _normalize_bay_capacity_weights(
-            normalized_bay_ids,
-            bay_capacity_weights,
-        )
-    blocks = _collect_blocks(
-        jobs=jobs,
-        bay_ids=normalized_bay_ids,
-        require_multi_objective=True,
-        long_cut_hard_mask=long_cut_hard_mask,
-        rule_profile=normalized_rule_profile,
+        raise RuntimeError("MIXED Phase 1 graph requires Bay capacity weights")
+    normalized_capacity_weights = _normalize_bay_capacity_weights(
+        normalized_bay_ids,
+        bay_capacity_weights,
     )
-    if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
-        _validate_multi_series_plan_scope(blocks, normalized_bay_ids, normalized_capacity_weights)
+    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids)
+    _validate_multi_series_plan_scope(blocks, normalized_bay_ids, normalized_capacity_weights)
     assigned = {str(block_id) for block_id in (assigned_block_ids or [])}
     active_blocks = [block for block in blocks if block.block_set_id not in assigned]
     current_loads = _copy_or_empty_bay_loads(
@@ -193,40 +142,23 @@ def build_phase1_block_bay_graph(
         bay_loads,
         normalized_capacity_weights,
     )
-    totals = _phase1_totals(
-        blocks,
-        current_loads,
-        include_current_loads=normalized_rule_profile == LEGACY_NP_RULE_PROFILE,
-    )
-
-    if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
-        feature_names = {
-            "block": PHASE1_MULTI_SERIES_BLOCK_NODE_FEATURES,
-            "bay": PHASE1_MULTI_SERIES_BAY_NODE_FEATURES,
-            "edge": PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES,
-        }
-        block_nodes = [_phase1_multi_series_block_node(block, totals) for block in active_blocks]
-        bay_nodes = [
-            _phase1_multi_series_bay_node(bay_id, current_loads[bay_id], totals)
-            for bay_id in normalized_bay_ids
-        ]
-    else:
-        feature_names = {
-            "block": PHASE1_BLOCK_NODE_FEATURES,
-            "bay": PHASE1_BAY_NODE_FEATURES,
-            "edge": PHASE1_BLOCK_BAY_EDGE_FEATURES,
-        }
-        block_nodes = [_phase1_block_node(block, totals) for block in active_blocks]
-        bay_nodes = [_phase1_bay_node(bay_id, current_loads[bay_id], totals) for bay_id in normalized_bay_ids]
+    totals = _phase1_totals(blocks, current_loads)
+    feature_names = {
+        "block": PHASE1_MULTI_SERIES_BLOCK_NODE_FEATURES,
+        "bay": PHASE1_MULTI_SERIES_BAY_NODE_FEATURES,
+        "edge": PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES,
+    }
+    block_nodes = [_phase1_multi_series_block_node(block, totals) for block in active_blocks]
+    bay_nodes = [
+        _phase1_multi_series_bay_node(bay_id, current_loads[bay_id], totals)
+        for bay_id in normalized_bay_ids
+    ]
     candidate_edges = []
     for block in active_blocks:
         for bay_id in block.allowed_bay_ids:
-            if normalized_rule_profile == MULTI_SERIES_RULE_PROFILE:
-                candidate_edges.append(
-                    _phase1_multi_series_block_bay_edge(block, bay_id, current_loads, totals)
-                )
-            else:
-                candidate_edges.append(_phase1_block_bay_edge(block, bay_id, current_loads, totals))
+            candidate_edges.append(
+                _phase1_multi_series_block_bay_edge(block, bay_id, current_loads, totals)
+            )
 
     return {
         "phase": "phase1_block_bay",
@@ -239,9 +171,8 @@ def build_phase1_block_bay_graph(
             "block_count": len(blocks),
             "unassigned_block_count": len(active_blocks),
             "candidate_edge_count": len(candidate_edges),
-            "long_cut_hard_mask": bool(long_cut_hard_mask),
-            "score_mode": score_mode,
-            "rule_profile": normalized_rule_profile,
+            "score_mode": "wo_first",
+            "rule_profile": MULTI_SERIES_RULE_PROFILE,
         },
     }
 
@@ -317,69 +248,6 @@ def build_phase2_wo_machine_graph(
     }
 
 
-def _phase1_block_node(block: Phase1Block, totals: Mapping[str, float]) -> Dict:
-    return {
-        "node_id": f"block:{block.block_set_id}",
-        "block_set_id": block.block_set_id,
-        "project_no": block.project_no,
-        "block_no": block.block_no,
-        "features": [
-            _ratio(block.steel_quantity_sum, totals["steel_quantity_sum"]),
-            _ratio(block.cut_length_sum, totals["cut_length_sum"]),
-            _ratio(block.bevel_quantity_sum, totals["bevel_quantity_sum"]),
-            float(block.long_cut_over_1000),
-            _ratio(block.length_avg or 0.0, totals["plate_length_avg_max"]),
-            _ratio(block.thickness_avg or 0.0, totals["thickness_avg_max"]),
-        ],
-    }
-
-
-def _phase1_bay_node(bay_id: str, loads: Mapping[str, int | float], totals: Mapping[str, float]) -> Dict:
-    return {
-        "node_id": f"bay:{bay_id}",
-        "bay_id": bay_id,
-        "features": [
-            _ratio(loads["steel_quantity_sum"], totals["steel_quantity_sum"]),
-            _ratio(loads["cut_length_sum"], totals["cut_length_sum"]),
-            _ratio(loads["bevel_quantity_sum"], totals["bevel_quantity_sum"]),
-            _ratio(loads["block_count"], totals["block_count"]),
-            _ratio(_require_capacity_weight(loads, f"graph_bay_node:{bay_id}"), totals["capacity_weight_sum"]),
-        ],
-    }
-
-
-def _phase1_block_bay_edge(
-    block: Phase1Block,
-    bay_id: str,
-    current_loads: Mapping[str, Mapping[str, int | float]],
-    totals: Mapping[str, float],
-) -> Dict:
-    projected_loads = copy.deepcopy(dict(current_loads))
-    _add_block_load(projected_loads[bay_id], bay_id, block)
-    score = _multi_objective_load_score(projected_loads)
-    return {
-        "edge_id": f"block:{block.block_set_id}->bay:{bay_id}",
-        "source_block_id": block.block_set_id,
-        "target_bay_id": bay_id,
-        "score": list(score),
-        "features": [
-            _ratio(block.steel_quantity_sum, totals["steel_quantity_sum"]),
-            _ratio(block.cut_length_sum, totals["cut_length_sum"]),
-            _ratio(block.bevel_quantity_sum, totals["bevel_quantity_sum"]),
-            _ratio(current_loads[bay_id]["steel_quantity_sum"], totals["steel_quantity_sum"]),
-            _ratio(current_loads[bay_id]["cut_length_sum"], totals["cut_length_sum"]),
-            _ratio(current_loads[bay_id]["bevel_quantity_sum"], totals["bevel_quantity_sum"]),
-            _ratio(
-                _require_capacity_weight(current_loads[bay_id], f"graph_edge:{block.block_set_id}@{bay_id}"),
-                totals["capacity_weight_sum"],
-            ),
-            _ratio(score[0], totals["steel_quantity_sum"]),
-            _ratio(score[1], totals["cut_length_sum"]),
-            _ratio(score[2], totals["bevel_quantity_sum"]),
-        ],
-    }
-
-
 def _phase1_multi_series_block_node(block: Phase1Block, totals: Mapping[str, float]) -> Dict:
     """신규 다계열 block 상태를 확정 목적함수와 hard mask 기준으로 표현한다."""
 
@@ -432,8 +300,13 @@ def _phase1_multi_series_block_bay_edge(
 
     projected_loads = copy.deepcopy(dict(current_loads))
     _add_block_load(projected_loads[bay_id], bay_id, block)
-    score = _multi_objective_load_score(projected_loads, score_mode="wo_first")
+    score = _multi_objective_load_score(projected_loads)
     group_flags = _phase1_group_flags(block)
+    group_wo_average = totals[_phase1_group_average_key(block.balancing_group, "wo_count")]
+    group_cut_average = totals[_phase1_group_average_key(block.balancing_group, "cut_length_sum")]
+    group_bevel_average = totals[
+        _phase1_group_average_key(block.balancing_group, "bevel_quantity_sum")
+    ]
     return {
         "edge_id": f"block:{block.block_set_id}->bay:{bay_id}",
         "source_block_id": block.block_set_id,
@@ -448,16 +321,20 @@ def _phase1_multi_series_block_bay_edge(
             float(block.wide_plate_over_4500),
             float(block.cnt_block),
             float(block.long_cut_over_1000),
-            _capacity_load_ratio(current_loads[bay_id], "wo_count", totals["wo_per_capacity_average"]),
-            _capacity_load_ratio(
-                current_loads[bay_id],
-                "cut_length_sum",
-                totals["cut_per_capacity_average"],
+            _group_capacity_load_ratio(
+                current_loads[bay_id], block.balancing_group, "wo_count", group_wo_average
             ),
-            _capacity_load_ratio(
+            _group_capacity_load_ratio(
                 current_loads[bay_id],
+                block.balancing_group,
+                "cut_length_sum",
+                group_cut_average,
+            ),
+            _group_capacity_load_ratio(
+                current_loads[bay_id],
+                block.balancing_group,
                 "bevel_quantity_sum",
-                totals["bevel_per_capacity_average"],
+                group_bevel_average,
             ),
             _ratio(
                 _require_capacity_weight(current_loads[bay_id], f"multi_graph_edge:{block.block_set_id}@{bay_id}"),
@@ -488,6 +365,25 @@ def _capacity_load_ratio(
 ) -> float:
     capacity = _require_capacity_weight(loads, f"multi_graph_load:{field}")
     return _ratio(float(loads[field]) / capacity, average_per_capacity)
+
+
+def _group_capacity_load_ratio(
+    loads: Mapping[str, int | float],
+    group: str,
+    metric: str,
+    average_per_capacity: float,
+) -> float:
+    """후보 block 그룹의 현재 Bay 부하만 설비 수 기준으로 정규화한다."""
+
+    capacity = _require_capacity_weight(loads, f"multi_graph_group_load:{group}:{metric}")
+    return _ratio(
+        multi_series_group_load_value(loads, group, metric) / capacity,
+        average_per_capacity,
+    )
+
+
+def _phase1_group_average_key(group: str, metric: str) -> str:
+    return f"group_{group.lower()}_{metric}_per_capacity_average"
 
 
 def _phase2_wo_node(job: object, totals: Mapping[str, float]) -> Dict:
@@ -611,9 +507,9 @@ def _phase2_machine_enabled(machine: object, machine_id: str) -> bool:
 def _phase1_totals(
     blocks: Sequence[Phase1Block],
     bay_loads: Mapping[str, Mapping[str, int | float]],
-    include_current_loads: bool = True,
 ) -> Dict[str, float]:
-    current_factor = 1.0 if include_current_loads else 0.0
+    """전체 MIXED 문제를 기준으로 node/edge 정규화 분모를 계산한다."""
+
     capacity_weight_sum = max(
         1.0,
         sum(
@@ -622,40 +518,52 @@ def _phase1_totals(
         ),
     )
     wo_count = _positive_total(
-        sum(block.wo_count for block in blocks)
-        + current_factor * sum(float(row["wo_count"]) for row in bay_loads.values()),
+        sum(block.wo_count for block in blocks),
         "phase1 wo_count",
     )
     cut_length_sum = _positive_total(
-        sum(block.cut_length_sum for block in blocks)
-        + current_factor * sum(float(row["cut_length_sum"]) for row in bay_loads.values()),
+        sum(block.cut_length_sum for block in blocks),
         "phase1 cut_length_sum",
     )
     bevel_quantity_sum = max(
         1.0,
-        sum(block.bevel_quantity_sum for block in blocks)
-        + current_factor * sum(float(row["bevel_quantity_sum"]) for row in bay_loads.values()),
+        sum(block.bevel_quantity_sum for block in blocks),
     )
-    return {
-        "steel_quantity_sum": _positive_total(
-            sum(block.steel_quantity_sum for block in blocks)
-            + current_factor * sum(float(row["steel_quantity_sum"]) for row in bay_loads.values()),
-            "phase1 steel_quantity_sum",
-        ),
+    result = {
         "wo_count": wo_count,
         "cut_length_sum": cut_length_sum,
         "bevel_quantity_sum": bevel_quantity_sum,
-        "block_count": max(
-            1.0,
-            len(blocks) + current_factor * sum(float(row["block_count"]) for row in bay_loads.values()),
-        ),
         "capacity_weight_sum": capacity_weight_sum,
         "wo_per_capacity_average": wo_count / capacity_weight_sum,
         "cut_per_capacity_average": cut_length_sum / capacity_weight_sum,
         "bevel_per_capacity_average": max(1.0, bevel_quantity_sum / capacity_weight_sum),
-        "plate_length_avg_max": max(1.0, *(float(block.length_avg or 0.0) for block in blocks)),
-        "thickness_avg_max": max(1.0, *(float(block.thickness_avg or 0.0) for block in blocks)),
     }
+    present_groups = {block.balancing_group for block in blocks}
+    group_averages: Dict[str, Dict[str, float]] = {}
+    for group in PHASE1_BALANCING_GROUP_ORDER:
+        group_blocks = [block for block in blocks if block.balancing_group == group]
+        capacity_sum = sum(GROUP_BAY_CAPACITY_WEIGHTS[group].values())
+        raw_averages = {
+            "wo_count": sum(block.wo_count for block in group_blocks) / capacity_sum,
+            "cut_length_sum": sum(block.cut_length_sum for block in group_blocks) / capacity_sum,
+            "bevel_quantity_sum": sum(block.bevel_quantity_sum for block in group_blocks) / capacity_sum,
+        }
+        group_averages[group] = raw_averages
+        for metric, raw_average in raw_averages.items():
+            result[_phase1_group_average_key(group, metric)] = max(1.0, raw_average)
+    result["wo_per_capacity_average"] = max(
+        1.0,
+        sum(group_averages[group]["wo_count"] for group in present_groups),
+    )
+    result["cut_per_capacity_average"] = max(
+        1.0,
+        sum(group_averages[group]["cut_length_sum"] for group in present_groups),
+    )
+    result["bevel_per_capacity_average"] = max(
+        1.0,
+        sum(group_averages[group]["bevel_quantity_sum"] for group in present_groups),
+    )
+    return result
 
 
 def _phase2_totals(
@@ -694,18 +602,7 @@ def _copy_or_empty_bay_loads(
     bay_capacity_weights: Mapping[str, int | float],
 ) -> Dict[str, Dict[str, int | float]]:
     if bay_loads is None:
-        return {
-            bay_id: {
-                "steel_quantity_sum": 0,
-                "cut_length_sum": 0.0,
-                "bevel_quantity_sum": 0,
-                "long_cut_bay24_count": 0,
-                "wo_count": 0,
-                "block_count": 0,
-                "capacity_weight": float(bay_capacity_weights[bay_id]),
-            }
-            for bay_id in bay_ids
-        }
+        return _empty_phase1_bay_loads(tuple(bay_ids), bay_capacity_weights)
     missing = [bay_id for bay_id in bay_ids if bay_id not in bay_loads]
     if missing:
         print(f"[ERROR][phase_graph_mdp._copy_or_empty_bay_loads] cause=missing_bay_loads bay_ids={missing}")
@@ -720,6 +617,10 @@ def _copy_or_empty_bay_loads(
                 f"cause=capacity_weight_mismatch bay_id={bay_id} expected={expected} actual={actual}"
             )
             raise RuntimeError(f"Phase 1 graph capacity mismatch: {bay_id}")
+    for group in PHASE1_BALANCING_GROUP_ORDER:
+        for metric in ("wo_count", "cut_length_sum", "bevel_quantity_sum"):
+            for bay_id in bay_ids:
+                multi_series_group_load_value(copied[bay_id], group, metric)
     return copied
 
 

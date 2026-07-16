@@ -12,6 +12,40 @@ import pandas as pd
 
 SUPPORTED_SERIES = ("NP", "FN", "FL", "NC")
 
+# 2026-07-16에 확정한 MIXED planning 설비 identity다. EQP_3은 실적 전용
+# NC/trans 설비이므로 이 후보 집합에 포함하지 않는다.
+MIXED_PLANNING_MACHINE_IDS_BY_BAY = {
+    "22": ("PLS21", "PLS22", "PLS23", "PLS24"),
+    "23": ("PLS31", "PLS32", "PLS33"),
+    "24": ("PLS41", "PLS42", "PLS43", "PLS44"),
+    "25": ("PLS51", "PLS52"),
+    "trans": ("PLP01", "PLP02"),
+}
+
+ACTUAL_EQP_TO_MACHINE_ID = {
+    "EQP_1": "PLS51",
+    "EQP_2": "PLS52",
+    "EQP_4": "PLS21",
+    "EQP_5": "PLS22",
+    "EQP_6": "PLS23",
+    "EQP_7": "PLS24",
+    "EQP_8": "PLS31",
+    "EQP_9": "PLS32",
+    "EQP_10": "PLS33",
+    "EQP_11": "PLS41",
+    "EQP_12": "PLS42",
+    "EQP_13": "PLS43",
+    "EQP_14": "PLS44",
+    "EQP_15": "PLP01",
+    "EQP_16": "PLP02",
+}
+
+_MACHINE_HOME_BAY = {
+    machine_id: bay_id
+    for bay_id, machine_ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.items()
+    for machine_id in machine_ids
+}
+
 COMMON_REQUIRED_COLUMNS = (
     "PROJ_NO",
     "BLK_NO",
@@ -70,7 +104,7 @@ AGGREGATE_SUM_COLUMNS = (
     "BV_QTY",
     "CURVE_QTY",
 )
-AGGREGATE_MAX_COLUMNS = ("LTH", "BTH", "THK")
+AGGREGATE_MAX_COLUMNS = ("LTH", "BTH", "THK", "WGT", "MARK_LTH")
 
 
 @dataclass(frozen=True)
@@ -81,6 +115,74 @@ class MultiSeriesCuttingData:
     work_orders: pd.DataFrame
     block_source: str = ""
     wo_source: str = ""
+
+
+@dataclass(frozen=True)
+class ActualEquipmentResolution:
+    """마스킹 EQP ID의 실적 identity와 planning 포함 여부."""
+
+    source_eqp_id: str
+    machine_id: str
+    home_bay: str
+    source_cut_bay: str
+    planning_candidate: bool
+    mapping_status: str
+
+    @property
+    def source_bay_matches_home(self) -> bool:
+        return self.source_cut_bay == self.home_bay
+
+
+def resolve_actual_equipment(
+    eqp_id: object,
+    *,
+    series: object,
+    cut_bay: object,
+) -> ActualEquipmentResolution:
+    """실적 EQP를 PLS/PLP로 해석하되 EQP_3 예외를 엄격히 보존한다."""
+
+    normalized_eqp = _required_text(eqp_id, "EQP_NM", "actual_equipment").upper()
+    normalized_series = _required_text(series, "GYEL", normalized_eqp).upper()
+    normalized_bay = _required_text(cut_bay, "CUT_BAY", normalized_eqp)
+    if normalized_series not in SUPPORTED_SERIES:
+        print(
+            "[ERROR][multi_series_cutting_data.resolve_actual_equipment] "
+            f"cause=unsupported_series eqp_id={normalized_eqp} series={normalized_series}"
+        )
+        raise RuntimeError(f"unsupported actual equipment series: {normalized_series}")
+
+    if normalized_eqp == "EQP_3":
+        if normalized_series != "NC" or normalized_bay != "trans":
+            print(
+                "[ERROR][multi_series_cutting_data.resolve_actual_equipment] "
+                "cause=eqp3_contract_mismatch "
+                f"series={normalized_series} cut_bay={normalized_bay}"
+            )
+            raise RuntimeError("EQP_3 actual contract mismatch: expected NC/trans")
+        return ActualEquipmentResolution(
+            source_eqp_id=normalized_eqp,
+            machine_id=normalized_eqp,
+            home_bay="trans",
+            source_cut_bay=normalized_bay,
+            planning_candidate=False,
+            mapping_status="actual_nc_trans_only",
+        )
+
+    machine_id = ACTUAL_EQP_TO_MACHINE_ID.get(normalized_eqp)
+    if machine_id is None:
+        print(
+            "[ERROR][multi_series_cutting_data.resolve_actual_equipment] "
+            f"cause=unknown_eqp_id eqp_id={normalized_eqp}"
+        )
+        raise RuntimeError(f"unknown actual EQP id: {normalized_eqp}")
+    return ActualEquipmentResolution(
+        source_eqp_id=normalized_eqp,
+        machine_id=machine_id,
+        home_bay=_MACHINE_HOME_BAY[machine_id],
+        source_cut_bay=normalized_bay,
+        planning_candidate=True,
+        mapping_status="mapped_pls_plp",
+    )
 
 
 def build_block_set_id(project_no: object, series: object, block_no: object) -> str:
@@ -135,6 +237,8 @@ def prepare_multi_series_cutting_data(
 
     block_rows = _validate_table(blocks, BLOCK_REQUIRED_COLUMNS, block_source, "block")
     wo_rows = _validate_table(work_orders, WO_REQUIRED_COLUMNS, wo_source, "wo")
+    block_rows = _attach_equipment_mapping(block_rows, block_source, "block")
+    wo_rows = _attach_equipment_mapping(wo_rows, wo_source, "wo")
     _validate_unique(wo_rows, "WK_ORD_NO", wo_source)
 
     block_rows["BLOCK_SET_ID"] = _block_ids(block_rows)
@@ -239,6 +343,39 @@ def _validate_table(
                 f"cause=negative_value table={table_name} column={column} source={source}"
             )
             raise RuntimeError(f"negative_value: {table_name}.{column}")
+    return result
+
+
+def _attach_equipment_mapping(
+    frame: pd.DataFrame,
+    source: str,
+    table_name: str,
+) -> pd.DataFrame:
+    """모든 실적 행에 매핑 결과와 planning 포함 여부를 명시한다."""
+
+    resolutions = [
+        resolve_actual_equipment(
+            row.EQP_NM,
+            series=row.GYEL,
+            cut_bay=row.CUT_BAY,
+        )
+        for row in frame.itertuples(index=False)
+    ]
+    result = frame.copy()
+    result["MAPPED_MACHINE_ID"] = [item.machine_id for item in resolutions]
+    result["MACHINE_HOME_BAY"] = [item.home_bay for item in resolutions]
+    result["PLANNING_MACHINE_CANDIDATE"] = [item.planning_candidate for item in resolutions]
+    result["EQUIPMENT_MAPPING_STATUS"] = [item.mapping_status for item in resolutions]
+    result["SOURCE_BAY_MATCHES_MACHINE_HOME"] = [
+        item.source_bay_matches_home for item in resolutions
+    ]
+    print(
+        "[CHECK][multi_series_cutting_data._attach_equipment_mapping] "
+        f"table={table_name} rows={len(result)} "
+        f"actual_only={int((~result['PLANNING_MACHINE_CANDIDATE']).sum())} "
+        f"source_bay_mismatch={int((~result['SOURCE_BAY_MATCHES_MACHINE_HOME']).sum())} "
+        f"source={source}"
+    )
     return result
 
 

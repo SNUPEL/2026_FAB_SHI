@@ -20,7 +20,7 @@ class MultiSeriesPhase1PlannerTest(unittest.TestCase):
                 write_multi_series_phase1_daily_plans({}, output_dir)
             self.assertEqual(list(Path(output_dir).iterdir()), [])
 
-    def test_splits_same_day_by_balancing_group_and_uses_group_capacities(self) -> None:
+    def test_builds_one_joint_five_bay_problem_per_day(self) -> None:
         blocks = pd.DataFrame(
             [
                 self._block("P1", "NP", "BLK_1", "20260316", cut=1000, width=3000),
@@ -40,16 +40,21 @@ class MultiSeriesPhase1PlannerTest(unittest.TestCase):
 
         result = build_multi_series_phase1_daily_plans(data)
 
-        self.assertEqual(result["problem_count"], 2)
-        problems = {row["balancing_group"]: row for row in result["problems"]}
-        self.assertEqual(problems["NP"]["workday"], "20260311")
-        self.assertEqual(problems["NP"]["bay_capacity_weights"], {"22": 4.0, "23": 4.0, "24": 3.0})
-        self.assertEqual(problems["FN_FL"]["bay_capacity_weights"], {"25": 2.0, "trans": 2.0})
-        np_assignment = problems["NP"]["plan"]["assignments"][0]
+        self.assertEqual(result["problem_count"], 1)
+        problem = result["problems"][0]
+        self.assertEqual(problem["workday"], "20260311")
+        self.assertEqual(problem["balancing_groups"], ["NP", "FN_FL"])
+        self.assertEqual(
+            problem["bay_capacity_weights"],
+            {"22": 4.0, "23": 3.0, "24": 4.0, "25": 2.0, "trans": 2.0},
+        )
+        self.assertEqual(set(problem["plan"]["bay_loads"]), {"22", "23", "24", "25", "trans"})
+        assignments = problem["plan"]["assignments"]
+        np_assignment = next(row for row in assignments if row["series"] == "NP")
         self.assertEqual(np_assignment["block_set_id"], "P1::NP::BLK_1")
         self.assertIn(np_assignment["assigned_bay"], {"22", "23"})
         self.assertEqual(np_assignment["candidate_bays"], "22|23")
-        fn_fl_families = {row["family"] for row in problems["FN_FL"]["plan"]["assignments"]}
+        fn_fl_families = {row["series"] for row in assignments if row["series"] in {"FN", "FL"}}
         self.assertEqual(fn_fl_families, {"FN", "FL"})
 
     @staticmethod

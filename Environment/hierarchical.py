@@ -146,6 +146,7 @@ def apply_phase1_block_assignment(
     bevel_quantity_sum: int,
     wo_count: int,
     long_cut_over_1000: int,
+    allow_zero_steel_quantity: bool = False,
 ) -> None:
     """Block 하나의 Bay 배정과 누적 부하를 planning state에 원자적으로 반영한다."""
 
@@ -202,7 +203,12 @@ def apply_phase1_block_assignment(
             f"cause=fractional_discrete_block_load block_set_id={normalized_block} values={raw_values}"
         )
         raise RuntimeError(f"Phase 1 discrete block load must be integer: {normalized_block}")
-    if int(wo_count) <= 0 or int(steel_quantity_sum) <= 0 or int(long_cut_over_1000) not in {0, 1}:
+    invalid_steel = (
+        int(steel_quantity_sum) < 0
+        if allow_zero_steel_quantity
+        else int(steel_quantity_sum) <= 0
+    )
+    if int(wo_count) <= 0 or invalid_steel or int(long_cut_over_1000) not in {0, 1}:
         print(
             "[ERROR][Environment.hierarchical.apply_phase1_block_assignment] "
             f"cause=invalid_discrete_block_load block_set_id={normalized_block} values={values}"
@@ -485,7 +491,10 @@ class CommonHierarchicalEnvironment:
             raise RuntimeError(f"cannot close empty batch: {batch_id}")
 
         start_time = float(self.state.runtime.machine_available_at[batch.machine_id])
-        finish_time = start_time + float(batch.max_processing_time)
+        # DES runtime, timeline, event log가 동일한 시각을 사용하도록 batch 종료 시각을
+        # 여기서 한 번만 확정한다. 서로 다른 정밀도를 쓰면 학습 후보와 full-flow
+        # 재평가의 score가 달라진다.
+        finish_time = round(start_time + float(batch.max_processing_time), 6)
         row = {
             "batch_id": batch.batch_id,
             "machine_id": batch.machine_id,

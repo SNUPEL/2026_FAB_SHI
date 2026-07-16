@@ -23,13 +23,14 @@ from Environment.metrics import (
     calculate_phase2_schedule_metrics,
 )
 from Environment.hierarchical import CommonHierarchicalEnvironment
+from Environment.data import Machine
 from Environment.constraints.profiles import (
     PhaseConstraintProfile,
     audit_phase2_schedule_constraints,
     default_phase2_constraint_profile,
     evaluate_phase2_action_constraints,
 )
-from Phase1.self_labeling import run_phase1_heuristic_candidate
+from Phase1.heuristics import run_phase1_heuristic_candidate
 from Phase2.set_pointer_policy import Phase2SetPointerPolicy
 from Phase2.run_spec import (
     build_phase2_run_spec,
@@ -42,6 +43,7 @@ from Phase2.state import (
     build_phase2_policy_state,
     phase2_state_feature_schema,
 )
+from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_BAY
 from Utils.learning.phase_graph_mdp import _processing_time, _required_non_negative, build_phase2_wo_machine_graph
 
 
@@ -71,6 +73,54 @@ PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK = (
     "lpt_batch",
 )
 PHASE2_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
+
+MIXED_PHASE2_ELIGIBLE_FAMILIES = {
+    "22": ("NP", "NC"),
+    "23": ("NP", "NC"),
+    "24": ("NP", "NC"),
+    "25": ("FN", "FL"),
+    "trans": ("FN", "FL"),
+}
+
+
+def build_mixed_phase2_training_machines() -> Dict[str, Machine]:
+    """확정 EQP 매핑의 PLS/PLP 15대로 MIXED planning 설비를 만든다.
+
+    EQP_3은 과거 NC/trans 실적 전용이므로 planning machine에는 포함하지 않는다.
+    현재 미확정인 두께/정반 제약은 Phase 2 profile에서 비활성 상태이며 이
+    함수는 임의 제약을 추가하지 않는다.
+    """
+
+    machines: Dict[str, Machine] = {}
+    for bay_id, machine_ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.items():
+        families = MIXED_PHASE2_ELIGIBLE_FAMILIES[bay_id]
+        for machine_id in machine_ids:
+            equipment_type = machine_id[:3]
+            machines[machine_id] = Machine(
+                machine_id=machine_id,
+                machine_type="plasma",
+                enabled=True,
+                eligible_families=families,
+                min_thickness=0.0,
+                max_thickness=1_000.0,
+                table_length_limit=55_000.0,
+                cut_speed_factor=1.0,
+                daily_capacity_minutes=1_000_000_000.0,
+                parallel_capacity=1,
+                bay_id=bay_id,
+                equipment_type=equipment_type,
+                max_batch_wo_count=3,
+                max_batch_length_sum=55_000.0,
+                priority_tiers_by_family={family: 0 for family in families},
+            )
+    expected_count = sum(len(machine_ids) for machine_ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.values())
+    if len(machines) != expected_count:
+        print(
+            "[ERROR][Phase2.merged.build_mixed_phase2_training_machines] "
+            f"cause=machine_count_mismatch expected={expected_count} actual={len(machines)}"
+        )
+        raise RuntimeError("MIXED Phase 2 mapped machine count mismatch")
+    return machines
 
 
 def _score_field_names(score_mode: str) -> list[str]:
@@ -145,7 +195,6 @@ def train_phase2_batch_machine_self_labeling(
     phase1_bay_ids: Sequence[str] | None = None,
     phase1_assignment_builder: Callable[[Mapping[str, object], int], Mapping[str, str]] | None = None,
     phase1_bay_capacity_weights: Mapping[str, int | float] | None = None,
-    phase1_long_cut_hard_mask: bool = True,
     validation_every: int = 100,
     validation_episodes: int = 20,
     validation_rollout_samples: int | None = None,
@@ -204,7 +253,6 @@ def train_phase2_batch_machine_self_labeling(
         max_wo_count=max_wo_count,
         max_length_sum=max_length_sum,
         phase1_bay_capacity_weights=resolved_phase1_capacity_weights,
-        phase1_long_cut_hard_mask=phase1_long_cut_hard_mask,
         constraint_profile=resolved_constraint_profile,
         heuristic_algorithms=heuristic_algorithms,
         train_rollout_samples=rollout_samples,
@@ -307,7 +355,6 @@ def train_phase2_batch_machine_self_labeling(
             phase1_assignment_builder=phase1_assignment_builder,
             phase1_assignment_seed=episode,
             phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-            long_cut_hard_mask=phase1_long_cut_hard_mask,
         )
         loss, best, candidates, subproblem_rows = _train_one_episode(
             model=model,
@@ -367,7 +414,6 @@ def train_phase2_batch_machine_self_labeling(
                     phase1_assignment_builder=phase1_assignment_builder,
                     phase1_assignment_seed=episode * 1_000_000 + validation_episode,
                     phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-                    long_cut_hard_mask=phase1_long_cut_hard_mask,
                 )
                 validation_candidates = build_phase2_batch_machine_candidate_bank(
                     jobs=validation_jobs,
@@ -1946,7 +1992,6 @@ def _phase1_assignments_for_episode(
     phase1_assignment_builder: Callable[[Mapping[str, object], int], Mapping[str, str]] | None,
     phase1_assignment_seed: int,
     phase1_bay_capacity_weights: Mapping[str, int | float] | None,
-    long_cut_hard_mask: bool,
 ) -> Mapping[str, str]:
     if phase1_assignment_builder is not None:
         if fixed_assignments or phase1_heuristic is not None:
@@ -1965,7 +2010,6 @@ def _phase1_assignments_for_episode(
         jobs=jobs,
         bay_ids=tuple(str(bay_id) for bay_id in phase1_bay_ids),
         algorithm=phase1_heuristic,
-        long_cut_hard_mask=long_cut_hard_mask,
         bay_capacity_weights=phase1_bay_capacity_weights,
     )
     return candidate.assignments

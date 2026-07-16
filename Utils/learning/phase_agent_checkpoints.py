@@ -19,10 +19,13 @@ from Phase2.state import (
     phase2_state_feature_schema,
 )
 from Phase1.pair_self_labeling import (
-    PHASE1_PAIR_ENV_FEATURE_NAMES,
-    PHASE1_PAIR_FEATURE_NAMES,
+    phase1_pair_feature_schema,
 )
 from Phase1.pointer_policy import Phase1PairPointerPolicy
+from Utils.phase1.multi_series_rules import (
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_MULTI_SERIES_SCOPE_VERSION,
+)
 
 
 def load_phase1_pair_pointer_checkpoint(checkpoint_path: str | Path) -> Phase1PairPointerPolicy:
@@ -36,16 +39,22 @@ def load_phase1_pair_pointer_checkpoint(checkpoint_path: str | Path) -> Phase1Pa
             f"cause=invalid_hidden_dim hidden_dim={hidden_dim} path={path}"
         )
         raise RuntimeError("Phase 1 checkpoint hidden_dim is invalid")
+    feature_schema = phase1_pair_feature_schema()
     model = Phase1PairPointerPolicy(
-        pair_feature_dim=len(PHASE1_PAIR_FEATURE_NAMES),
-        env_feature_dim=len(PHASE1_PAIR_ENV_FEATURE_NAMES),
+        pair_feature_dim=len(feature_schema["pair"]),
+        env_feature_dim=len(feature_schema["env"]),
         hidden_dim=hidden_dim,
+        rule_profile=MULTI_SERIES_RULE_PROFILE,
+        score_mode="wo_first",
     )
     model.load_state_dict(checkpoint["model_state_dict"])
+    model.episode_scope_version = PHASE1_MULTI_SERIES_SCOPE_VERSION
     model.eval()
     print(
         "[CHECK][phase_agent_checkpoints.load_phase1_pair_pointer_checkpoint] "
-        f"path={path} hidden_dim={hidden_dim}"
+        f"path={path} hidden_dim={hidden_dim} rule_profile={MULTI_SERIES_RULE_PROFILE} "
+        f"score_mode=wo_first pair_feature_dim={len(feature_schema['pair'])} "
+        f"env_feature_dim={len(feature_schema['env'])}"
     )
     return model
 
@@ -113,16 +122,45 @@ def _load_phase1_checkpoint_payload(
             f"cause=invalid_payload_type path={path} type={type(checkpoint).__name__}"
         )
         raise RuntimeError(f"invalid Phase 1 checkpoint payload: {path}")
-    if checkpoint.get("pair_feature_names") != PHASE1_PAIR_FEATURE_NAMES:
+    rule_profile = checkpoint.get("rule_profile")
+    score_mode = checkpoint.get("score_mode")
+    if rule_profile is None or score_mode is None:
         print(
             "[ERROR][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
-            f"cause=pair_feature_mismatch path={path}"
+            f"cause=incomplete_policy_contract path={path} "
+            f"rule_profile={rule_profile} score_mode={score_mode}"
+        )
+        raise RuntimeError("Phase 1 checkpoint policy contract is incomplete")
+
+    rule_profile = str(rule_profile)
+    score_mode = str(score_mode)
+    if rule_profile != MULTI_SERIES_RULE_PROFILE or score_mode != "wo_first":
+        print(
+            "[ERROR][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
+            f"cause=invalid_policy_contract path={path} rule_profile={rule_profile} "
+            f"score_mode={score_mode}"
+        )
+        raise RuntimeError("only MIXED/wo_first Phase 1 checkpoints are supported")
+    expected_scope_version = PHASE1_MULTI_SERIES_SCOPE_VERSION
+    checkpoint_scope_version = checkpoint.get("episode_scope_version")
+    if checkpoint_scope_version != expected_scope_version:
+        print(
+            "[ERROR][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
+            f"cause=episode_scope_contract_mismatch path={path} "
+            f"checkpoint={checkpoint_scope_version} expected={expected_scope_version}"
+        )
+        raise RuntimeError("Phase 1 checkpoint episode scope contract is invalid")
+    feature_schema = phase1_pair_feature_schema()
+    if checkpoint.get("pair_feature_names") != feature_schema["pair"]:
+        print(
+            "[ERROR][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
+            f"cause=pair_feature_mismatch path={path} rule_profile={rule_profile}"
         )
         raise RuntimeError("Phase 1 checkpoint pair features do not match current code")
-    if checkpoint.get("env_feature_names") != PHASE1_PAIR_ENV_FEATURE_NAMES:
+    if checkpoint.get("env_feature_names") != feature_schema["env"]:
         print(
             "[ERROR][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
-            f"cause=env_feature_mismatch path={path}"
+            f"cause=env_feature_mismatch path={path} rule_profile={rule_profile}"
         )
         raise RuntimeError("Phase 1 checkpoint env features do not match current code")
     if not isinstance(checkpoint.get("model_state_dict"), Mapping):
@@ -131,7 +169,11 @@ def _load_phase1_checkpoint_payload(
             f"cause=missing_model_state path={path}"
         )
         raise RuntimeError("Phase 1 checkpoint model state is missing")
-    return path, checkpoint
+    normalized_checkpoint = dict(checkpoint)
+    normalized_checkpoint["rule_profile"] = rule_profile
+    normalized_checkpoint["score_mode"] = score_mode
+    normalized_checkpoint["episode_scope_version"] = checkpoint_scope_version
+    return path, normalized_checkpoint
 
 
 def load_phase2_set_pointer_checkpoint(

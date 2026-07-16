@@ -1,18 +1,8 @@
-"""Phase 1 direct pair-action self-labeling.
+"""MIXED Phase 1 direct pair-action self-labeling.
 
-This is the replacement path for the weak split action model:
-
-    old: SELECT_BLOCK -> SELECT_BAY
-    new: SELECT_PAIR(block, bay)
-
-The pair features include projected objective deltas, so the policy scores the
-actual decision unit used by the workload-balancing objective.
-
-입출력 요약:
-- 입력: episode별 Job-like mapping, Bay 후보(`22,23,24`), heuristic bank, 학습 설정.
-- 내부 후보: 매 step마다 가능한 모든 `(block_set_id, bay_id)` pair.
-- pseudo-label: agent rollout 후보와 8개 휴리스틱 후보 중 목적함수 tuple이 가장 작은 complete assignment.
-- 출력: checkpoint, metrics.csv, candidate_summary.csv, best_action_table.jsonl, validation CSV/PNG.
+한 episode의 NP/NC/FN/FL block-series 의사결정 단위를 다섯 Bay에 배정한다.
+정책 계약은 `(block-series, Bay)` pair, 설비 수 정규화 W/O→CUT→BV 사전식
+목적함수, 확정 hard mask로 하나뿐이다.
 """
 
 # LINE-BY-LINE: 미래 타입 힌트를 문자열로 늦게 평가합니다. 사용: Python 버전별 annotation 충돌을 줄입니다.
@@ -24,8 +14,6 @@ import csv
 import io
 # LINE-BY-LINE: JSON/JSONL 저장에 사용합니다. 예: score_json, best_action_table.jsonl, summary.json.
 import json
-# LINE-BY-LINE: 실적 W/O 수치가 유한한지 검증하기 위해 사용합니다.
-import math
 # LINE-BY-LINE: CSV field size limit을 플랫폼 안전하게 키울 때 사용합니다.
 import sys
 # LINE-BY-LINE: `dataclass`는 transition/candidate record class를 간결하게 정의하는 데 사용합니다.
@@ -57,35 +45,52 @@ from Utils.phase1.phase1_bay_balancer import (
     _normalize_bay_capacity_weights,
     _normalize_bay_ids,
     _require_capacity_weight,
+    _validate_multi_series_plan_scope,
 )
 # LINE-BY-LINE: 가변 Bay 수를 지원하는 graph edge feature schema와 graph builder입니다. 고정 `bay_22_flag`를 대체합니다.
-from Utils.learning.phase_graph_mdp import PHASE1_BLOCK_BAY_EDGE_FEATURES, build_phase1_block_bay_graph
+from Utils.learning.phase_graph_mdp import (
+    PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES,
+    build_phase1_block_bay_graph,
+)
+from Utils.phase1.multi_series_rules import (
+    GROUP_BAY_CAPACITY_WEIGHTS,
+    MULTI_SERIES_RULE_PROFILE,
+    PHASE1_BALANCING_GROUP_ORDER,
+    PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    add_multi_series_group_load,
+    initialize_multi_series_group_loads,
+    joint_phase1_bay_capacity_weights,
+    multi_series_group_load_value,
+)
 # LINE-BY-LINE: 8개 휴리스틱 후보 bank와 complete heuristic assignment 생성 함수를 재사용합니다.
-from Phase1.self_labeling import (
-    PHASE1_SELF_LABEL_HEURISTIC_BANK,
+from Phase1.heuristics import (
+    PHASE1_HEURISTIC_BANK,
     run_phase1_heuristic_candidate,
 )
 
 
-# LINE-BY-LINE: pair 후보 하나의 feature 이름 목록입니다. graph edge schema를 그대로 써서 Bay 22/23/24 고정 one-hot을 제거합니다.
-PHASE1_PAIR_FEATURE_NAMES = list(PHASE1_BLOCK_BAY_EDGE_FEATURES)
-# LINE-BY-LINE: 전체 환경 상태 feature 이름입니다. 후보별 edge feature에 들어가지 않는 전역 진행률/gap만 둡니다.
+# MIXED pair 후보는 W/O-first 부하, 계열 그룹, NP hard mask 상태를 포함한다.
+PHASE1_PAIR_FEATURE_NAMES = list(PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES)
+# 전역 상태는 설비 수로 정규화한 W/O/CUT/BV gap과 진행률만 사용한다.
 PHASE1_PAIR_ENV_FEATURE_NAMES = [
-    # LINE-BY-LINE: 현재까지 배정 완료된 block 비율입니다.
     "progress_ratio",
-    # LINE-BY-LINE: 아직 남은 block 비율입니다.
     "remaining_block_ratio",
-    # LINE-BY-LINE: 현재 Bay별 강재수량 max-min gap 비율입니다.
-    "steel_gap_ratio",
-    # LINE-BY-LINE: 현재 Bay별 절단장 max-min gap 비율입니다.
+    "wo_gap_ratio",
     "cut_gap_ratio",
-    # LINE-BY-LINE: 현재 Bay별 베벨수량 max-min gap 비율입니다.
     "bevel_gap_ratio",
 ]
 # LINE-BY-LINE: capacity-normalized 목적함수 tuple을 CSV에 score_0~score_2로 저장하기 위한 고정 column 이름입니다.
 PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(3)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
+
+
+def phase1_pair_feature_schema() -> Dict[str, List[str]]:
+    """유일한 MIXED pair/env feature 계약을 반환한다."""
+    return {
+        "pair": list(PHASE1_PAIR_FEATURE_NAMES),
+        "env": list(PHASE1_PAIR_ENV_FEATURE_NAMES),
+    }
 
 
     # LINE-BY-LINE: `Phase1PairTransition`은 학습 pseudo-label 한 step을 담는 immutable record입니다.
@@ -124,10 +129,6 @@ class Phase1PairCandidate:
     assignments: Dict[str, str]
     # LINE-BY-LINE: 최종 Bay별 누적 부하입니다. 목적함수 점수와 CSV report에 사용합니다.
     bay_loads: Dict[str, Dict[str, int | float]]
-    # LINE-BY-LINE: Phase 1 feasible assignment으로 표현할 수 없는 실적 baseline은 순위에서 제외합니다.
-    comparison_only: bool = False
-    # LINE-BY-LINE: 실적 baseline이 위반한 Phase 1 hard 제약 횟수입니다.
-    constraint_violation_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,10 @@ class _Phase1PairEpisodeCache:
     block_by_id: Dict[str, Phase1Block]
     # LINE-BY-LINE: env feature denominator입니다. 기존 `_problem_totals(blocks)`와 동일합니다.
     env_totals: Dict[str, float]
+    # LINE-BY-LINE: 현재 profile에서 model에 입력되는 pair feature 이름입니다.
+    pair_feature_names: Tuple[str, ...]
+    # LINE-BY-LINE: 현재 profile에서 model에 입력되는 env feature 이름입니다.
+    env_feature_names: Tuple[str, ...]
 
 
 Phase2FeedbackScorer = Callable[
@@ -158,38 +163,24 @@ def build_phase1_pair_candidates(
     bay_loads: Mapping[str, Mapping[str, int | float]] | None = None,
     remaining_block_ids: Sequence[str] | None = None,
     assigned_block_count: int = 0,
-    long_cut_hard_mask: bool = True,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
 ) -> List[Dict]:
-    """Build direct `(block, bay)` candidates for the current Phase 1 state.
-
-    입력 예시:
-    - `jobs`: `{job_id: JobLike}`. 여러 W/O가 같은 block_set_id를 가질 수 있다.
-    - `bay_ids`: `["22", "23", "24"]`.
-    - `bay_loads`: 현재까지 Bay별 누적 부하. None이면 모두 0으로 시작.
-    - `remaining_block_ids`: 아직 배정하지 않은 block만 후보로 만들 때 사용.
-    - `long_cut_hard_mask`: True면 장척 block의 Bay24 후보를 제거하고, False면 평가 실험용으로 Bay24 후보를 유지.
-
-    출력 예시:
-    - `[{"action_id": "PROJ_1::BLK_2@22", "features": [...]}, ...]`
-    """
+    """현재 MIXED state에서 가능한 `(block-series, Bay)` 후보를 만든다."""
 
     # LINE-BY-LINE: Bay ID를 문자열 tuple로 정규화하고, 빈 Bay 입력이면 여기서 실패합니다.
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
-    # LINE-BY-LINE: W/O job들을 block_set_id 기준으로 묶고, 강재수량/절단장/베벨수량 등을 block 단위로 합산합니다.
-    blocks = _collect_blocks(
-        jobs=jobs,
-        bay_ids=normalized_bay_ids,
-        require_multi_objective=True,
-        long_cut_hard_mask=long_cut_hard_mask,
+    normalized_capacity_weights = _normalize_bay_capacity_weights(
+        normalized_bay_ids,
+        bay_capacity_weights,
     )
+    # LINE-BY-LINE: W/O job들을 block_set_id 기준으로 묶고, 강재수량/절단장/베벨수량 등을 block 단위로 합산합니다.
+    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids)
+    _validate_multi_series_plan_scope(blocks, normalized_bay_ids, normalized_capacity_weights)
     # LINE-BY-LINE: 남은 block 목록이 외부에서 오면 그것만 사용하고, 없으면 전체 block을 남은 후보로 봅니다.
     remaining = set(remaining_block_ids) if remaining_block_ids is not None else {block.block_set_id for block in blocks}
     # LINE-BY-LINE: 현재 Bay별 부하를 복사합니다. 원본 dict를 직접 수정하지 않기 위해 새 dict를 만듭니다.
     current_loads = (
-        create_phase1_planning_state(
-            _normalize_bay_capacity_weights(normalized_bay_ids, bay_capacity_weights)
-        ).bay_loads
+        _create_pair_planning_state(normalized_capacity_weights).bay_loads
         if bay_loads is None
         else {str(bay_id): dict(loads) for bay_id, loads in bay_loads.items()}
     )
@@ -199,7 +190,7 @@ def build_phase1_pair_candidates(
         bay_ids=normalized_bay_ids,
         bay_loads=current_loads,
         assigned_block_ids={block.block_set_id for block in blocks if block.block_set_id not in remaining},
-        long_cut_hard_mask=long_cut_hard_mask,
+        bay_capacity_weights=normalized_capacity_weights,
     )
     # LINE-BY-LINE: 반환할 pair 후보 row를 누적합니다.
     candidates: List[Dict] = []
@@ -228,7 +219,6 @@ def build_phase1_pair_candidates(
 def _build_phase1_pair_episode_cache(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
-    long_cut_hard_mask: bool,
     bay_capacity_weights: Mapping[str, int | float] | None,
 ) -> _Phase1PairEpisodeCache:
     """Build immutable Phase 1 values once per rollout episode."""
@@ -238,25 +228,22 @@ def _build_phase1_pair_episode_cache(
     # LINE-BY-LINE: 설비 수 가중치를 한 번만 정규화합니다. 이후 step에서는 이 값을 그대로 씁니다.
     capacity_weights = _normalize_bay_capacity_weights(normalized_bay_ids, bay_capacity_weights)
     # LINE-BY-LINE: 가장 비싼 block 집계를 episode 시작 시 1회만 수행합니다.
-    blocks = tuple(
-        _collect_blocks(
-            jobs=jobs,
-            bay_ids=normalized_bay_ids,
-            require_multi_objective=True,
-            long_cut_hard_mask=long_cut_hard_mask,
-        )
-    )
+    blocks = tuple(_collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids))
+    _validate_multi_series_plan_scope(blocks, normalized_bay_ids, capacity_weights)
     # LINE-BY-LINE: block id 중복은 같은 block이 두 개의 의사결정 단위가 되는 오류라 즉시 실패시킵니다.
     block_by_id = {block.block_set_id: block for block in blocks}
     if len(block_by_id) != len(blocks):
         print("[ERROR][phase1_pair_self_labeling._build_phase1_pair_episode_cache] cause=duplicate_block_id")
         raise RuntimeError("duplicate Phase 1 block id")
+    feature_schema = phase1_pair_feature_schema()
     return _Phase1PairEpisodeCache(
         bay_ids=normalized_bay_ids,
         bay_capacity_weights=capacity_weights,
         blocks=blocks,
         block_by_id=block_by_id,
-        env_totals=_problem_totals(blocks),
+        env_totals=_problem_totals(blocks, capacity_weights),
+        pair_feature_names=tuple(feature_schema["pair"]),
+        env_feature_names=tuple(feature_schema["env"]),
     )
 
 
@@ -287,28 +274,55 @@ def _build_phase1_pair_candidates_from_cache(
             )
             raise RuntimeError(f"unknown remaining Phase 1 block: {block_id}")
         for bay_id in block.allowed_bay_ids:
-            score = _phase1_projected_pair_score(bay_loads, bay_id, block)
+            score = _phase1_projected_pair_score(
+                bay_loads,
+                bay_id,
+                block,
+            )
+            group_flags = _phase1_pair_group_flags(block)
+            group_wo_average = totals[
+                _phase1_pair_group_average_key(block.balancing_group, "wo_count")
+            ]
+            group_cut_average = totals[
+                _phase1_pair_group_average_key(block.balancing_group, "cut_length_sum")
+            ]
+            group_bevel_average = totals[
+                _phase1_pair_group_average_key(block.balancing_group, "bevel_quantity_sum")
+            ]
+            features = [
+                _phase1_pair_ratio(block.wo_count, totals["wo_count"]),
+                _phase1_pair_ratio(block.cut_length_sum, totals["cut_length_sum"]),
+                _phase1_pair_ratio(block.bevel_quantity_sum, totals["bevel_quantity_sum"]),
+                *group_flags,
+                float(block.wide_plate_over_4500),
+                float(block.cnt_block),
+                float(block.long_cut_over_1000),
+                _phase1_group_capacity_load_ratio(
+                    bay_loads[bay_id], block.balancing_group, "wo_count", group_wo_average
+                ),
+                _phase1_group_capacity_load_ratio(
+                    bay_loads[bay_id], block.balancing_group, "cut_length_sum", group_cut_average
+                ),
+                _phase1_group_capacity_load_ratio(
+                    bay_loads[bay_id], block.balancing_group, "bevel_quantity_sum", group_bevel_average
+                ),
+                _phase1_pair_ratio(
+                    _require_capacity_weight(
+                        bay_loads[bay_id], f"pair_candidate:{block_id}@{bay_id}"
+                    ),
+                    totals["capacity_weight_sum"],
+                ),
+                _phase1_pair_ratio(score[0], totals["wo_per_capacity_average"]),
+                _phase1_pair_ratio(score[1], totals["cut_per_capacity_average"]),
+                _phase1_pair_ratio(score[2], totals["bevel_per_capacity_average"]),
+            ]
             candidates.append(
                 {
                     "action_id": f"{block.block_set_id}@{bay_id}",
                     "block_set_id": block.block_set_id,
                     "bay_id": bay_id,
-                    "feature_names": list(PHASE1_PAIR_FEATURE_NAMES),
-                    "features": [
-                        _phase1_pair_ratio(block.steel_quantity_sum, totals["steel_quantity_sum"]),
-                        _phase1_pair_ratio(block.cut_length_sum, totals["cut_length_sum"]),
-                        _phase1_pair_ratio(block.bevel_quantity_sum, totals["bevel_quantity_sum"]),
-                        _phase1_pair_ratio(bay_loads[bay_id]["steel_quantity_sum"], totals["steel_quantity_sum"]),
-                        _phase1_pair_ratio(bay_loads[bay_id]["cut_length_sum"], totals["cut_length_sum"]),
-                        _phase1_pair_ratio(bay_loads[bay_id]["bevel_quantity_sum"], totals["bevel_quantity_sum"]),
-                        _phase1_pair_ratio(
-                            _require_capacity_weight(bay_loads[bay_id], f"pair_candidate:{block_id}@{bay_id}"),
-                            totals["capacity_weight_sum"],
-                        ),
-                        _phase1_pair_ratio(score[0], totals["steel_quantity_sum"]),
-                        _phase1_pair_ratio(score[1], totals["cut_length_sum"]),
-                        _phase1_pair_ratio(score[2], totals["bevel_quantity_sum"]),
-                    ],
+                    "feature_names": list(cache.pair_feature_names),
+                    "features": features,
                 }
             )
     if not candidates:
@@ -336,34 +350,89 @@ def _phase1_pair_graph_totals(
 ) -> Dict[str, float]:
     """Return denominator values matching `Utils.learning.phase_graph_mdp._phase1_totals` for edge features."""
 
-    return {
-        "steel_quantity_sum": _phase1_positive_total(
-            sum(block.steel_quantity_sum for block in blocks)
-            + sum(float(row["steel_quantity_sum"]) for row in bay_loads.values()),
-            "phase1 steel_quantity_sum",
+    capacity_weight_sum = max(
+        1.0,
+        sum(
+            _require_capacity_weight(row, f"pair_totals:{bay_id}")
+            for bay_id, row in bay_loads.items()
         ),
-        "cut_length_sum": _phase1_positive_total(
-            sum(block.cut_length_sum for block in blocks)
-            + sum(float(row["cut_length_sum"]) for row in bay_loads.values()),
-            "phase1 cut_length_sum",
-        ),
-        "bevel_quantity_sum": max(
-            1.0,
-            sum(block.bevel_quantity_sum for block in blocks)
-            + sum(float(row["bevel_quantity_sum"]) for row in bay_loads.values()),
-        ),
-        "block_count": max(
-            1.0,
-            len(blocks) + sum(float(row["block_count"]) for row in bay_loads.values()),
-        ),
-        "capacity_weight_sum": max(
-            1.0,
-            sum(
-                _require_capacity_weight(row, f"pair_totals:{bay_id}")
-                for bay_id, row in bay_loads.items()
-            ),
-        ),
+    )
+    wo_count = _phase1_positive_total(
+        sum(block.wo_count for block in blocks),
+        "phase1 wo_count",
+    )
+    cut_length_sum = _phase1_positive_total(
+        sum(block.cut_length_sum for block in blocks),
+        "phase1 cut_length_sum",
+    )
+    bevel_quantity_sum = max(
+        1.0,
+        sum(block.bevel_quantity_sum for block in blocks),
+    )
+    result = {
+        "wo_count": wo_count,
+        "cut_length_sum": cut_length_sum,
+        "bevel_quantity_sum": bevel_quantity_sum,
+        "capacity_weight_sum": capacity_weight_sum,
+        "wo_per_capacity_average": wo_count / capacity_weight_sum,
+        "cut_per_capacity_average": cut_length_sum / capacity_weight_sum,
+        "bevel_per_capacity_average": max(1.0, bevel_quantity_sum / capacity_weight_sum),
     }
+    present_groups = {block.balancing_group for block in blocks}
+    group_averages: Dict[str, Dict[str, float]] = {}
+    for group in PHASE1_BALANCING_GROUP_ORDER:
+        group_blocks = [block for block in blocks if block.balancing_group == group]
+        group_capacity_sum = sum(GROUP_BAY_CAPACITY_WEIGHTS[group].values())
+        raw_averages = {
+            "wo_count": sum(block.wo_count for block in group_blocks) / group_capacity_sum,
+            "cut_length_sum": sum(block.cut_length_sum for block in group_blocks) / group_capacity_sum,
+            "bevel_quantity_sum": sum(block.bevel_quantity_sum for block in group_blocks) / group_capacity_sum,
+        }
+        group_averages[group] = raw_averages
+        for metric, raw_average in raw_averages.items():
+            result[_phase1_pair_group_average_key(group, metric)] = max(1.0, raw_average)
+    result["wo_per_capacity_average"] = max(
+        1.0, sum(group_averages[group]["wo_count"] for group in present_groups)
+    )
+    result["cut_per_capacity_average"] = max(
+        1.0, sum(group_averages[group]["cut_length_sum"] for group in present_groups)
+    )
+    result["bevel_per_capacity_average"] = max(
+        1.0, sum(group_averages[group]["bevel_quantity_sum"] for group in present_groups)
+    )
+    return result
+
+
+def _phase1_pair_group_flags(block: Phase1Block) -> List[float]:
+    """다계열 block의 평준화 그룹 one-hot을 반환한다."""
+
+    groups = ("NP", "FN_FL", "NC")
+    if block.balancing_group not in groups:
+        print(
+            "[ERROR][phase1_pair_self_labeling._phase1_pair_group_flags] "
+            f"cause=unknown_balancing_group block_set_id={block.block_set_id} group={block.balancing_group}"
+        )
+        raise RuntimeError(f"unknown Phase 1 balancing group: {block.balancing_group}")
+    return [1.0 if block.balancing_group == group else 0.0 for group in groups]
+
+
+def _phase1_group_capacity_load_ratio(
+    loads: Mapping[str, int | float],
+    group: str,
+    metric: str,
+    average_per_capacity: float,
+) -> float:
+    """현재 후보 block과 같은 평준화 그룹의 Bay 부하만 정규화한다."""
+
+    capacity = _require_capacity_weight(loads, f"pair_group_load:{group}:{metric}")
+    return _phase1_pair_ratio(
+        multi_series_group_load_value(loads, group, metric) / capacity,
+        average_per_capacity,
+    )
+
+
+def _phase1_pair_group_average_key(group: str, metric: str) -> str:
+    return f"group_{group.lower()}_{metric}_per_capacity_average"
 
 
 def _phase1_positive_total(value: int | float, label: str) -> float:
@@ -393,8 +462,7 @@ def train_phase1_pair_self_labeling(
     output_dir: str | Path,
     episodes: int,
     rollout_samples: int = 4,
-    heuristic_algorithms: Sequence[str] = PHASE1_SELF_LABEL_HEURISTIC_BANK,
-    score_mode: str = "steel_first",
+    heuristic_algorithms: Sequence[str] = PHASE1_HEURISTIC_BANK,
     lr: float = 1e-3,
     hidden_dim: int = 128,
     temperature: float = 1.0,
@@ -416,7 +484,7 @@ def train_phase1_pair_self_labeling(
     학습 절차:
     1. episode 문제를 하나 가져온다.
     2. 현재 policy rollout 후보 K개를 만든다. 첫 번째는 greedy, 나머지는 sample.
-    3. 8개 휴리스틱 complete assignment 후보를 만든다.
+    3. 3개 MIXED dispatching 휴리스틱 complete assignment 후보를 만든다.
     4. 목적함수 tuple 기준 best 후보 하나를 pseudo-label로 선택한다.
     5. best 후보의 step별 선택 index를 cross entropy target으로 학습한다.
     6. 일정 주기마다 checkpoint와 validation report를 저장한다.
@@ -442,6 +510,7 @@ def train_phase1_pair_self_labeling(
         phase2_feedback_contract,
     )
     normalized_feedback_contract = _normalize_phase2_feedback_contract(phase2_feedback_contract)
+    feature_schema = phase1_pair_feature_schema()
     # LINE-BY-LINE: PyTorch 난수 seed를 고정해 같은 입력에서 같은 초기 모델/샘플링을 재현합니다.
     torch.manual_seed(seed)
     # LINE-BY-LINE: 학습 device를 검증합니다. CUDA 요청 시 사용 불가하면 CPU로 조용히 내려가지 않고 실패합니다.
@@ -454,9 +523,11 @@ def train_phase1_pair_self_labeling(
     output_path.mkdir(parents=True, exist_ok=True)
     # LINE-BY-LINE: graph edge 기반 pair feature와 전역 env feature를 받는 pointer policy를 생성합니다.
     model = Phase1PairPointerPolicy(
-        pair_feature_dim=len(PHASE1_PAIR_FEATURE_NAMES),
-        env_feature_dim=len(PHASE1_PAIR_ENV_FEATURE_NAMES),
+        pair_feature_dim=len(feature_schema["pair"]),
+        env_feature_dim=len(feature_schema["env"]),
         hidden_dim=hidden_dim,
+        rule_profile=MULTI_SERIES_RULE_PROFILE,
+        score_mode="wo_first",
     ).to(torch_device)
     # LINE-BY-LINE: Adam optimizer를 생성합니다. 학습 대상은 model parameter 전체입니다.
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -475,6 +546,7 @@ def train_phase1_pair_self_labeling(
             path=resume_path,
             hidden_dim=hidden_dim,
             phase2_feedback_contract=normalized_feedback_contract,
+            feature_schema=feature_schema,
         ) + 1
         _move_optimizer_state(optimizer, torch_device)
     # LINE-BY-LINE: resume 시 기존 metrics.csv에서 start_episode 이전 row만 보존합니다.
@@ -500,6 +572,8 @@ def train_phase1_pair_self_labeling(
     print(f"- rollout_samples: {rollout_samples}")
     print(f"- validation_rollout_samples: {resolved_validation_rollout_samples}")
     print(f"- heuristic_algorithms: {','.join(heuristic_algorithms)}")
+    print(f"- rule_profile: {MULTI_SERIES_RULE_PROFILE}")
+    print("- score_mode: wo_first")
     print(f"- episode_mode: {'on_the_fly' if episode_factory is not None else 'prebuilt'}")
     print(f"- resume_checkpoint: {resume_path or ''}")
     print(f"- device: {torch_device}")
@@ -508,6 +582,11 @@ def train_phase1_pair_self_labeling(
     for episode in range(start_episode, episodes + 1):
         # LINE-BY-LINE: 현재 episode의 Job-like mapping과 metadata를 가져옵니다. on-the-fly factory도 여기서 호출됩니다.
         jobs, metadata = _episode_payload(episode, episode_jobs, episode_metadata, episode_factory)
+        episode_bay_ids, episode_capacity_weights = _resolve_phase1_episode_scope(
+            metadata=metadata,
+            default_bay_ids=normalized_bay_ids,
+            default_capacity_weights=normalized_capacity_weights,
+        )
         # LINE-BY-LINE: problem_id는 출력 CSV/JSONL에서 episode 문제를 식별하는 이름입니다.
         problem_id = str(metadata.get("problem_id") or metadata.get("episode_id") or f"EP{episode:05d}")
         # LINE-BY-LINE: block_count는 로그와 CSV audit에 저장하는 문제 크기입니다.
@@ -532,23 +611,23 @@ def train_phase1_pair_self_labeling(
             candidates.append(
                 run_phase1_pair_policy_rollout(
                     jobs=jobs,
-                    bay_ids=normalized_bay_ids,
+                    bay_ids=episode_bay_ids,
                     model=model,
                     temperature=temperature,
                     seed=seed + episode * 1000 + sample_index,
                     source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
                     selection="greedy" if is_greedy else "sample",
-                    bay_capacity_weights=normalized_capacity_weights,
+                    bay_capacity_weights=episode_capacity_weights,
                 )
             )
-        # LINE-BY-LINE: 8개 휴리스틱 complete assignment도 같은 후보 bank에 추가합니다.
+        # LINE-BY-LINE: 3개 MIXED 휴리스틱 complete assignment도 같은 후보 bank에 추가합니다.
         for algorithm in heuristic_algorithms:
             candidates.append(
                 _run_phase1_pair_heuristic_candidate(
                     jobs,
-                    normalized_bay_ids,
+                    episode_bay_ids,
                     algorithm,
-                    bay_capacity_weights=normalized_capacity_weights,
+                    bay_capacity_weights=episode_capacity_weights,
                 )
             )
 
@@ -557,8 +636,7 @@ def train_phase1_pair_self_labeling(
             id(candidate): _candidate_score_components(
                 candidate=candidate,
                 jobs=jobs,
-                bay_ids=normalized_bay_ids,
-                score_mode=score_mode,
+                bay_ids=episode_bay_ids,
                 phase2_feedback_scorer=phase2_feedback_scorer,
             )
             for candidate in candidates
@@ -583,7 +661,6 @@ def train_phase1_pair_self_labeling(
                     candidate_index=candidate_index,
                     candidate=candidate,
                     best=best,
-                    score_mode=score_mode,
                     score=candidate_scores[id(candidate)][0],
                     phase2_feedback_score=candidate_scores[id(candidate)][1],
                 )
@@ -640,6 +717,7 @@ def train_phase1_pair_self_labeling(
                 episode=episode,
                 validation_score=None,
                 phase2_feedback_contract=normalized_feedback_contract,
+                feature_schema=feature_schema,
             )
         # LINE-BY-LINE: validation factory가 있고 validation interval에 도달하면 holdout 검증을 실행합니다.
         if validation_episode_factory is not None and episode % validation_every == 0:
@@ -650,7 +728,6 @@ def train_phase1_pair_self_labeling(
                 validation_episodes=validation_episodes,
                 bay_ids=normalized_bay_ids,
                 heuristic_algorithms=heuristic_algorithms,
-                score_mode=score_mode,
                 episode=episode,
                 rollout_samples=resolved_validation_rollout_samples,
                 bay_capacity_weights=normalized_capacity_weights,
@@ -669,13 +746,9 @@ def train_phase1_pair_self_labeling(
                 output_path=output_path,
                 candidate_rows=validation_candidate_rows,
                 summary_rows=validation_rows,
-                score_mode=score_mode,
             )
-            # LINE-BY-LINE: 실적 validation이 있으면 actual_8days 평균 score를 best checkpoint 기준으로 우선 사용합니다.
-            current_score = validation["agent_mean_score_by_source"].get(
-                "actual_8days",
-                validation["agent_mean_score"],
-            )
+            # LINE-BY-LINE: 모든 MIXED validation 문제의 best-of-K 평균을 checkpoint 기준으로 사용합니다.
+            current_score = validation["agent_mean_score"]
             # LINE-BY-LINE: 이전 best보다 lexicographic score가 좋으면 best checkpoint를 갱신합니다.
             saved_best = best_validation_score is None or current_score < best_validation_score
             if saved_best:
@@ -688,6 +761,7 @@ def train_phase1_pair_self_labeling(
                     episode=episode,
                     validation_score=current_score,
                     phase2_feedback_contract=normalized_feedback_contract,
+                    feature_schema=feature_schema,
                 )
             # LINE-BY-LINE: validation 요약을 콘솔에 출력합니다. best_checkpoint_saved 여부가 핵심입니다.
             print(
@@ -710,6 +784,7 @@ def train_phase1_pair_self_labeling(
         episode=episodes,
         validation_score=None,
         phase2_feedback_contract=normalized_feedback_contract,
+        feature_schema=feature_schema,
     )
     # LINE-BY-LINE: Phase 2 feedback scorer 사용 여부와 score prefix 길이를 summary에 남깁니다. 사용: 서로 다른 학습 run 비교 시 같은 목적함수였는지 확인합니다.
     phase2_feedback_score_length = 0
@@ -739,7 +814,12 @@ def train_phase1_pair_self_labeling(
         "bay_ids": list(normalized_bay_ids),
         "bay_capacity_weights": dict(normalized_capacity_weights),
         "heuristic_algorithms": list(heuristic_algorithms),
-        "score_mode": score_mode,
+        "score_mode": "wo_first",
+        "rule_profile": MULTI_SERIES_RULE_PROFILE,
+        "episode_scope_mode": "joint_five_bay",
+        "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
+        "pair_feature_names": list(feature_schema["pair"]),
+        "env_feature_names": list(feature_schema["env"]),
         "score_field_names": list(PHASE1_SCORE_FIELD_NAMES),
         "best_source_counts": _source_counts(metrics_rows),
         "episode_mode": "on_the_fly" if episode_factory is not None else "prebuilt",
@@ -769,14 +849,9 @@ def run_phase1_pair_policy_rollout(
     seed: int,
     source: str,
     selection: str = "sample",
-    long_cut_hard_mask: bool = True,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
 ) -> Phase1PairCandidate:
-    """Sample one direct pair-action assignment.
-
-    `long_cut_hard_mask=False` is for evaluation-only ablation. Training/default
-    planning keeps the confirmed hard-mask behavior.
-    """
+    """MIXED hard mask를 지키며 complete pair assignment 하나를 생성한다."""
 
     if temperature <= 0:
         print(f"[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_rollout] cause=non_positive_temperature value={temperature}")
@@ -784,16 +859,16 @@ def run_phase1_pair_policy_rollout(
     if selection not in {"sample", "greedy"}:
         print(f"[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_rollout] cause=unknown_selection selection={selection}")
         raise RuntimeError(f"unknown pair rollout selection: {selection}")
+    _validate_pair_policy_model_contract(model)
     generator = torch.Generator()
     generator.manual_seed(int(seed))
     cache = _build_phase1_pair_episode_cache(
         jobs=jobs,
         bay_ids=bay_ids,
-        long_cut_hard_mask=long_cut_hard_mask,
         bay_capacity_weights=bay_capacity_weights,
     )
     blocks = list(cache.blocks)
-    planning_state = create_phase1_planning_state(cache.bay_capacity_weights)
+    planning_state = _create_pair_planning_state(cache.bay_capacity_weights)
     bay_loads = planning_state.bay_loads
     remaining = {block.block_set_id for block in blocks}
     transitions: List[Phase1PairTransition] = []
@@ -846,13 +921,37 @@ def run_phase1_pair_policy_rollout(
     )
 
 
+def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) -> None:
+    """모델이 유일한 MIXED feature 계약과 정확히 일치하는지 검증한다."""
+
+    if model is None:
+        return
+    model_rule_profile = getattr(model, "rule_profile", None)
+    model_score_mode = getattr(model, "score_mode", None)
+    if model_rule_profile != MULTI_SERIES_RULE_PROFILE or model_score_mode != "wo_first":
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_pair_policy_model_contract] "
+            f"cause=model_contract_mismatch model_profile={model_rule_profile} "
+            f"model_score={model_score_mode}"
+        )
+        raise RuntimeError("Phase 1 pair model must use the MIXED/wo_first contract")
+    feature_schema = phase1_pair_feature_schema()
+    if model.pair_feature_dim != len(feature_schema["pair"]) or model.env_feature_dim != len(feature_schema["env"]):
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_pair_policy_model_contract] "
+            "cause=model_feature_dim_mismatch "
+            f"pair={model.pair_feature_dim}/{len(feature_schema['pair'])} "
+            f"env={model.env_feature_dim}/{len(feature_schema['env'])}"
+        )
+        raise RuntimeError("Phase 1 pair model dimensions do not match the MIXED schema")
+
+
 def _validate_pair_policy(
     model: Phase1PairPointerPolicy,
     validation_episode_factory: Callable[[int], Mapping[str, object]],
     validation_episodes: int,
     bay_ids: Sequence[str],
     heuristic_algorithms: Sequence[str],
-    score_mode: str,
     episode: int,
     rollout_samples: int,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
@@ -863,10 +962,14 @@ def _validate_pair_policy(
     rows: List[Dict] = []
     candidate_rows: List[Dict] = []
     agent_scores: List[tuple] = []
-    agent_scores_by_source: Dict[str, List[tuple]] = {}
     agent_best_count = 0
     for validation_index in range(1, validation_episodes + 1):
         jobs, metadata = _episode_payload(validation_index, None, None, validation_episode_factory)
+        validation_bay_ids, validation_capacity_weights = _resolve_phase1_episode_scope(
+            metadata=metadata,
+            default_bay_ids=bay_ids,
+            default_capacity_weights=_normalize_bay_capacity_weights(bay_ids, bay_capacity_weights),
+        )
         problem_id = str(metadata.get("problem_id") or metadata.get("episode_id") or f"VAL{validation_index:05d}")
         block_count = int(metadata.get("block_count") or len(jobs))
         validation_source = str(metadata.get("validation_source") or "synthetic")
@@ -883,62 +986,45 @@ def _validate_pair_policy(
             candidates.append(
                 run_phase1_pair_policy_rollout(
                     jobs=jobs,
-                    bay_ids=bay_ids,
+                    bay_ids=validation_bay_ids,
                     model=model,
                     temperature=1.0,
                     seed=episode * 100_000 + validation_index * 1_000 + sample_index,
                     source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
                     selection="greedy" if is_greedy else "sample",
-                    bay_capacity_weights=bay_capacity_weights,
+                    bay_capacity_weights=validation_capacity_weights,
                 )
             )
         for algorithm in heuristic_algorithms:
             candidates.append(
                 _run_phase1_pair_heuristic_candidate(
                     jobs,
-                    bay_ids,
+                    validation_bay_ids,
                     algorithm,
-                    bay_capacity_weights=bay_capacity_weights,
+                    bay_capacity_weights=validation_capacity_weights,
                 )
             )
-        if validation_source == "actual_8days":
-            candidates.append(
-                _actual_assignment_candidate(
-                    jobs=jobs,
-                    bay_ids=bay_ids,
-                    problem_id=problem_id,
-                    bay_capacity_weights=bay_capacity_weights,
-                )
-            )
-        ranked_candidates = [candidate for candidate in candidates if not candidate.comparison_only]
-        if not ranked_candidates:
+        if not candidates:
             print(
                 "[ERROR][phase1_pair_self_labeling._validate_pair_policy] "
                 f"cause=no_rankable_candidates problem_id={problem_id}"
             )
             raise RuntimeError("validation has no rankable Phase 1 candidates")
-        candidate_scores: Dict[int, tuple[tuple, tuple | None, tuple | None]] = {}
-        for candidate in candidates:
-            if candidate.comparison_only:
-                candidate_scores[id(candidate)] = (
-                    _score_bay_loads(candidate.bay_loads, score_mode),
-                    None,
-                    None,
-                )
-            else:
-                candidate_scores[id(candidate)] = _candidate_score_components(
-                    candidate=candidate,
-                    jobs=jobs,
-                    bay_ids=bay_ids,
-                    score_mode=score_mode,
-                    phase2_feedback_scorer=phase2_feedback_scorer,
-                )
+        candidate_scores = {
+            id(candidate): _candidate_score_components(
+                candidate=candidate,
+                jobs=jobs,
+                bay_ids=validation_bay_ids,
+                phase2_feedback_scorer=phase2_feedback_scorer,
+            )
+            for candidate in candidates
+        }
         scored = [
             (
                 candidate_scores[id(candidate)][2],
                 candidate,
             )
-            for candidate in ranked_candidates
+            for candidate in candidates
         ]
         scored.sort(key=lambda item: item[0])
         rank_by_source = {
@@ -946,7 +1032,7 @@ def _validate_pair_policy(
             for rank, (_, candidate) in enumerate(scored, start=1)
         }
         # LINE-BY-LINE: Proposed 성능은 greedy 1개가 아니라 validation에서 만든 agent 후보 중 best-of-K로 계산합니다.
-        agent_candidates = [candidate for candidate in ranked_candidates if _is_agent_source(candidate.source)]
+        agent_candidates = [candidate for candidate in candidates if _is_agent_source(candidate.source)]
         best_agent_learning_score, best_agent_candidate = min(
             [
                 (
@@ -965,7 +1051,6 @@ def _validate_pair_policy(
         agent_is_best = int(agent_rank == 1)
         agent_best_count += agent_is_best
         agent_scores.append(agent_learning_score)
-        agent_scores_by_source.setdefault(validation_source, []).append(agent_learning_score)
         for candidate_index, candidate in enumerate(candidates, start=1):
             candidate_rows.append(
                 _validation_candidate_summary_row(
@@ -978,8 +1063,7 @@ def _validate_pair_policy(
                     candidate_index=candidate_index,
                     candidate=candidate,
                     best=best_candidate,
-                    rank=rank_by_source.get(candidate.source, ""),
-                    score_mode=score_mode,
+                    rank=rank_by_source[candidate.source],
                     score=candidate_scores[id(candidate)][0],
                     phase2_feedback_score=candidate_scores[id(candidate)][1],
                 )
@@ -1005,19 +1089,12 @@ def _validate_pair_policy(
                 "agent_is_best": agent_is_best,
                 "agent_rank": agent_rank,
                 "candidate_count": len(candidates),
-                "comparison_only_candidate_count": sum(
-                    1 for candidate in candidates if candidate.comparison_only
-                ),
             }
         )
     return {
         "rows": rows,
         "candidate_rows": candidate_rows,
         "agent_mean_score": _mean_score(agent_scores),
-        "agent_mean_score_by_source": {
-            source: _mean_score(source_scores)
-            for source, source_scores in sorted(agent_scores_by_source.items())
-        },
         "agent_best_rate": agent_best_count / validation_episodes,
     }
 
@@ -1036,6 +1113,7 @@ def _save_pair_checkpoint(
     episode: int,
     validation_score: tuple | None,
     phase2_feedback_contract: Mapping[str, object] | None,
+    feature_schema: Mapping[str, Sequence[str]],
 ) -> None:
     """Save an auditable pair-policy checkpoint."""
 
@@ -1043,8 +1121,11 @@ def _save_pair_checkpoint(
         {
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "pair_feature_names": PHASE1_PAIR_FEATURE_NAMES,
-            "env_feature_names": PHASE1_PAIR_ENV_FEATURE_NAMES,
+            "pair_feature_names": list(feature_schema["pair"]),
+            "env_feature_names": list(feature_schema["env"]),
+            "rule_profile": MULTI_SERIES_RULE_PROFILE,
+            "score_mode": "wo_first",
+            "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
             "hidden_dim": hidden_dim,
             "episode": episode,
             "validation_score": list(validation_score) if validation_score is not None else [],
@@ -1085,6 +1166,7 @@ def _load_pair_checkpoint(
     path: Path,
     hidden_dim: int,
     phase2_feedback_contract: Mapping[str, object] | None,
+    feature_schema: Mapping[str, Sequence[str]],
 ) -> int:
     """Load model/optimizer state and return the completed episode number."""
 
@@ -1096,13 +1178,30 @@ def _load_pair_checkpoint(
             f"cause=hidden_dim_mismatch checkpoint={checkpoint_hidden_dim} requested={hidden_dim} path={path}"
         )
         raise RuntimeError("resume checkpoint hidden_dim mismatch")
-    if checkpoint.get("pair_feature_names") != PHASE1_PAIR_FEATURE_NAMES:
+    checkpoint_rule_profile = checkpoint.get("rule_profile")
+    checkpoint_score_mode = checkpoint.get("score_mode")
+    if checkpoint_rule_profile != MULTI_SERIES_RULE_PROFILE or checkpoint_score_mode != "wo_first":
+        print(
+            "[ERROR][phase1_pair_self_labeling._load_pair_checkpoint] "
+            f"cause=policy_contract_mismatch path={path} "
+            f"checkpoint_profile={checkpoint_rule_profile} checkpoint_score={checkpoint_score_mode}"
+        )
+        raise RuntimeError("only MIXED/wo_first Phase 1 checkpoints are supported")
+    checkpoint_scope_version = checkpoint.get("episode_scope_version")
+    if checkpoint_scope_version != PHASE1_MULTI_SERIES_SCOPE_VERSION:
+        print(
+            "[ERROR][phase1_pair_self_labeling._load_pair_checkpoint] "
+            f"cause=episode_scope_contract_mismatch path={path} "
+            f"checkpoint={checkpoint_scope_version} expected={PHASE1_MULTI_SERIES_SCOPE_VERSION}"
+        )
+        raise RuntimeError("resume checkpoint Phase 1 episode scope contract mismatch")
+    if checkpoint.get("pair_feature_names") != list(feature_schema["pair"]):
         print(
             "[ERROR][phase1_pair_self_labeling._load_pair_checkpoint] "
             f"cause=pair_feature_names_mismatch path={path}"
         )
         raise RuntimeError("resume checkpoint pair features mismatch")
-    if checkpoint.get("env_feature_names") != PHASE1_PAIR_ENV_FEATURE_NAMES:
+    if checkpoint.get("env_feature_names") != list(feature_schema["env"]):
         print(
             "[ERROR][phase1_pair_self_labeling._load_pair_checkpoint] "
             f"cause=env_feature_names_mismatch path={path}"
@@ -1322,165 +1421,6 @@ def _run_phase1_pair_heuristic_candidate(
     )
 
 
-def _actual_assignment_candidate(
-    jobs: Mapping[str, object],
-    bay_ids: Sequence[str],
-    problem_id: str,
-    bay_capacity_weights: Mapping[str, int | float] | None = None,
-) -> Phase1PairCandidate:
-    """Build the historical Phase 1 assignment candidate from `source_cut_bay`.
-
-    이 후보는 validation 비교 전용이다. 실적 배정은 현재 장척 hard mask를 어긴
-    사례도 보여줘야 하므로 pair transition을 재생하지 않고 최종 Bay load만 만든다.
-    """
-
-    # LINE-BY-LINE: validation Bay ID를 정규화합니다. 예: ["22", "23", "24"] -> ("22", "23", "24").
-    normalized_bay_ids = _normalize_bay_ids(bay_ids)
-    # LINE-BY-LINE: 실적 비교 후보는 장척 Bay24 배정도 그대로 보여야 하므로 hard mask를 끕니다.
-    blocks = _collect_blocks(
-        jobs=jobs,
-        bay_ids=normalized_bay_ids,
-        require_multi_objective=True,
-        long_cut_hard_mask=False,
-    )
-    # LINE-BY-LINE: `_collect_blocks`가 저장한 job_id로 원본 Job-like 객체를 다시 찾기 위한 index입니다.
-    job_by_id = {_job_value(job, "job_id", str(job_key)): job for job_key, job in jobs.items()}
-    # LINE-BY-LINE: block별 실적 Bay 배정을 저장합니다. split block은 complete assignment에 넣지 않습니다.
-    assignments: Dict[str, str] = {}
-    # LINE-BY-LINE: 실적 Bay 후보가 현재 validation Bay scope 밖이면 오류를 내기 위한 set입니다.
-    allowed_bays = set(normalized_bay_ids)
-    # LINE-BY-LINE: W/O별 실적 Bay 부하를 그대로 누적할 빈 상태입니다.
-    bay_loads = create_phase1_planning_state(
-        _normalize_bay_capacity_weights(normalized_bay_ids, bay_capacity_weights)
-    ).bay_loads
-    split_block_count = 0
-    # LINE-BY-LINE: 각 block 내 W/O의 실적 Bay를 검증하고 W/O 단위 부하를 집계합니다.
-    for block in blocks:
-        source_bays: set[str] = set()
-        for job_id in block.job_ids:
-            job = job_by_id.get(job_id)
-            if job is None:
-                print(
-                    "[ERROR][phase1_pair_self_labeling._actual_assignment_candidate] "
-                    f"cause=job_not_found problem_id={problem_id} block_set_id={block.block_set_id} job_id={job_id}"
-                )
-                raise RuntimeError(f"actual assignment job not found: {job_id}")
-            source_bay = _actual_source_bay(job=job, problem_id=problem_id, block_set_id=block.block_set_id, job_id=job_id)
-            if source_bay not in allowed_bays:
-                print(
-                    "[ERROR][phase1_pair_self_labeling._actual_assignment_candidate] "
-                    f"cause=actual_bay_outside_scope problem_id={problem_id} "
-                    f"block_set_id={block.block_set_id} job_id={job_id} source_bay={source_bay} bay_ids={normalized_bay_ids}"
-                )
-                raise RuntimeError(f"actual source Bay outside validation scope: {source_bay}")
-            source_bays.add(source_bay)
-            load = bay_loads[source_bay]
-            load["steel_quantity_sum"] += _actual_positive_int(job, "steel_quantity", job_id)
-            load["cut_length_sum"] += _actual_non_negative_float(job, "cut_length", job_id)
-            load["bevel_quantity_sum"] += _actual_non_negative_int(job, "bevel_quantity", job_id)
-            load["wo_count"] += 1
-        for source_bay in source_bays:
-            bay_loads[source_bay]["block_count"] += 1
-            if block.long_cut_over_1000 and source_bay == "24":
-                bay_loads[source_bay]["long_cut_bay24_count"] += 1
-        if len(source_bays) == 1:
-            assignments[block.block_set_id] = next(iter(source_bays))
-        else:
-            split_block_count += 1
-    if split_block_count:
-        print(
-            "[VALIDATION][phase1_pair_self_labeling._actual_assignment_candidate] "
-            f"problem_id={problem_id} split_block_count={split_block_count} comparison_only=true"
-        )
-    # LINE-BY-LINE: validation CSV/plot이 읽을 수 있는 complete candidate record로 반환합니다.
-    return Phase1PairCandidate(
-        source="actual_assignment",
-        transitions=[],
-        assignments=assignments,
-        bay_loads=_plain_bay_loads(bay_loads),
-        comparison_only=split_block_count > 0,
-        constraint_violation_count=split_block_count,
-    )
-
-
-def _actual_non_negative_float(job: object, field_name: str, job_id: str) -> float:
-    try:
-        value = float(_job_value(job, field_name, job_id))
-    except (TypeError, ValueError) as exc:
-        print(
-            "[ERROR][phase1_pair_self_labeling._actual_non_negative_float] "
-            f"cause=not_numeric field={field_name} job_id={job_id}"
-        )
-        raise RuntimeError(f"actual validation field is not numeric: {field_name} {job_id}") from exc
-    if not math.isfinite(value) or value < 0:
-        print(
-            "[ERROR][phase1_pair_self_labeling._actual_non_negative_float] "
-            f"cause=invalid_value field={field_name} job_id={job_id} value={value}"
-        )
-        raise RuntimeError(f"actual validation field must be finite and non-negative: {field_name} {job_id}")
-    return value
-
-
-def _actual_non_negative_int(job: object, field_name: str, job_id: str) -> int:
-    value = _actual_non_negative_float(job, field_name, job_id)
-    if not value.is_integer():
-        print(
-            "[ERROR][phase1_pair_self_labeling._actual_non_negative_int] "
-            f"cause=non_integer field={field_name} job_id={job_id} value={value}"
-        )
-        raise RuntimeError(f"actual validation field must be an integer: {field_name} {job_id}")
-    return int(value)
-
-
-def _actual_positive_int(job: object, field_name: str, job_id: str) -> int:
-    value = _actual_non_negative_int(job, field_name, job_id)
-    if value <= 0:
-        print(
-            "[ERROR][phase1_pair_self_labeling._actual_positive_int] "
-            f"cause=non_positive field={field_name} job_id={job_id} value={value}"
-        )
-        raise RuntimeError(f"actual validation field must be positive: {field_name} {job_id}")
-    return value
-
-
-def _job_value(job: object, field_name: str, row_key: str):
-    """Read a Job-like field without silently substituting a different column."""
-
-    # LINE-BY-LINE: dict 기반 Job이면 key로 읽습니다. 예: {"job_id": "WO_1"}.
-    if isinstance(job, Mapping):
-        value = job.get(field_name)
-    else:
-        # LINE-BY-LINE: SimpleNamespace/dataclass 기반 Job이면 attribute로 읽습니다.
-        value = getattr(job, field_name, None)
-    # LINE-BY-LINE: 값이 없으면 실제 비교 후보를 만들 수 없으므로 원인을 출력하고 실패합니다.
-    if value in (None, ""):
-        print(
-            "[ERROR][phase1_pair_self_labeling._job_value] "
-            f"cause=missing_field field={field_name} row_key={row_key}"
-        )
-        raise RuntimeError(f"missing {field_name}: {row_key}")
-    return value
-
-
-def _actual_source_bay(job: object, problem_id: str, block_set_id: str, job_id: str) -> str:
-    """Return normalized historical cutting Bay from the explicit source field."""
-
-    # LINE-BY-LINE: actual validation의 실적 Bay는 `source_cut_bay`만 허용합니다. `cut_bay`로 몰래 대체하지 않습니다.
-    raw_bay = _job_value(job, "source_cut_bay", job_id)
-    # LINE-BY-LINE: Excel 숫자형 22.0처럼 읽힌 경우를 Bay ID 문자열 22로 정규화합니다.
-    source_bay = str(raw_bay).strip()
-    if source_bay.endswith(".0") and source_bay[:-2].isdigit():
-        source_bay = source_bay[:-2]
-    # LINE-BY-LINE: 정규화 후에도 빈 값이면 실적 Bay 누락으로 실패합니다.
-    if not source_bay:
-        print(
-            "[ERROR][phase1_pair_self_labeling._actual_source_bay] "
-            f"cause=empty_source_cut_bay problem_id={problem_id} block_set_id={block_set_id} job_id={job_id}"
-        )
-        raise RuntimeError(f"empty source_cut_bay: {job_id}")
-    return source_bay
-
-
 def _pair_transitions_from_assignment(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
@@ -1493,11 +1433,10 @@ def _pair_transitions_from_assignment(
     cache = _build_phase1_pair_episode_cache(
         jobs=jobs,
         bay_ids=normalized_bay_ids,
-        long_cut_hard_mask=True,
         bay_capacity_weights=bay_capacity_weights,
     )
     blocks = list(cache.blocks)
-    planning_state = create_phase1_planning_state(cache.bay_capacity_weights)
+    planning_state = _create_pair_planning_state(cache.bay_capacity_weights)
     bay_loads = planning_state.bay_loads
     remaining = set(cache.block_by_id)
     transitions: List[Phase1PairTransition] = []
@@ -1549,7 +1488,7 @@ def _pair_env_features(
     return [
         assigned_block_count / total_block_count,
         (total_block_count - assigned_block_count) / total_block_count,
-        float(score[0]) / totals["steel"],
+        float(score[0]) / totals["wo"],
         float(score[1]) / totals["cut"],
         float(score[2]) / totals["bevel"],
     ]
@@ -1628,17 +1567,16 @@ def _candidate_index(candidate_ids: Sequence[str], selected: str) -> int:
         raise RuntimeError(f"selected pair is not feasible: {selected}") from exc
 
 
-def _score_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]], score_mode: str) -> tuple:
+def _score_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]]) -> tuple:
     """Score final Bay loads with the confirmed Phase 1 objective."""
 
-    return _multi_objective_load_score(bay_loads, score_mode=score_mode)
+    return _multi_objective_load_score(bay_loads)
 
 
 def _candidate_learning_score(
     candidate: Phase1PairCandidate,
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
-    score_mode: str,
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> tuple:
     """Return the score used to choose the self-labeling teacher candidate."""
@@ -1647,7 +1585,6 @@ def _candidate_learning_score(
         candidate=candidate,
         jobs=jobs,
         bay_ids=bay_ids,
-        score_mode=score_mode,
         phase2_feedback_scorer=phase2_feedback_scorer,
     )[2]
 
@@ -1656,12 +1593,11 @@ def _candidate_score_components(
     candidate: Phase1PairCandidate,
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
-    score_mode: str,
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
 ) -> tuple[tuple, tuple, tuple]:
     """Phase 1 score, optional Phase 2 feedback, combined teacher score를 한 번 계산한다."""
 
-    phase1_score = _score_bay_loads(candidate.bay_loads, score_mode)
+    phase1_score = _score_bay_loads(candidate.bay_loads)
     phase2_feedback_score = _candidate_phase2_feedback_score(
         candidate=candidate,
         jobs=jobs,
@@ -1714,36 +1650,62 @@ def _apply_block_to_planning_state(
         bevel_quantity_sum=block.bevel_quantity_sum,
         wo_count=block.wo_count,
         long_cut_over_1000=block.long_cut_over_1000,
+        allow_zero_steel_quantity=bool(block.balancing_group),
     )
+    if block.balancing_group:
+        add_multi_series_group_load(
+            state.bay_loads[str(bay_id)],
+            group=block.balancing_group,
+            wo_count=block.wo_count,
+            cut_length_sum=block.cut_length_sum,
+            bevel_quantity_sum=block.bevel_quantity_sum,
+        )
+
+
+def _create_pair_planning_state(
+    bay_capacity_weights: Mapping[str, int | float],
+) -> HierarchicalPlanningState:
+    """MIXED 그룹별 누적 부하를 포함한 planning state를 생성한다."""
+
+    state = create_phase1_planning_state(bay_capacity_weights)
+    initialize_multi_series_group_loads(state.bay_loads)
+    return state
 
 
 def _plain_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]]) -> Dict[str, Dict[str, int | float]]:
-    """Return JSON-safe Bay load mapping."""
+    """그룹별 누적 부하를 포함한 JSON-safe Bay load mapping을 반환한다."""
 
-    return {
-        str(bay_id): {
-            "steel_quantity_sum": int(loads["steel_quantity_sum"]),
-            "cut_length_sum": float(loads["cut_length_sum"]),
-            "bevel_quantity_sum": int(loads["bevel_quantity_sum"]),
-            "long_cut_bay24_count": int(loads["long_cut_bay24_count"]),
-            "wo_count": int(loads["wo_count"]),
-            "block_count": int(loads["block_count"]),
-            "capacity_weight": float(loads["capacity_weight"]),
-        }
-        for bay_id, loads in bay_loads.items()
-    }
+    return {str(bay_id): dict(loads) for bay_id, loads in bay_loads.items()}
 
 
-def _problem_totals(blocks: Sequence[Phase1Block]) -> Dict[str, float]:
+def _problem_totals(
+    blocks: Sequence[Phase1Block],
+    bay_capacity_weights: Mapping[str, int | float],
+) -> Dict[str, float]:
     """Return non-zero denominators for normalized pair features."""
 
     if not blocks:
         print("[ERROR][phase1_pair_self_labeling._problem_totals] cause=no_blocks")
         raise RuntimeError("Phase 1 pair MDP requires at least one block")
+    capacity_sum = sum(float(value) for value in bay_capacity_weights.values())
+    if capacity_sum <= 0:
+        print(
+            "[ERROR][phase1_pair_self_labeling._problem_totals] "
+            f"cause=non_positive_capacity_sum value={capacity_sum}"
+        )
+        raise RuntimeError("Phase 1 pair MDP requires positive Bay capacity")
+    present_groups = {block.balancing_group for block in blocks if block.balancing_group}
+    group_metric_totals = {"wo": 0.0, "cut": 0.0, "bevel": 0.0}
+    for group in present_groups:
+        group_capacity_sum = sum(GROUP_BAY_CAPACITY_WEIGHTS[group].values())
+        group_blocks = [block for block in blocks if block.balancing_group == group]
+        group_metric_totals["wo"] += sum(block.wo_count for block in group_blocks) / group_capacity_sum
+        group_metric_totals["cut"] += sum(block.cut_length_sum for block in group_blocks) / group_capacity_sum
+        group_metric_totals["bevel"] += sum(block.bevel_quantity_sum for block in group_blocks) / group_capacity_sum
     return {
-        "steel": max(1.0, float(sum(block.steel_quantity_sum for block in blocks))),
-        "cut": max(1.0, float(sum(block.cut_length_sum for block in blocks))),
-        "bevel": max(1.0, float(sum(block.bevel_quantity_sum for block in blocks))),
+        "wo": max(1.0, group_metric_totals["wo"]),
+        "cut": max(1.0, group_metric_totals["cut"]),
+        "bevel": max(1.0, group_metric_totals["bevel"]),
         "block": max(1.0, float(len(blocks))),
     }
 
@@ -1913,6 +1875,66 @@ def _episode_payload(
     return jobs, dict(metadata)
 
 
+def _resolve_phase1_episode_scope(
+    metadata: Mapping[str, object],
+    default_bay_ids: Sequence[str],
+    default_capacity_weights: Mapping[str, int | float],
+) -> tuple[Tuple[str, ...], Dict[str, float]]:
+    """다계열 episode가 모든 W/O와 다섯 Bay를 유지하는지 검증한다."""
+
+    default_ids = _normalize_bay_ids(default_bay_ids)
+    default_weights = _normalize_bay_capacity_weights(default_ids, default_capacity_weights)
+    raw_groups = metadata.get("balancing_groups")
+    raw_bay_ids = metadata.get("bay_ids")
+    raw_capacity_weights = metadata.get("bay_capacity_weights")
+    if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, (str, bytes)):
+        print(
+            "[ERROR][phase1_pair_self_labeling._resolve_phase1_episode_scope] "
+            f"cause=missing_balancing_groups balancing_groups={raw_groups}"
+        )
+        raise RuntimeError("multi-series Phase 1 metadata requires balancing_groups")
+    groups = tuple(str(group).strip().upper() for group in raw_groups)
+    expected_group_order = tuple(
+        group for group in PHASE1_BALANCING_GROUP_ORDER if group in set(groups)
+    )
+    if not groups or groups != expected_group_order:
+        print(
+            "[ERROR][phase1_pair_self_labeling._resolve_phase1_episode_scope] "
+            f"cause=invalid_balancing_groups groups={groups} expected_order={expected_group_order}"
+        )
+        raise RuntimeError("invalid multi-series Phase 1 balancing_groups")
+    if not isinstance(raw_bay_ids, Sequence) or isinstance(raw_bay_ids, (str, bytes)):
+        print(
+            "[ERROR][phase1_pair_self_labeling._resolve_phase1_episode_scope] "
+            f"cause=missing_joint_bay_ids bay_ids={raw_bay_ids}"
+        )
+        raise RuntimeError("multi-series Phase 1 metadata requires joint bay_ids")
+    if not isinstance(raw_capacity_weights, Mapping):
+        print(
+            "[ERROR][phase1_pair_self_labeling._resolve_phase1_episode_scope] "
+            "cause=missing_joint_capacity_weights"
+        )
+        raise RuntimeError("multi-series Phase 1 metadata requires bay_capacity_weights")
+    expected_weights = joint_phase1_bay_capacity_weights()
+    episode_ids = _normalize_bay_ids(raw_bay_ids)
+    episode_weights = _normalize_bay_capacity_weights(episode_ids, raw_capacity_weights)
+    if (
+        default_ids != tuple(expected_weights)
+        or default_weights != expected_weights
+        or episode_ids != tuple(expected_weights)
+        or episode_weights != expected_weights
+    ):
+        print(
+            "[ERROR][phase1_pair_self_labeling._resolve_phase1_episode_scope] "
+            "cause=joint_scope_mismatch "
+            f"expected_bays={tuple(expected_weights)} actual_bays={episode_ids} "
+            f"expected_weights={expected_weights} actual_weights={episode_weights} "
+            f"default_bays={default_ids} default_weights={default_weights}"
+        )
+        raise RuntimeError("multi-series Phase 1 requires the joint five-Bay scope")
+    return episode_ids, episode_weights
+
+
 def _candidate_summary_row(
     episode: int,
     problem_id: str,
@@ -1921,7 +1943,6 @@ def _candidate_summary_row(
     candidate_index: int,
     candidate: Phase1PairCandidate,
     best: Phase1PairCandidate,
-    score_mode: str,
     score: tuple,
     phase2_feedback_score: tuple,
 ) -> Dict:
@@ -1936,7 +1957,7 @@ def _candidate_summary_row(
         "candidate_index": candidate_index,
         "source": candidate.source,
         "is_best": int(candidate is best),
-        "score_mode": score_mode,
+        "score_mode": "wo_first",
         "score_json": json.dumps(list(score), ensure_ascii=False),
         "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
         "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
@@ -1959,25 +1980,18 @@ def _validation_candidate_summary_row(
     candidate: Phase1PairCandidate,
     best: Phase1PairCandidate,
     rank: int | str,
-    score_mode: str,
     score: tuple,
     phase2_feedback_score: tuple | None,
 ) -> Dict:
     """Return one validation candidate audit row."""
 
-    if candidate.comparison_only:
-        phase2_feedback_score_json = ""
-        learning_score_json = ""
-    else:
-        if phase2_feedback_score is None:
-            print(
-                "[ERROR][phase1_pair_self_labeling._validation_candidate_summary_row] "
-                f"cause=missing_cached_feedback_score source={candidate.source}"
-            )
-            raise RuntimeError("rankable validation candidate is missing its cached feedback score")
-        learning_score = phase2_feedback_score + score
-        phase2_feedback_score_json = json.dumps(list(phase2_feedback_score), ensure_ascii=False)
-        learning_score_json = json.dumps(list(learning_score), ensure_ascii=False)
+    if phase2_feedback_score is None:
+        print(
+            "[ERROR][phase1_pair_self_labeling._validation_candidate_summary_row] "
+            f"cause=missing_cached_feedback_score source={candidate.source}"
+        )
+        raise RuntimeError("validation candidate is missing its cached feedback score")
+    learning_score = phase2_feedback_score + score
     row = {
         "train_episode": train_episode,
         "validation_episode": validation_episode,
@@ -1988,13 +2002,11 @@ def _validation_candidate_summary_row(
         "candidate_index": candidate_index,
         "source": candidate.source,
         "rank": rank,
-        "is_best": int(not candidate.comparison_only and candidate is best),
-        "comparison_only": int(candidate.comparison_only),
-        "constraint_violation_count": candidate.constraint_violation_count,
-        "score_mode": score_mode,
+        "is_best": int(candidate is best),
+        "score_mode": "wo_first",
         "score_json": json.dumps(list(score), ensure_ascii=False),
-        "phase2_feedback_score_json": phase2_feedback_score_json,
-        "learning_score_json": learning_score_json,
+        "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
+        "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
         "assignment_count": len(candidate.assignments),
         "transition_count": len(candidate.transitions),
         "bay_loads_json": json.dumps(candidate.bay_loads, ensure_ascii=False, sort_keys=True),
@@ -2135,8 +2147,6 @@ def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> 
             "source",
             "rank",
             "is_best",
-            "comparison_only",
-            "constraint_violation_count",
             "score_mode",
             "score_json",
             "phase2_feedback_score_json",
@@ -2154,7 +2164,6 @@ def _write_validation_plots(
     output_path: Path,
     candidate_rows: Sequence[Mapping],
     summary_rows: Sequence[Mapping],
-    score_mode: str,
 ) -> Dict[str, str]:
     """Write validation comparison plots for the latest validation checkpoint."""
 
@@ -2172,7 +2181,7 @@ def _write_validation_plots(
     latest_summary_rows = _latest_rows(summary_rows, "train_episode")
     latest_candidate_rows = _collapse_agent_samples_for_validation_plot(latest_candidate_rows)
     plot_paths: Dict[str, str] = {}
-    for output_key, filename, score_field, title, ylabel in _validation_plot_specs(score_mode):
+    for output_key, filename, score_field, title, ylabel in _validation_plot_specs():
         path = output_path / filename
         _plot_validation_metric(
             plt=plt,
@@ -2192,14 +2201,11 @@ def _write_validation_plots(
     return plot_paths
 
 
-def _validation_plot_specs(score_mode: str) -> List[tuple[str, str, str, str, str]]:
+def _validation_plot_specs() -> List[tuple[str, str, str, str, str]]:
     """Return score-column mapping for validation plots."""
 
-    if score_mode != "steel_first":
-        print(f"[ERROR][phase1_pair_self_labeling._validation_plot_specs] cause=unknown_score_mode score_mode={score_mode}")
-        raise RuntimeError(f"unknown_score_mode: {score_mode}")
     return [
-        ("validation_steel_gap_png", "validation_steel_gap.png", "score_0", "Steel load gap", "Gap"),
+        ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "W/O load gap", "Gap"),
         ("validation_cut_gap_png", "validation_cut_gap.png", "score_1", "Cut length gap", "Gap"),
         ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_2", "Bevel quantity gap", "Gap"),
     ]
@@ -2318,7 +2324,15 @@ def _ordered_sources(sources: Sequence[object]) -> List[str]:
     """Return stable method order with the learned policy first."""
 
     unique = {str(source) for source in sources}
-    preferred = [PHASE1_PROPOSED_BEST_OF_K_SOURCE, "agent_greedy", *PHASE1_SELF_LABEL_HEURISTIC_BANK, "actual_assignment"]
+    preferred = list(
+        dict.fromkeys(
+            [
+                PHASE1_PROPOSED_BEST_OF_K_SOURCE,
+                "agent_greedy",
+                *PHASE1_HEURISTIC_BANK,
+            ]
+        )
+    )
     return [source for source in preferred if source in unique] + sorted(unique - set(preferred))
 
 
@@ -2328,15 +2342,9 @@ def _display_source_name(source: str) -> str:
     names = {
         PHASE1_PROPOSED_BEST_OF_K_SOURCE: "Proposed(best-of-K)",
         "agent_greedy": "Proposed(greedy)",
-        "actual_assignment": "Actual",
-        "steel_first_balanced": "Steel",
+        "wo_first_balanced": "W/O",
         "cut_first_balanced": "Cut",
         "bevel_first_balanced": "Bevel",
-        "long_cut_first_balanced": "LongCut",
-        "steel_first_long_cut_preferred": "Steel+Long",
-        "cut_first_long_cut_preferred": "Cut+Long",
-        "bevel_first_long_cut_preferred": "Bevel+Long",
-        "long_cut_first_long_cut_preferred": "Long+Long",
     }
     return names.get(source, source)
 
@@ -2347,15 +2355,9 @@ def _validation_plot_styles() -> Dict[str, tuple[str, str]]:
     return {
         PHASE1_PROPOSED_BEST_OF_K_SOURCE: ("D", "#1f77b4"),
         "agent_greedy": ("D", "#1f77b4"),
-        "steel_first_balanced": ("s", "#ff7f0e"),
+        "wo_first_balanced": ("s", "#ff7f0e"),
         "cut_first_balanced": ("^", "#2ca02c"),
         "bevel_first_balanced": ("o", "#d62728"),
-        "long_cut_first_balanced": ("v", "#9467bd"),
-        "steel_first_long_cut_preferred": ("v", "#9467bd"),
-        "cut_first_long_cut_preferred": ("P", "#8c564b"),
-        "bevel_first_long_cut_preferred": ("X", "#17becf"),
-        "long_cut_first_long_cut_preferred": ("h", "#bcbd22"),
-        "actual_assignment": ("*", "#7f7f7f"),
     }
 
 
@@ -2435,7 +2437,6 @@ def _write_validation_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "agent_is_best",
             "agent_rank",
             "candidate_count",
-            "comparison_only_candidate_count",
         ],
         rows,
     )
