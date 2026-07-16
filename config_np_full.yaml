@@ -115,6 +115,28 @@ batch:
 agent:
   default_heuristic: batch_fill_spt
 constraints:
+  profiles:
+    phase2:
+      categories:
+        machine: true
+        capacity: true
+        downstream: false
+        priority: false
+        preference: false
+        layout: true
+        calendar: false
+      hard_enabled:
+        machine_enabled: true
+        machine_bay_consistency: true
+        block_set_same_bay: true
+        machine_single_processing: true
+        batch_wo_count_limit: true
+        batch_length_sum_limit: true
+        family_eligibility: true
+        thickness_range: false
+        table_length_limit: false
+      soft_enabled: {}
+      soft_penalty_weights: {}
   categories:
     machine: true
     capacity: true

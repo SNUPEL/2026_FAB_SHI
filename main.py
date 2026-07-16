@@ -1,12 +1,11 @@
 """프로젝트 공통 실행 진입점.
 
 초보자 기준 실행 예시:
-  python3 main.py show-config --config config.yaml
+  python3 main.py show-config --config config_np_100.yaml
   python3 main.py build-scenario --config config_np_100.yaml
-  python3 main.py simulate --config config.yaml
+  python3 main.py simulate --config config_np_100.yaml
   python3 main.py playback --config config_np_100.yaml
-  python3 main.py pygame-viewer --event-log output/share/html_viewer_package/clean_100/generated/balanced_batch/event_log.json --layout output/share/html_viewer_package/clean_100/generated/balanced_batch/factory_layout.json --schedule output/share/html_viewer_package/clean_100/generated/balanced_batch/job_schedule.csv --metrics output/share/html_viewer_package/clean_100/generated/balanced_batch/metrics.json
-  python3 main.py trace --config config.yaml
+  python3 main.py trace --config config_np_100.yaml
 """
 
 # LINE-BY-LINE: Windows conda에서 pandas/numpy와 torch가 서로 다른 Intel OpenMP runtime을 초기화하면
@@ -36,7 +35,7 @@ from typing import Any, Callable, Mapping, Sequence
 from Agent.heuristics import select_action_by_rule
 # LINE-BY-LINE: `Environment.environment` 모듈에서 `CuttingShopEnvironment`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Environment.environment import CuttingShopEnvironment
-from Environment.gym_wrapper import GYMNASIUM_AVAILABLE, run_hierarchical_trace_export, run_wrapper_equivalence
+from Environment.gym_wrapper import GYMNASIUM_AVAILABLE, run_wrapper_equivalence
 from Environment.constraints.profiles import load_phase_constraint_profile
 from Phase1.orchestrator import candidate_to_phase1_plan
 from Phase2.orchestrator import run_phase2_full_graph_workflow, write_phase2_workflow_outputs
@@ -76,7 +75,6 @@ from Utils.data.cutting_scenario_builder import build_scenario_from_cutting_reco
 from Utils.data.factory_builder import build_factory_scenario_parts
 # LINE-BY-LINE: `Utils.data.io` 모듈에서 scenario loader를 가져옵니다. `load_scenario`는 명시 YAML용, `load_scenario_for_config`는 config 기반 원본 데이터 로딩용입니다.
 from Utils.data.io import load_scenario, load_scenario_for_config
-from Utils.learning.learning_data_builder import build_learning_data_package
 from Utils.learning.phase_agent_checkpoints import (
     load_phase1_feedback_contract,
     load_phase1_pair_pointer_checkpoint,
@@ -97,11 +95,6 @@ from Utils.phase1.multi_series_rules import (
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
     joint_phase1_bay_capacity_weights,
 )
-from Utils.learning.phase1_phase2_communication import (
-    apply_phase1_messages_to_scenario,
-    load_communication_jsonl,
-    write_phase1_phase2_communication_package,
-)
 from Utils.data.report_formula_data_generator import (
     BTH_FORMULA_FEATURES,
     DEFAULT_MULTI_SERIES_WO_SOURCE,
@@ -120,16 +113,24 @@ from Utils.data.multi_series_formula_data_generator import (
 from Utils.reporting.playback_builder import write_actual_replay_artifacts, write_playback_artifacts
 # LINE-BY-LINE: `Utils.data.scenario_generator` 모듈에서 `generate_scenario_from_template, save_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.data.scenario_generator import generate_scenario_from_template, save_scenario
-# 회사 송부용 정적 HTML 패키지와 휴리스틱 baseline 비교표를 생성하는 helper입니다.
-from Utils.reporting.share_report_builder import build_html_package, parse_csv_argument
-# Pygame 로컬 공장 playback viewer입니다. `--dry-run`으로 GUI 없이 입력 검증도 가능합니다.
-from Utils.reporting.pygame_factory_viewer import run_pygame_comparison_from_paths, run_pygame_viewer_from_paths
 # LINE-BY-LINE: `Utils.reporting.tact_gap_analysis` 모듈에서 `build_tact_gap_analysis`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.reporting.tact_gap_analysis import build_tact_gap_analysis
 # LINE-BY-LINE: `Utils.reporting.tact_time` 모듈에서 `build_tact_time_analysis_from_scenario`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.reporting.tact_time import build_tact_time_analysis_from_scenario
 # LINE-BY-LINE: `Utils.data.test_data_selection` 모듈에서 `select_actual_day_test_data, select_actual_start_range_test_data`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.data.test_data_selection import select_actual_day_test_data, select_actual_start_range_test_data
+
+
+def parse_csv_argument(value: str | None, default: Sequence[str]) -> list[str]:
+    """쉼표로 구분한 CLI 값을 공백 없는 문자열 목록으로 변환한다."""
+
+    if value is None or str(value).strip() == "":
+        return list(default)
+    items = [item.strip() for item in str(value).split(",") if item.strip()]
+    if not items:
+        print(f"[ERROR][main.parse_csv_argument] cause=empty_csv_argument input={value!r}")
+        raise ValueError("comma-separated argument produced no items")
+    return items
 
 
 # LINE-BY-LINE: `build_environment(config_path: str, scenario_path: str | None = None)` 함수를 정의합니다. 반환 타입: `CuttingShopEnvironment`. 사용: CLI 명령에서 사용자가 실행한 subcommand를 처리합니다.
@@ -1438,80 +1439,6 @@ def command_apply_phase1_to_phase2(args: argparse.Namespace) -> None:
     print("[VALIDATION][main.command_apply_phase1_to_phase2] passed=true")
 
 
-def command_phase1_phase2_communicate(args: argparse.Namespace) -> None:
-    """Write limited Phase 1 <-> Phase 2 communication messages and feedback."""
-
-    print("[phase1-phase2-communicate]")
-    print(f"- config: {args.config}")
-    print(f"- scenario_path_override: {args.scenario_path}")
-    print(f"- phase1_plan: {args.phase1_plan}")
-    print(f"- output_dir: {args.output_dir}")
-    print(f"- wide_bth_threshold: {args.wide_bth_threshold}")
-    print(f"- batch_max_wo_count: {args.batch_max_wo_count}")
-    print(f"- batch_max_length_sum: {args.batch_max_length_sum}")
-
-    plan_path = Path(args.phase1_plan)
-    if not plan_path.exists():
-        print(
-            "[ERROR][main.command_phase1_phase2_communicate] "
-            f"cause=missing_phase1_plan path={plan_path}"
-        )
-        raise FileNotFoundError(f"Phase 1 plan does not exist: {plan_path}")
-
-    config = load_config(args.config)
-    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
-    with plan_path.open("r", encoding="utf-8") as file:
-        plan = json.load(file)
-
-    package = write_phase1_phase2_communication_package(
-        scenario=scenario,
-        plan=plan,
-        output_dir=args.output_dir,
-        wide_bth_threshold=args.wide_bth_threshold,
-        batch_max_wo_count=args.batch_max_wo_count,
-        batch_max_length_sum=args.batch_max_length_sum,
-    )
-    summary = package["summary"]
-    print(f"- block_message_count: {summary['block_message_count']}")
-    print(f"- feedback_message_count: {summary['feedback_message_count']}")
-    print(f"- repair_required_count: {summary['repair_required_count']}")
-    print(f"- infeasible_count: {summary['infeasible_count']}")
-    print(f"- hard_violation_count: {summary['hard_violation_count']}")
-    print(f"- phase1_to_phase2_jsonl: {package['phase1_to_phase2_jsonl']}")
-    print(f"- phase2_to_phase1_jsonl: {package['phase2_to_phase1_jsonl']}")
-    print(f"- feedback_csv: {package['feedback_csv']}")
-    print(f"- manifest_json: {package['manifest_json']}")
-    print("[VALIDATION][main.command_phase1_phase2_communicate] passed=true")
-
-
-def command_apply_phase1_messages_to_phase2(args: argparse.Namespace) -> None:
-    """Write a Phase 2 scenario using Phase 1-to-Phase 2 message JSONL."""
-
-    print("[apply-phase1-messages-to-phase2]")
-    print(f"- config: {args.config}")
-    print(f"- scenario_path_override: {args.scenario_path}")
-    print(f"- phase1_messages: {args.phase1_messages}")
-    print(f"- assignment_mode: {args.assignment_mode}")
-    print(f"- output_scenario: {args.output_scenario}")
-
-    config = load_config(args.config)
-    scenario = load_scenario_for_config(config, scenario_path_override=args.scenario_path)
-    messages = load_communication_jsonl(args.phase1_messages)
-    result = apply_phase1_messages_to_scenario(
-        scenario=scenario,
-        phase1_messages=messages,
-        assignment_mode=args.assignment_mode,
-    )
-    save_scenario(result["scenario"], args.output_scenario)
-    summary = result["summary"]
-
-    print(f"- assigned_job_count: {summary['assigned_job_count']}")
-    print(f"- assigned_block_count: {summary['assigned_block_count']}")
-    print(f"- message_assignment_count: {summary['message_assignment_count']}")
-    print(f"- output_scenario: {args.output_scenario}")
-    print("[VALIDATION][main.command_apply_phase1_messages_to_phase2] passed=true")
-
-
 def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
     """물리 블록 공동분포를 보존한 MIXED block/W/O 파일을 만든다."""
 
@@ -2021,34 +1948,6 @@ def command_actual_replay(args: argparse.Namespace) -> None:
     print(f"- playback_html: {artifacts['playback_html']}")
 
 
-def command_build_html_package(args: argparse.Namespace) -> None:
-    """clean 50/100/200 휴리스틱 baseline과 actual replay를 정적 HTML 패키지로 묶는다."""
-
-    config_paths = parse_csv_argument(
-        args.configs,
-        default=("config_clean_50.yaml", "config_clean_100.yaml", "config_clean_200.yaml"),
-    )
-    heuristics = parse_csv_argument(
-        args.heuristics,
-        default=("batch_fill_spt", "balanced_batch", "balanced_batch_count", "spt", "load_balance", "priority"),
-    )
-    result = build_html_package(
-        config_paths=config_paths,
-        heuristics=heuristics,
-        output_dir=args.output_dir,
-        zip_path=args.zip_path,
-    )
-
-    print("[html package]")
-    print(f"- configs: {len(config_paths)}")
-    print(f"- heuristics: {len(heuristics)}")
-    print(f"- baseline_rows: {result['baseline_rows']}")
-    print(f"- actual_rows: {result['actual_rows']}")
-    print(f"- package_dir: {result['package_dir']}")
-    print(f"- index_html: {result['index_html']}")
-    print(f"- zip_path: {result['zip_path']}")
-
-
 def command_gym_equivalence(args: argparse.Namespace) -> None:
     """DES action mask wrapper가 기존 core 휴리스틱과 같은 결과를 내는지 검증한다."""
 
@@ -2079,132 +1978,6 @@ def command_gym_equivalence(args: argparse.Namespace) -> None:
     print(f"- makespan: {result['direct_summary']['makespan']:.6f}")
     print(f"- trace_csv: {result['trace_csv']}")
     print(f"- summary_json: {result['summary_json']}")
-
-
-def command_hierarchical_trace(args: argparse.Namespace) -> None:
-    """계층형 Gym wrapper 기준 action trace를 CSV/JSONL로 저장한다."""
-
-    heuristic_name = args.heuristic
-    output_dir = args.output_dir
-    if output_dir is None:
-        output_dir = str(Path("output") / f"hierarchical_trace_{Path(args.config).stem}_{heuristic_name}")
-
-    print("[hierarchical trace]")
-    print(f"- config: {args.config}")
-    print(f"- heuristic: {heuristic_name}")
-    print(f"- max_actions: {args.max_actions}")
-    print(f"- output_dir: {output_dir}")
-    print(f"- gymnasium_available: {GYMNASIUM_AVAILABLE}")
-    env = build_environment(args.config)
-    result = run_hierarchical_trace_export(
-        env=env,
-        heuristic_name=heuristic_name,
-        max_actions=args.max_actions,
-        output_dir=output_dir,
-    )
-    print(f"- scheduled_jobs: {result['scheduled_jobs']}")
-    print(f"- unscheduled_jobs: {result['unscheduled_jobs']}")
-    print(f"- hierarchical_step_count: {result['hierarchical_step_count']}")
-    print(f"- flat_decision_count: {result['flat_decision_count']}")
-    print(f"- phase_counts: {result['phase_counts']}")
-    print(f"- trace_csv: {result['trace_csv']}")
-    print(f"- action_table_jsonl: {result['action_table_jsonl']}")
-    print(f"- summary_json: {result['summary_json']}")
-
-
-def command_build_learning_data(args: argparse.Namespace) -> None:
-    """계층형 trace들을 학습 smoke dataset package로 묶는다."""
-
-    config_paths = parse_csv_argument(args.configs, default=("config_np_100.yaml",))
-    heuristics = parse_csv_argument(args.heuristics, default=("spt",))
-    algorithm_plan = parse_csv_argument(
-        args.algorithm_plan,
-        default=("self_labeling", "ppo", "reinforce"),
-    )
-    print("[learning data]")
-    print(f"- configs: {config_paths}")
-    print(f"- heuristics: {heuristics}")
-    print(f"- data_role: {args.data_role}")
-    print(f"- algorithm_plan: {algorithm_plan}")
-    print(f"- max_actions: {args.max_actions}")
-    print(f"- output_dir: {args.output_dir}")
-    result = build_learning_data_package(
-        config_paths=config_paths,
-        heuristics=heuristics,
-        output_dir=args.output_dir,
-        max_actions=args.max_actions,
-        data_role=args.data_role,
-        algorithm_plan=algorithm_plan,
-        env_builder=build_environment,
-    )
-    print(f"- dataset_count: {result['dataset_count']}")
-    print(f"- label_source: {result['label_source']}")
-    print(f"- manifest_json: {result['manifest_json']}")
-
-
-def command_pygame_viewer(args: argparse.Namespace) -> None:
-    """event/schedule 산출물을 Pygame 로컬 공장 viewer로 연다.
-
-    `--dry-run`을 주면 GUI 창을 열지 않고 입력 파일 4종의 구조와 count만 검증한다.
-    """
-
-    summary = run_pygame_viewer_from_paths(
-        event_log_path=args.event_log,
-        layout_path=args.layout,
-        schedule_path=args.schedule,
-        metrics_path=args.metrics,
-        width=args.width,
-        height=args.height,
-        speed=args.speed,
-        start_paused=args.paused,
-        dry_run=args.dry_run,
-        screenshot_path=args.screenshot,
-        max_frames=args.max_frames,
-    )
-    print("[pygame viewer summary]")
-    print(f"- operation_count: {summary['operation_count']}")
-    print(f"- machine_count: {summary['machine_count']}")
-    print(f"- batch_count: {summary['batch_count']}")
-    print(f"- bay_ids: {summary['bay_ids']}")
-    print(f"- event_count: {summary['event_count']}")
-    print(f"- start_time_min: {float(summary['start_time_min']):.2f}")
-    print(f"- end_time_min: {float(summary['end_time_min']):.2f}")
-
-
-def command_pygame_compare(args: argparse.Namespace) -> None:
-    """actual/generated 산출물을 한 Pygame 창에서 좌우 비교한다."""
-
-    summary = run_pygame_comparison_from_paths(
-        left_event_log_path=args.left_event_log,
-        left_layout_path=args.left_layout,
-        left_schedule_path=args.left_schedule,
-        left_metrics_path=args.left_metrics,
-        right_event_log_path=args.right_event_log,
-        right_layout_path=args.right_layout,
-        right_schedule_path=args.right_schedule,
-        right_metrics_path=args.right_metrics,
-        left_label=args.left_label,
-        right_label=args.right_label,
-        width=args.width,
-        height=args.height,
-        speed=args.speed,
-        start_paused=args.paused,
-        dry_run=args.dry_run,
-        screenshot_path=args.screenshot,
-        max_frames=args.max_frames,
-        gif_path=args.gif,
-        gif_frames=args.gif_frames,
-        gif_duration_ms=args.gif_duration_ms,
-    )
-    print("[pygame compare summary]")
-    print(f"- left_operation_count: {summary['left']['operation_count']}")
-    print(f"- right_operation_count: {summary['right']['operation_count']}")
-    print(f"- left_batch_count: {summary['left']['batch_count']}")
-    print(f"- right_batch_count: {summary['right']['batch_count']}")
-    print(f"- left_end_time_min: {float(summary['left']['end_time_min']):.2f}")
-    print(f"- right_end_time_min: {float(summary['right']['end_time_min']):.2f}")
-    if "gif_path" in summary:
-        print(f"- gif_path: {summary['gif_path']}")
 
 
 # LINE-BY-LINE: `command_trace(args: argparse.Namespace)` 함수를 정의합니다. 반환 타입: `None`. 사용: CLI 명령에서 사용자가 실행한 subcommand를 처리합니다.
@@ -2603,8 +2376,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Cutting shop scheduling project")
     # LINE-BY-LINE: `common_parser`에 `argparse.ArgumentParser(add_help=False)` 결과를 저장합니다. 의미/사용: `common_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     common_parser = argparse.ArgumentParser(add_help=False)
-    # LINE-BY-LINE: `common_parser.add_argument("--config", default` 여러 변수에 `"config.yaml", help="YAML config path")` 결과를 풀어 저장합니다. 사용: 반환 tuple을 각각의 의미 있는 값으로 나눕니다.
-    common_parser.add_argument("--config", default="config.yaml", help="YAML config path")
+    common_parser.add_argument("--config", default="config_np_100.yaml", help="YAML config path")
     # LINE-BY-LINE: `subparsers`에 `parser.add_subparsers(dest="command", required=True)` 결과를 저장합니다. 의미/사용: `subparsers` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -2889,74 +2661,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_phase1_parser.set_defaults(func=command_apply_phase1_to_phase2)
 
-    communicate_parser = subparsers.add_parser(
-        "phase1-phase2-communicate",
-        parents=[common_parser],
-        help="Write limited Phase 1-to-Phase 2 messages and Phase 2 feedback",
-    )
-    communicate_parser.add_argument(
-        "--scenario-path",
-        default=None,
-        help="Optional source scenario override. Default follows config/data-source loader.",
-    )
-    communicate_parser.add_argument(
-        "--phase1-plan",
-        required=True,
-        help="Phase 1 plan JSON path, usually phase1_block_bay_plan.json",
-    )
-    communicate_parser.add_argument(
-        "--output-dir",
-        default="output/phase1_phase2_communication",
-        help="Output directory for communication JSONL/CSV/manifest files",
-    )
-    communicate_parser.add_argument(
-        "--wide-bth-threshold",
-        type=float,
-        default=4500.0,
-        help="BTH/plate_width threshold for wide blocks. Width above this requires Bay 22/23.",
-    )
-    communicate_parser.add_argument(
-        "--batch-max-wo-count",
-        type=int,
-        default=3,
-        help="Phase 2 machine batch W/O capacity.",
-    )
-    communicate_parser.add_argument(
-        "--batch-max-length-sum",
-        type=float,
-        default=55000.0,
-        help="Phase 2 machine batch LTH sum capacity.",
-    )
-    communicate_parser.set_defaults(func=command_phase1_phase2_communicate)
-
-    apply_messages_parser = subparsers.add_parser(
-        "apply-phase1-messages-to-phase2",
-        parents=[common_parser],
-        help="Apply Phase 1-to-Phase 2 message JSONL to a Phase 2 scenario",
-    )
-    apply_messages_parser.add_argument(
-        "--scenario-path",
-        default=None,
-        help="Optional source scenario override. Default follows config/data-source loader.",
-    )
-    apply_messages_parser.add_argument(
-        "--phase1-messages",
-        required=True,
-        help="Phase 1-to-Phase 2 message JSONL path.",
-    )
-    apply_messages_parser.add_argument(
-        "--assignment-mode",
-        default="allowed_bay_ids",
-        choices=["cut_bay", "allowed_bay_ids"],
-        help="How to write Phase 1 message Bay into Phase 2 jobs.",
-    )
-    apply_messages_parser.add_argument(
-        "--output-scenario",
-        default="output/generated/phase2_from_phase1_messages.yaml",
-        help="Output Phase 2 scenario YAML path.",
-    )
-    apply_messages_parser.set_defaults(func=command_apply_phase1_messages_to_phase2)
-
     generate_phase1_blocks_parser = subparsers.add_parser(
         "generate-phase1-blocks",
         help="Generate MIXED physical-block joint-distribution block/W/O data",
@@ -2993,8 +2697,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     # LINE-BY-LINE: `build_scenario_parser`에 `subparsers.add_parser("build-scenario", parents=[common_parser], help="Build NP 100 scenario from...` 결과를 저장합니다. 의미/사용: `build_scenario_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     build_scenario_parser = subparsers.add_parser("build-scenario", parents=[common_parser], help="Build NP 100 scenario from cutting Excel/CSV")
-    # LINE-BY-LINE: `build_scenario_parser.add_argument("--input-path", default` 여러 변수에 `"메일내용/절단03~04_NP물량_마스킹.xlsx", help="Cutting Excel/CSV input path")` 결과를 풀어 저장합니다. 사용: 반환 tuple을 각각의 의미 있는 값으로 나눕니다.
-    build_scenario_parser.add_argument("--input-path", default="메일내용/절단03~04_NP물량_마스킹.xlsx", help="Cutting Excel/CSV input path")
+    build_scenario_parser.add_argument(
+        "--input-path",
+        default="input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx",
+        help="Cutting Excel/CSV input path",
+    )
     # LINE-BY-LINE: `build_scenario_parser.add_argument("--sheet-name", default` 여러 변수에 `"Sheet", help="Excel sheet name")` 결과를 풀어 저장합니다. 사용: 반환 tuple을 각각의 의미 있는 값으로 나눕니다.
     build_scenario_parser.add_argument("--sheet-name", default="Sheet", help="Excel sheet name")
     # LINE-BY-LINE: `build_scenario_parser.add_argument("--target-series", default` 여러 변수에 `"NP", help="Comma-separated target series")` 결과를 풀어 저장합니다. 사용: 반환 tuple을 각각의 의미 있는 값으로 나눕니다.
@@ -3053,29 +2760,6 @@ def build_parser() -> argparse.ArgumentParser:
     # LINE-BY-LINE: `factory_replay_parser.set_defaults(func`에 `command_actual_replay)` 결과를 저장합니다. 의미/사용: `set_defaults(func` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     factory_replay_parser.set_defaults(func=command_actual_replay)
 
-    html_package_parser = subparsers.add_parser("build-html-package", help="Build static heuristic baseline and playback HTML package")
-    html_package_parser.add_argument(
-        "--configs",
-        default="config_clean_50.yaml,config_clean_100.yaml,config_clean_200.yaml",
-        help="Comma-separated clean config paths",
-    )
-    html_package_parser.add_argument(
-        "--heuristics",
-        default="batch_fill_spt,balanced_batch,balanced_batch_count,spt,load_balance,priority",
-        help="Comma-separated heuristic names",
-    )
-    html_package_parser.add_argument(
-        "--output-dir",
-        default="output/share/html_viewer_package",
-        help="Static HTML package output directory",
-    )
-    html_package_parser.add_argument(
-        "--zip-path",
-        default="output/share/html_viewer_package.zip",
-        help="Zip file path for static package",
-    )
-    html_package_parser.set_defaults(func=command_build_html_package)
-
     gym_equivalence_parser = subparsers.add_parser(
         "gym-equivalence",
         parents=[common_parser],
@@ -3098,109 +2782,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory for action_trace.csv and summary.json",
     )
     gym_equivalence_parser.set_defaults(func=command_gym_equivalence)
-
-    hierarchical_trace_parser = subparsers.add_parser(
-        "hierarchical-trace",
-        parents=[common_parser],
-        help="Export SELECT_MACHINE -> SELECT_WO/COMMIT trace for hierarchical Gym wrapper",
-    )
-    hierarchical_trace_parser.add_argument(
-        "--heuristic",
-        default="spt",
-        help="Heuristic used as pseudo-label source",
-    )
-    hierarchical_trace_parser.add_argument(
-        "--max-actions",
-        type=int,
-        default=4096,
-        help="Fixed Gym Discrete action space size; fails if candidates exceed this",
-    )
-    hierarchical_trace_parser.add_argument(
-        "--output-dir",
-        default=None,
-        help="Directory for hierarchical_trace.csv, hierarchical_action_table.jsonl, and summary.json",
-    )
-    hierarchical_trace_parser.set_defaults(func=command_hierarchical_trace)
-
-    learning_data_parser = subparsers.add_parser(
-        "build-learning-data",
-        help="Build hierarchical trace package for self-labeling/imitation/RL smoke tests",
-    )
-    learning_data_parser.add_argument(
-        "--configs",
-        default="config_np_100.yaml",
-        help="Comma-separated config paths used as dataset sources",
-    )
-    learning_data_parser.add_argument(
-        "--heuristics",
-        default="spt,balanced_batch_count",
-        help="Comma-separated heuristic pseudo-label sources",
-    )
-    learning_data_parser.add_argument(
-        "--algorithm-plan",
-        default="self_labeling,ppo,reinforce",
-        help="Comma-separated algorithms intended to consume this package",
-    )
-    learning_data_parser.add_argument(
-        "--data-role",
-        default="actual_source_smoke",
-        help="Dataset role: actual_source_smoke / clean_slice_smoke / heuristic_baseline",
-    )
-    learning_data_parser.add_argument(
-        "--max-actions",
-        type=int,
-        default=4096,
-        help="Fixed hierarchical action space size",
-    )
-    learning_data_parser.add_argument(
-        "--output-dir",
-        default="output/learning_data_smoke_np_100",
-        help="Learning data package output directory",
-    )
-    learning_data_parser.set_defaults(func=command_build_learning_data)
-
-    pygame_viewer_parser = subparsers.add_parser(
-        "pygame-viewer",
-        help="Open local Pygame factory playback viewer from event/schedule artifacts",
-    )
-    pygame_viewer_parser.add_argument("--event-log", required=True, help="event_log.json path")
-    pygame_viewer_parser.add_argument("--layout", required=True, help="factory_layout.json path")
-    pygame_viewer_parser.add_argument("--schedule", required=True, help="job_schedule.csv path")
-    pygame_viewer_parser.add_argument("--metrics", required=True, help="metrics.json path")
-    pygame_viewer_parser.add_argument("--width", type=int, default=1280, help="Viewer window width")
-    pygame_viewer_parser.add_argument("--height", type=int, default=760, help="Viewer window height")
-    pygame_viewer_parser.add_argument("--speed", type=float, default=30.0, help="Simulation minutes per real second")
-    pygame_viewer_parser.add_argument("--paused", action="store_true", help="Start paused")
-    pygame_viewer_parser.add_argument("--dry-run", action="store_true", help="Validate inputs without opening a GUI window")
-    pygame_viewer_parser.add_argument("--screenshot", default=None, help="Save first rendered frame to this PNG path")
-    pygame_viewer_parser.add_argument("--max-frames", type=int, default=None, help="Render this many frames and exit")
-    pygame_viewer_parser.set_defaults(func=command_pygame_viewer)
-
-    pygame_compare_parser = subparsers.add_parser(
-        "pygame-compare",
-        help="Open side-by-side Pygame comparison viewer for two playback artifacts",
-    )
-    pygame_compare_parser.add_argument("--left-event-log", required=True, help="Left event_log.json path")
-    pygame_compare_parser.add_argument("--left-layout", required=True, help="Left factory_layout.json path")
-    pygame_compare_parser.add_argument("--left-schedule", required=True, help="Left schedule CSV path")
-    pygame_compare_parser.add_argument("--left-metrics", required=True, help="Left metrics.json path")
-    pygame_compare_parser.add_argument("--right-event-log", required=True, help="Right event_log.json path")
-    pygame_compare_parser.add_argument("--right-layout", required=True, help="Right factory_layout.json path")
-    pygame_compare_parser.add_argument("--right-schedule", required=True, help="Right schedule CSV path")
-    pygame_compare_parser.add_argument("--right-metrics", required=True, help="Right metrics.json path")
-    pygame_compare_parser.add_argument("--left-label", default="ACTUAL REPLAY", help="Left panel title")
-    pygame_compare_parser.add_argument("--right-label", default="GENERATED PLAN", help="Right panel title")
-    pygame_compare_parser.add_argument("--width", type=int, default=1920, help="Viewer window width")
-    pygame_compare_parser.add_argument("--height", type=int, default=820, help="Viewer window height")
-    pygame_compare_parser.add_argument("--speed", type=float, default=30.0, help="Reference minutes per real second")
-    pygame_compare_parser.add_argument("--paused", action="store_true", help="Start paused")
-    pygame_compare_parser.add_argument("--dry-run", action="store_true", help="Validate inputs without opening a GUI window")
-    pygame_compare_parser.add_argument("--screenshot", default=None, help="Save first rendered frame to this PNG path")
-    pygame_compare_parser.add_argument("--max-frames", type=int, default=None, help="Render this many frames and exit")
-    pygame_compare_parser.add_argument("--gif", default=None, help="Save side-by-side playback to this GIF path")
-    pygame_compare_parser.add_argument("--gif-frames", type=int, default=48, help="Number of frames for --gif export")
-    pygame_compare_parser.add_argument("--gif-duration-ms", type=int, default=120, help="Frame duration in milliseconds for --gif export")
-    pygame_compare_parser.set_defaults(func=command_pygame_compare)
 
     # LINE-BY-LINE: `trace_parser`에 `subparsers.add_parser("trace", parents=[common_parser], help="Print step-by-step decision trace")` 결과를 저장합니다. 의미/사용: `trace_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     trace_parser = subparsers.add_parser("trace", parents=[common_parser], help="Print step-by-step decision trace")

@@ -104,19 +104,22 @@
 - 1차 개발과 회귀검증은 `config_np_100.yaml` 기준으로 한다.
 - `config_np_100.yaml`은 `input/`의 거대 YAML을 읽지 않고 `input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx`에서 100건 scenario를 메모리로 만든다.
 - 전체 NP 실행 기준은 `input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx`이며, 블록 수정 파일은 `WK_ORD_NO`가 없으므로 scheduling/replay의 주 입력으로 쓰지 않는다.
-- 2026-06-18 WO 수정 데이터 기준 factory는 Bay 22, 23, 24, 25와 PLS21~24, PLS31~33, PLS41~44, PLP02, PLS52 총 13대를 포함한다.
-- clean 검증 기준 slice는 `output/data_selection/wo_260618_clean_20260319/clean_20260319.csv`이며 실적 착수일 2026-03-19, 157건, 동일 설비/동일 착수/종료 timestamp group 0건이다.
+- 현재 planning factory는 Bay 22/23/24/25/trans와 PLS/PLP 총 15대를 포함한다. machine identity는 `Utils/data/multi_series_cutting_data.py`의 `MIXED_PLANNING_MACHINE_IDS_BY_BAY`가 단일 기준이다.
+- `config_np_100.yaml`과 `config_np_full.yaml`의 NP DES/replay factory는 해당 실적 scope에 존재하는 13대다. 이 회귀용 factory와 MIXED 학습·계획의 15대 topology를 혼동하지 않는다.
+- `EQP_3`은 실제 데이터에서 NC/trans로만 관측된 actual-only 설비다. 실적 identity는 보존하되 planning machine 후보에는 넣지 않는다.
 - `input/`은 사용하지 않는 생성 산출물 보관소로 두지 않는다. 필요 산출물은 `output/generated/` 아래에 만든다.
 - 전체 NP는 100건 회귀검증이 통과한 뒤 스케일 확인과 데이터 품질 audit 용도로만 실행한다.
 - 동일 장비/동일 실적 착수/종료 timestamp 다중 W/O는 제약 위반 근거가 아니라 현업 확인된 데이터 오류 후보로 분리한다.
-- 현재 원본 파일명은 NP 물량이지만 실제로는 FL이 섞여 있으므로 1차 알고리즘은 NP만 사용한다.
-- FL, duration 이상치, 파싱 실패 row는 삭제가 아니라 제외 로그에 남긴다.
+- MIXED 학습은 `변경사항/절단블록_데이터.xlsx`와 `변경사항/절단WO_데이터.xlsx`의 NP/FN/FL/NC 계약을 사용한다.
+- NP100 DES/replay 회귀와 MIXED Phase 1/2 학습을 같은 입력 계약으로 혼동하지 않는다.
+- 지원하지 않는 계열, duration 이상치, 파싱 실패 row는 삭제하지 않고 제외 로그에 남긴다.
 - `TACT_TIME`은 기계가 아크로 절단하는 시간이며 단위는 분이다.
 - generated simulation, 휴리스틱, RL 검증의 기본 처리시간은 `TACT_TIME`이다.
 - 실적 착수-종료 elapsed time은 처리시간 검증값이 아니라 actual replay identity, 시간축 가시화, 데이터 품질 audit 용도로만 쓴다.
 - `CUT_BAY`와 `downstream_bay`는 섞지 않는다.
 - `Job.cut_bay`는 절단 Bay, `Job.downstream_bay`는 후공정/적치 Bay다.
-- 광폭, NCG, LSR, LM/크레인, Bay IN/OUT은 1차 모델에서 제외한다.
+- NP 광폭·CNT·장척 Bay 제약과 계열별 Bay/machine eligibility는 planning action mask에 적용한다.
+- NCG, LSR, LM/크레인, Bay IN/OUT은 현재 모델에서 제외한다.
 
 ---
 
@@ -125,13 +128,14 @@
 - 최종 목표는 event-generating DES core다.
 - actual replay는 DES 검증 모드다.
 - generated simulation과 actual replay는 같은 event schema를 사용해야 한다.
-- action은 `Bay 선택 -> 설비 선택`이 아니다.
-- 현업 확인 결과 기본 action은 `W/O batch + Machine` 선택이다.
+- Phase 1 action은 `(block-series, Bay)` pair 선택이다.
+- merged Phase 2 policy action은 `SELECT_MACHINE -> SELECT_WO` 순차 선택이다.
+- DES runtime은 open batch에 W/O를 추가하고 close할 때 machine에 투입하는 동일 batch 계약을 사용한다.
 - batch는 W/O 1~3개를 묶고, W/O `길이(LTH)` 합 55,000 이하일 때만 close되어 같은 시점에 투입/완료되는 구조다.
-- 같은 블록(`호선번호+블록명`)의 모든 W/O는 같은 절단 Bay에 배정한다.
+- 같은 `PROJ_NO+GYEL+BLK_NO`의 W/O는 같은 절단 Bay에 배정한다. 같은 물리 블록이라도 계열이 다르면 다른 Bay로 갈 수 있다.
 - 한 batch 안에는 서로 다른 블록의 W/O가 섞일 수 있다.
 - 실적 데이터와 알고리즘 결과 비교는 투입 순서나 실적 착수/종료시간 오차가 아니라 Bay별/설비별 부하평준화 중심으로 한다.
-- 구현 표현은 기본적으로 `open_batch:job_id@machine_id`, `add_to_batch:batch_id:job_id`, `close_batch:batch_id@machine_id`를 사용한다.
+- DES 구현 표현은 `open_batch:job_id@machine_id`, `add_to_batch:batch_id:job_id`, `close_batch:batch_id@machine_id`를 사용한다.
 - `Machine.bay_id`가 있으므로 machine 선택 순간 절단 Bay도 확정된다.
 - `job_id@machine_id` 단건 dispatch는 baseline/debug 전용이며, 기본 환경으로 사용하지 않는다.
 - Gymnasium은 DES core 위에 얇게 붙이는 wrapper다.
@@ -182,8 +186,8 @@
 ## 11. 가시화/디버깅 기준
 
 - 휴리스틱 또는 학습 결과는 사람이 직접 확인 가능한 report와 playback으로 남긴다.
-- 정적 리포트는 추가 서버 없이 브라우저에서 여는 `index.html`을 목표로 한다.
-- 동적 playback은 `playback.html`을 목표로 한다.
+- 정적 리포트는 추가 서버 없이 브라우저에서 여는 `index.html`을 사용한다.
+- 동적 playback은 `playback.html`을 사용한다.
 - playback은 시간 흐름, play/pause, speed control, timeline slider를 제공해야 한다.
 - playback은 machine별 현재 작업, W/O 상태, 진행률, simulation clock, W/O 검색을 제공해야 한다.
 - hard validation 실패 시 playback을 정상 결과처럼 보여주지 않는다.
@@ -197,7 +201,8 @@
 코드 수정 후 최소 아래를 확인한다.
 
 ```bash
-python3 -X pycache_prefix=/tmp/pmsp_pycache -m py_compile main.py Environment/*.py Environment/constraints/*.py Utils/*.py
+python3 -X pycache_prefix=/tmp/pmsp_pycache -m py_compile main.py Agent/*.py Phase1/*.py Phase2/*.py Environment/*.py Environment/constraints/*.py Utils/data/*.py Utils/learning/*.py Utils/phase1/*.py Utils/reporting/*.py Train/network/*.py scripts/*.py
+python3 -m unittest discover -s tests -p 'test_*.py'
 python3 main.py show-config --config config_np_100.yaml
 python3 main.py factory-summary --config config_np_100.yaml
 python3 main.py simulate --config config_np_100.yaml --heuristic spt

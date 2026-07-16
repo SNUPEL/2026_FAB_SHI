@@ -16,10 +16,8 @@ env/
 Thumbs.db
 
 # Generated outputs
-output/*.pt
-output/*.pth
-output/generated_*.yaml
-output/*.log
-
-# Keep the output directory itself
-!output/.gitkeep
+/output/
+/tmp/
+/notebooks/*.png
+/codex-local-skills.tar.gz
+/phase1_4method_comparison.csv

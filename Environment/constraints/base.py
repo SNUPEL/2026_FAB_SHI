@@ -61,7 +61,7 @@ class ConstraintContext:
     layout:
       현재는 위치 정보만 유지하는 단순 메타데이터
     config:
-      config.yaml 전체 설정
+      실행에 사용한 YAML config 전체 설정
 
     current_day_key / current_day_index:
       현재 시뮬레이션 시각이 어느 운영일에 해당하는지

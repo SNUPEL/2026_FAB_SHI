@@ -9,13 +9,11 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
 1. 진행 상태와 남은 작업: [`현재과제_진행체크리스트.md`](현재과제_진행체크리스트.md)
 2. 실행 코드·state·action·feature·학습·데이터 계약:
    [`다계열_Phase1_정책_및_합성데이터_생성_계약.md`](다계열_Phase1_정책_및_합성데이터_생성_계약.md)
-3. MIXED 합성데이터 인과 생성 최종 계약:
-   [`MIXED_합성데이터_인과생성_최종정리.txt`](MIXED_합성데이터_인과생성_최종정리.txt)
-4. 장시간 학습·재개·Phase 2 upstream 비교 실행:
+3. 장시간 학습·재개·Phase 2 upstream 비교 실행:
    [`다계열_Phase1_Phase2_학습_실행_가이드.md`](다계열_Phase1_Phase2_학습_실행_가이드.md)
-5. 빠른 실행 방법: 이 README
+4. 빠른 실행 방법: 이 README
 
-그 밖의 루트 md는 과거 설계 근거 archive이며 현재 실행 계약보다 우선하지 않습니다.
+과거 설계와 실행 이력은 별도 문서로 중복 보관하지 않고 Git history에서 확인합니다.
 
 ## 문제 정의
 
@@ -58,6 +56,10 @@ Bay 24 : PLS41, PLS42, PLS43, PLS44
 Bay 25 : PLS51, PLS52
 trans  : PLP01, PLP02
 ```
+
+`config_np_100.yaml`과 `config_np_full.yaml`의 DES/replay는 기존 NP 실적 범위를
+회귀검증하므로 해당 scope의 13대 factory를 사용합니다. 위 15대는 MIXED Phase 1/2
+학습·계획 topology이며 두 factory를 같은 실행 대상으로 해석하지 않습니다.
 
 실적 `EQP_1~EQP_16`은 위 identity로 엄격히 매핑합니다. 단 `EQP_3`은 신규 데이터
 403건 모두 `NC + trans`인 실적 전용 설비이므로 actual identity에는 보존하지만,
