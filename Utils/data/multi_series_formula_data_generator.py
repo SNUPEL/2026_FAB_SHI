@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Sequence
+from typing import Dict, Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -81,6 +81,12 @@ class MultiSeriesFormulaGeneration:
     physical_block_count: int
     series_combinations: tuple[tuple[str, ...], ...]
     allocation_df: pd.DataFrame
+
+
+def _python_int_tuple(values: Iterable[object]) -> tuple[int, ...]:
+    """uint32 seed를 Windows signed int로 축소하지 않고 Python int로 변환한다."""
+
+    return tuple(int(value) for value in values)
 
 
 def fit_physical_block_joint_profile(
@@ -533,7 +539,7 @@ def generate_multi_series_formula_data(
             wo_source_path=wo_path,
             block_source_path=block_path,
             wo_counts=tuple(series_allocations["SERIES_WO_QTY"].astype(int)),
-            block_seeds=tuple(series_allocations["SERIES_RANDOM_SEED"].astype(int)),
+            block_seeds=_python_int_tuple(series_allocations["SERIES_RANDOM_SEED"]),
         )
         wo_frames.append(
             _assign_physical_block_identity_in_order(
@@ -906,10 +912,10 @@ def validate_multi_series_formula_data(
             raise RuntimeError("invalid expected series allocation values")
         expected_series_counts = allocation.set_index(
             ["PROJ_NO", "BLK_NO", "GYEL"]
-        )["SERIES_WO_QTY"].astype(int).sort_index()
+        )["SERIES_WO_QTY"].astype("int64").sort_index()
         actual_series_counts = work_orders.groupby(
             ["PROJ_NO", "BLK_NO", "GYEL"], sort=True
-        ).size().sort_index()
+        ).size().astype("int64").sort_index()
         if not expected_series_counts.equals(actual_series_counts):
             print(
                 "[ERROR][multi_series_formula_data_generator.validate_multi_series_formula_data] "
@@ -927,11 +933,11 @@ def validate_multi_series_formula_data(
             ["PROJ_NO", "BLK_NO"], sort=True
         ).size()
         if (
-            not physical_allocation["ALLOCATED_WO_QTY"].astype(int).equals(
-                physical_allocation["FORMULA_WO_QTY"].astype(int)
+            not physical_allocation["ALLOCATED_WO_QTY"].astype("int64").equals(
+                physical_allocation["FORMULA_WO_QTY"].astype("int64")
             )
-            or not physical_allocation["ALLOCATED_WO_QTY"].astype(int).equals(
-                actual_physical_counts.astype(int)
+            or not physical_allocation["ALLOCATED_WO_QTY"].astype("int64").equals(
+                actual_physical_counts.astype("int64")
             )
             or not physical_allocation["FORMULA_WO_QTY_UNIQUE"].eq(1).all()
         ):

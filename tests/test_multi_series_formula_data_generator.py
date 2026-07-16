@@ -39,6 +39,19 @@ def _joint_block_row(project: str, block: str, series: str, base: float) -> dict
 
 
 class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
+    def test_python_seed_conversion_preserves_uint32_range(self) -> None:
+        values = pd.Series(
+            [
+                np.uint32(np.iinfo(np.int32).max + 1),
+                np.uint32(np.iinfo(np.uint32).max),
+            ]
+        )
+
+        self.assertEqual(
+            multi_formula._python_int_tuple(values),
+            (2_147_483_648, 4_294_967_295),
+        )
+
     def test_joint_profile_uses_physical_block_identity_and_wo_counts(self) -> None:
         work_orders = pd.DataFrame(
             [
