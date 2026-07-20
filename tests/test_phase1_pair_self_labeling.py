@@ -34,7 +34,7 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
         cls.weights = joint_phase1_bay_capacity_weights()
         cls.bay_ids = tuple(cls.weights)
 
-    def test_pair_candidates_use_single_16_plus_5_mixed_schema(self) -> None:
+    def test_pair_candidates_use_single_19_plus_8_mixed_schema(self) -> None:
         candidates = build_phase1_pair_candidates(
             jobs=self.episode["jobs"],
             bay_ids=self.bay_ids,
@@ -42,11 +42,22 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
         )
 
         self.assertGreater(len(candidates), 0)
-        self.assertEqual(len(PHASE1_PAIR_FEATURE_NAMES), 16)
-        self.assertEqual(len(PHASE1_PAIR_ENV_FEATURE_NAMES), 5)
+        self.assertEqual(len(PHASE1_PAIR_FEATURE_NAMES), 19)
+        self.assertEqual(len(PHASE1_PAIR_ENV_FEATURE_NAMES), 8)
+        self.assertEqual(
+            PHASE1_PAIR_FEATURE_NAMES[-6:],
+            [
+                "projected_shared_wo_gap_ratio",
+                "projected_series_wo_gap_ratio",
+                "projected_shared_cut_gap_ratio",
+                "projected_series_cut_gap_ratio",
+                "projected_shared_bevel_gap_ratio",
+                "projected_series_bevel_gap_ratio",
+            ],
+        )
         for candidate in candidates:
             self.assertEqual(candidate["feature_names"], PHASE1_PAIR_FEATURE_NAMES)
-            self.assertEqual(len(candidate["features"]), 16)
+            self.assertEqual(len(candidate["features"]), 19)
             self.assertIn(candidate["bay_id"], self.bay_ids)
 
     def test_uniform_policy_rollout_assigns_every_block_once(self) -> None:
@@ -65,7 +76,7 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
         self.assertEqual(len(rollout.transitions), self.episode["block_count"])
         self.assertEqual(set(rollout.bay_loads), set(self.bay_ids))
         for transition in rollout.transitions:
-            self.assertEqual(len(transition.env_features), 5)
+            self.assertEqual(len(transition.env_features), 8)
             self.assertTrue(0 <= transition.selected_action_index < len(transition.candidate_ids))
 
     def test_one_episode_training_writes_only_mixed_checkpoint_contract(self) -> None:
@@ -92,9 +103,9 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
             self.assertTrue((Path(temp_dir) / "metrics.csv").is_file())
             self.assertEqual(result["rule_profile"], "multi_series_260711")
             self.assertEqual(result["score_mode"], "wo_first")
-            self.assertEqual(result["episode_scope_version"], "joint_five_bay_v2_mapped_eqp")
-            self.assertEqual(loaded.pair_feature_dim, 16)
-            self.assertEqual(loaded.env_feature_dim, 5)
+            self.assertEqual(result["episode_scope_version"], "joint_five_bay_v3_shared_pool")
+            self.assertEqual(loaded.pair_feature_dim, 19)
+            self.assertEqual(loaded.env_feature_dim, 8)
 
     def test_old_or_incomplete_checkpoint_is_rejected(self) -> None:
         model = Phase1PairPointerPolicy(

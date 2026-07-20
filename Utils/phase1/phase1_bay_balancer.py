@@ -412,14 +412,41 @@ def _add_block_load(loads: Dict[str, int | float], bay_id: str, block: Phase1Blo
 
 def _multi_objective_load_score(
     bay_loads: Mapping[str, Mapping[str, int | float]],
-) -> Tuple[float, float, float]:
-    """그룹별 설비 수 정규화 gap 합을 W/O -> CUT -> BV 순서로 반환한다."""
+) -> Tuple[float, float, float, float, float, float]:
+    """공유 설비군 전체 gap과 계열별 gap을 W/O -> CUT -> BV 순서로 반환한다."""
 
-    metric_scores = {
+    shared_pool_scores = {
         "wo_count": 0.0,
         "cut_length_sum": 0.0,
         "bevel_quantity_sum": 0.0,
     }
+    series_group_scores = {
+        "wo_count": 0.0,
+        "cut_length_sum": 0.0,
+        "bevel_quantity_sum": 0.0,
+    }
+    for pool_bays in (("22", "23", "24"), ("25", "trans")):
+        missing = sorted(set(pool_bays) - set(bay_loads))
+        if missing:
+            print(
+                "[ERROR][phase1_bay_balancer._multi_objective_load_score] "
+                f"cause=missing_shared_pool_bays bay_ids={missing}"
+            )
+            raise RuntimeError(f"missing Phase 1 shared-pool Bays: {missing}")
+        for metric in shared_pool_scores:
+            values = [
+                _require_non_negative_float(
+                    bay_loads[bay_id].get(metric),
+                    metric,
+                    f"shared_pool_score:{bay_id}",
+                )
+                / _require_capacity_weight(
+                    bay_loads[bay_id], f"shared_pool_score:{bay_id}"
+                )
+                for bay_id in pool_bays
+            ]
+            shared_pool_scores[metric] += _gap(values)
+
     for group in PHASE1_BALANCING_GROUP_ORDER:
         group_weights = GROUP_BAY_CAPACITY_WEIGHTS[group]
         if not set(group_weights) <= set(bay_loads):
@@ -440,16 +467,17 @@ def _multi_objective_load_score(
                     f"expected={expected_weight} actual={actual_weight}"
                 )
                 raise RuntimeError(f"Phase 1 group capacity mismatch: {group}/{bay_id}")
-        for metric in metric_scores:
+        for metric in series_group_scores:
             values = [
                 multi_series_group_load_value(bay_loads[bay_id], group, metric)
                 / group_weights[bay_id]
                 for bay_id in group_weights
             ]
-            metric_scores[metric] += _gap(values)
+            series_group_scores[metric] += _gap(values)
     return tuple(
-        _round_score(metric_scores[metric])
+        _round_score(score)
         for metric in ("wo_count", "cut_length_sum", "bevel_quantity_sum")
+        for score in (shared_pool_scores[metric], series_group_scores[metric])
     )
 
 

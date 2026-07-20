@@ -47,7 +47,7 @@ class PhaseOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(self.phase1["candidate_count"], 3)
         self.assertEqual(plan["rule_profile"], "multi_series_260711")
-        self.assertEqual(plan["scope_version"], "joint_five_bay_v2_mapped_eqp")
+        self.assertEqual(plan["scope_version"], "joint_five_bay_v3_shared_pool")
         self.assertEqual(set(plan["bay_loads"]), {"22", "23", "24", "25", "trans"})
         self.assertEqual(plan["summary"]["job_count"], len(self.episode["jobs"]))
         self.assertEqual(plan["summary"]["assignment_count"], self.episode["block_count"])

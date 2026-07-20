@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from Phase1.heuristics import PHASE1_HEURISTIC_BANK, run_phase1_heuristic_candidate
+from Phase1.heuristics import (
+    PHASE1_HEURISTIC_BANK,
+    run_phase1_heuristic_candidate,
+    score_phase1_bay_loads,
+)
 from Phase1.orchestrator import candidate_to_phase1_plan
 from Utils.phase1.multi_series_rules import joint_phase1_bay_capacity_weights
 from Utils.phase1.phase1_bay_balancer import apply_phase1_plan_to_scenario
@@ -75,9 +79,26 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(len(np_bays), 1)
         self.assertEqual(len(next(iter(np_bays))), 1)
         self.assertEqual(plan["rule_profile"], "multi_series_260711")
-        self.assertEqual(plan["scope_version"], "joint_five_bay_v2_mapped_eqp")
+        self.assertEqual(plan["scope_version"], "joint_five_bay_v3_shared_pool")
         self.assertEqual(plan["score_mode"], "wo_first")
-        self.assertEqual(len(plan["score"]), 3)
+        self.assertEqual(len(plan["score"]), 6)
+
+    def test_shared_pool_score_lets_nc_compensate_np_bay24_underload(self) -> None:
+        compensated = self._bay_loads(
+            np_wo={"22": 40, "23": 30, "24": 18},
+            nc_wo={"22": 0, "23": 0, "24": 22},
+        )
+        series_balanced = self._bay_loads(
+            np_wo={"22": 40, "23": 30, "24": 18},
+            nc_wo={"22": 8, "23": 6, "24": 8},
+        )
+
+        compensated_score = score_phase1_bay_loads(compensated)
+        series_balanced_score = score_phase1_bay_loads(series_balanced)
+
+        self.assertEqual(compensated_score, (0.0, 11.0, 0.0, 0.0, 0.0, 0.0))
+        self.assertEqual(series_balanced_score, (5.5, 5.5, 0.0, 0.0, 0.0, 0.0))
+        self.assertLess(compensated_score, series_balanced_score)
 
     def test_mixed_family_inside_one_block_series_fails(self) -> None:
         jobs = {
@@ -121,6 +142,24 @@ class Phase1BayBalancerTest(unittest.TestCase):
             "prohibited_machine_ids": (),
             "extra": {"source_wk_ord_no": job_id},
         }
+
+    def _bay_loads(self, *, np_wo: dict[str, int], nc_wo: dict[str, int]) -> dict:
+        loads = {}
+        for bay_id, capacity_weight in self.weights.items():
+            row = {
+                "capacity_weight": capacity_weight,
+                "wo_count": np_wo.get(bay_id, 0) + nc_wo.get(bay_id, 0),
+                "cut_length_sum": 0.0,
+                "bevel_quantity_sum": 0,
+            }
+            for group in ("np", "fn_fl", "nc"):
+                row[f"group_{group}_wo_count"] = 0
+                row[f"group_{group}_cut_length_sum"] = 0.0
+                row[f"group_{group}_bevel_quantity_sum"] = 0
+            row["group_np_wo_count"] = np_wo.get(bay_id, 0)
+            row["group_nc_wo_count"] = nc_wo.get(bay_id, 0)
+            loads[bay_id] = row
+        return loads
 
 
 if __name__ == "__main__":

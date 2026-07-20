@@ -24,8 +24,8 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
 - 동일 block-series의 모든 W/O는 반드시 같은 Bay로 갑니다.
 - Bay: `22`, `23`, `24`, `25`, `trans`
 - 설비 수 기반 용량비: `4:3:4:2:2`
-- 사전식 score: 평준화 그룹별 설비 수 정규화
-  `W/O 수 gap -> CUT_LTH gap -> BV_QTY gap`
+- 사전식 score: 공유 설비군 전체 부하와 계열별 부하를 각각 설비 수로 정규화
+  `전체 W/O gap -> 계열별 W/O gap -> 전체 CUT_LTH gap -> 계열별 CUT_LTH gap -> 전체 BV_QTY gap -> 계열별 BV_QTY gap`
 - 평준화 그룹: `NP`, `NC`, `FN+FL`
 - hard mask:
   - NP/NC: Bay 22/23/24
@@ -33,7 +33,7 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
   - NP `CUT_LTH >= 1000`, `BTH > 4500`, CNT block: Bay 22/23
 
 Phase 1 action은 가능한 `(block-series, Bay)` edge 하나를 선택합니다. 정책 입력은
-16차원 pair feature와 5차원 환경 feature이며, 후보 수와 Bay 수에 독립적인
+19차원 pair feature와 8차원 환경 feature이며, 후보 수와 Bay 수에 독립적인
 pointer-style scorer입니다.
 
 ### Phase 2
@@ -216,7 +216,7 @@ python main.py phase2-run-full-workflow \
 Checkpoint 실행은 저장된 RunSpec의 score mode, batch limit, action pool,
 heuristic bank, sampling 수, Phase 1 용량비와 제약 profile이 다르면 실패합니다.
 `joint_five_bay_v1` checkpoint는 과거 `4:4:3:2:2` 용량비일 수 있으므로 재사용하지
-않으며, 현재 공개 scope는 `joint_five_bay_v2_mapped_eqp`입니다.
+않으며, 현재 공개 scope는 `joint_five_bay_v3_shared_pool`입니다.
 
 ## 구조
 

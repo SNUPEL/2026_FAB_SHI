@@ -41,7 +41,7 @@ def run_phase1_heuristic_candidate(
     algorithm: str,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
 ) -> Phase1HeuristicCandidate:
-    """확정된 MIXED hard mask와 W/O-first score로 한 후보를 만든다."""
+    """확정된 MIXED mask와 공유 설비군 우선 W/O-first score로 한 후보를 만든다."""
 
     if algorithm not in PHASE1_HEURISTIC_BANK:
         print(
@@ -96,7 +96,7 @@ def run_phase1_heuristic_candidate(
 def score_phase1_bay_loads(
     bay_loads: Mapping[str, Mapping[str, int | float]],
 ) -> tuple:
-    """MIXED Phase 1의 W/O -> CUT -> BV 사전식 score를 반환한다."""
+    """공유 설비군/계열별 W/O -> CUT -> BV 사전식 score를 반환한다."""
 
     return _multi_objective_load_score(bay_loads)
 

@@ -32,7 +32,7 @@ Bay `22`, `23`, `24`, `25`, `trans`와 설비 수 기반 용량비 `4:3:4:2:2`�
 
 과거 `phase1_pair_v9_capacity_actual8_ppb_lcp6` checkpoint는 NP-only feature와 과거
 Bay 계약으로 학습됐으므로 재개하지 않는다. 현재 scope는
-`joint_five_bay_v2_mapped_eqp`이며 새 output에서 처음 학습해야 한다.
+`joint_five_bay_v3_shared_pool`이며 새 output에서 처음 학습해야 한다.
 
 ## 3. CUDA 확인
 
@@ -48,7 +48,7 @@ CUDA가 보이지 않으면 학습 코드는 CPU로 조용히 대체하지 않�
 ### 4.1 처음 학습
 
 ```cmd
-python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms all --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --output-dir output/phase1_mixed_eqp15
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms all --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --output-dir output/phase1_mixed_shared_pool_v3
 ```
 
 매 episode에서 물리 블록 12~80개를 가진 MIXED 합성문제를 새로 만든다. 현재
@@ -56,17 +56,20 @@ policy의 greedy/sample 후보 64개와 다음 세 휴리스틱을 비교한다.
 
 | CLI 이름 | 블록 선택 기준 | Bay 선택 기준 |
 | --- | --- | --- |
-| `wo_first_balanced` | W/O 수가 큰 block-series 우선 | W/O 수 → CUT_LTH → BV_QTY gap |
-| `cut_first_balanced` | CUT_LTH가 큰 block-series 우선 | W/O 수 → CUT_LTH → BV_QTY gap |
-| `bevel_first_balanced` | BV_QTY가 큰 block-series 우선 | W/O 수 → CUT_LTH → BV_QTY gap |
+| `wo_first_balanced` | W/O 수가 큰 block-series 우선 | 공유 전체/계열별 W/O → CUT_LTH → BV_QTY gap |
+| `cut_first_balanced` | CUT_LTH가 큰 block-series 우선 | 공유 전체/계열별 W/O → CUT_LTH → BV_QTY gap |
+| `bevel_first_balanced` | BV_QTY가 큰 block-series 우선 | 공유 전체/계열별 W/O → CUT_LTH → BV_QTY gap |
 
 모든 후보는 동일한 hard mask와 사전식 score로 평가된다. 가장 좋은 완성 계획의
 action sequence가 self-label이 되며 CE/NLL update를 한 번 수행한다.
 
+현재 Phase 1 state는 pair 19차원, environment 8차원이다. 과거 16+5 checkpoint는
+입력 계약이 달라 재사용하지 않으며 새 output directory에서 처음부터 학습한다.
+
 ### 4.2 이어서 학습
 
 ```cmd
-python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms all --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --resume-checkpoint latest --output-dir output/phase1_mixed_eqp15
+python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms all --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --resume-checkpoint latest --output-dir output/phase1_mixed_shared_pool_v3
 ```
 
 `--episodes`는 추가 학습 횟수가 아니라 최종 episode 번호다. 예를 들어 3,100에서
@@ -77,11 +80,16 @@ python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --epi
 ### 4.3 Loss 그래프
 
 ```cmd
-python scripts/plot_phase1_loss_only.py output/phase1_mixed_eqp15 --window 100
+python scripts/plot_phase1_loss_only.py output/phase1_mixed_shared_pool_v3 --window 100
 ```
 
 `metrics.csv`만 읽어 `loss_curve.png`, `loss_curve_normalized.png`,
 `loss_only_status.json`을 갱신한다.
+
+Phase 1 validation은 공유 설비군 전체 gap인 `validation_wo_gap.png`,
+`validation_cut_gap.png`, `validation_bevel_gap.png`와 계열별 gap인
+`validation_series_wo_gap.png`, `validation_series_cut_gap.png`,
+`validation_series_bevel_gap.png`를 함께 생성한다.
 
 ## 5. Phase 2 비교 실험 설계
 
@@ -136,7 +144,7 @@ python main.py phase2-train-batch-machine-self-labeling --config config_np_100.y
 Phase 1 장시간 학습이 끝난 뒤 실행한다.
 
 ```cmd
-python main.py phase2-train-batch-machine-self-labeling --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_eqp15/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms workload_makespan_dispatch,min_makespan,lookahead_min_makespan,best_fit_lth,balanced_tact_load,spt_batch,lpt_batch --phase2-score-mode raw --hidden-dim 128 --action-pool-limit None --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --output-dir output/phase2_upstream_agent_s32
+python main.py phase2-train-batch-machine-self-labeling --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_shared_pool_v3/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms workload_makespan_dispatch,min_makespan,lookahead_min_makespan,best_fit_lth,balanced_tact_load,spt_batch,lpt_batch --phase2-score-mode raw --hidden-dim 128 --action-pool-limit None --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --output-dir output/phase2_upstream_agent_s32
 ```
 
 이 모드에서 Phase 1 agent는 freeze 상태다. 매 Phase 2 episode마다 Phase 1 완성 계획
@@ -150,7 +158,7 @@ python main.py phase2-train-batch-machine-self-labeling --config config_np_100.y
 같다.
 
 ```cmd
-python main.py phase2-train-batch-machine-self-labeling --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_eqp15/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms workload_makespan_dispatch,min_makespan,lookahead_min_makespan,best_fit_lth,balanced_tact_load,spt_batch,lpt_batch --phase2-score-mode raw --hidden-dim 128 --action-pool-limit None --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --resume-checkpoint latest --output-dir output/phase2_upstream_agent_s32
+python main.py phase2-train-batch-machine-self-labeling --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_shared_pool_v3/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms workload_makespan_dispatch,min_makespan,lookahead_min_makespan,best_fit_lth,balanced_tact_load,spt_batch,lpt_batch --phase2-score-mode raw --hidden-dim 128 --action-pool-limit None --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --resume-checkpoint latest --output-dir output/phase2_upstream_agent_s32
 ```
 
 Phase 2도 `--episodes`는 최종 episode 번호다. score mode, batch limit, action pool,
@@ -197,7 +205,7 @@ python main.py phase2-run-full-workflow --config config_np_100.yaml --phase1-heu
 ### 8.2 학습된 Phase 1 agent + 학습된 Phase 2 agent
 
 ```cmd
-python main.py phase2-run-full-workflow --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_eqp15/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --batch-machine-checkpoint output/phase2_upstream_agent_s32/phase2_batch_machine_policy.pt --synthetic-blocks 30 --seed 0 --output-dir output/full_flow_agent_agent
+python main.py phase2-run-full-workflow --config config_np_100.yaml --phase1-checkpoint output/phase1_mixed_shared_pool_v3/phase1_pair_pointer_best.pt --phase1-samples 32 --phase1-temperature 1.0 --batch-machine-checkpoint output/phase2_upstream_agent_s32/phase2_batch_machine_policy.pt --synthetic-blocks 30 --seed 0 --output-dir output/full_flow_agent_agent
 ```
 
 Phase 2 checkpoint 실행은 저장된 RunSpec을 상속한다. 학습 때와 다른 Phase 1
@@ -206,7 +214,7 @@ checkpoint, sampling 수, score mode 또는 batch/action 계약을 섞으면 실
 ## 9. 권장 실행 순서
 
 1. CUDA 인식 확인
-2. Phase 1 `phase1_mixed_eqp15` 장시간 학습
+2. Phase 1 `phase1_mixed_shared_pool_v3` 장시간 학습
 3. Phase 1 validation과 loss 확인
 4. Phase 2 H-WO, H-CUT, H-BV 세 실험 실행
 5. Phase 2 A-P1 frozen-agent 실험 실행

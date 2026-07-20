@@ -12,9 +12,10 @@
 - Phase 2: `SELECT_MACHINE -> SELECT_WO`를 반복하는 batch-machine scheduling
 - 공통 환경: `Environment.hierarchical.CommonHierarchicalEnvironment`
 - 실행 엔진: SimPy가 아닌 custom event-driven DES
-- Phase 1 scope: `joint_five_bay_v2_mapped_eqp`
+- Phase 1 scope: `joint_five_bay_v3_shared_pool`
 - Phase 1 rule profile: `multi_series_260711`
 - Phase 1 score mode: `wo_first`
+- Phase 1 score: `공유 설비군 전체 W/O gap -> 계열별 W/O gap -> 공유 설비군 전체 CUT_LTH gap -> 계열별 CUT_LTH gap -> 공유 설비군 전체 BV_QTY gap -> 계열별 BV_QTY gap`
 - silent fallback: 허용하지 않음
 
 과거 NP-only pair-policy, imitation, 분리 Phase 2.1/2.2/3 실행 경로와
@@ -257,7 +258,7 @@ FN-NC 40개처럼 희소한 실적 관계는 표본 불확실성도 크다. 사�
 동일 block-series를 두 Bay로 나누는 action은 생성하지 않는다. feasible edge가
 없으면 임의 Bay를 복원하지 않고 실패한다.
 
-### 5.2 Pair feature 16차원
+### 5.2 Pair feature 19차원
 
 1. block W/O 수 비율
 2. block CUT_LTH 비율
@@ -272,25 +273,36 @@ FN-NC 40개처럼 희소한 실적 관계는 표본 불확실성도 크다. 사�
 11. 후보 Bay의 현재 CUT_LTH/설비수 부하
 12. 후보 Bay의 현재 BV_QTY/설비수 부하
 13. 후보 Bay 설비수 비율
-14. 선택 후 W/O 정규화 gap
-15. 선택 후 CUT_LTH 정규화 gap
-16. 선택 후 BV_QTY 정규화 gap
+14. 선택 후 공유 설비군 전체 W/O 정규화 gap
+15. 선택 후 계열별 W/O 정규화 gap
+16. 선택 후 공유 설비군 전체 CUT_LTH 정규화 gap
+17. 선택 후 계열별 CUT_LTH 정규화 gap
+18. 선택 후 공유 설비군 전체 BV_QTY 정규화 gap
+19. 선택 후 계열별 BV_QTY 정규화 gap
 
-### 5.3 Environment feature 5차원
+### 5.3 Environment feature 8차원
 
 1. 전체 진행률
 2. 남은 block-series 비율
-3. 현재 W/O 정규화 gap
-4. 현재 CUT_LTH 정규화 gap
-5. 현재 BV_QTY 정규화 gap
+3. 현재 공유 설비군 전체 W/O 정규화 gap
+4. 현재 계열별 W/O 정규화 gap
+5. 현재 공유 설비군 전체 CUT_LTH 정규화 gap
+6. 현재 계열별 CUT_LTH 정규화 gap
+7. 현재 공유 설비군 전체 BV_QTY 정규화 gap
+8. 현재 계열별 BV_QTY 정규화 gap
 
 ### 5.4 Score
 
-각 후보 완성 계획은 `NP`, `FN+FL`, `NC` 그룹별 유효 Bay에서 설비 수로 정규화한
-max-min gap을 계산하고 그룹별 gap을 합산한다.
+각 후보 완성 계획은 먼저 물리적으로 설비를 공유하는 `NP+NC: Bay 22/23/24`와
+`FN+FL: Bay 25/trans`의 전체 부하를 Bay별 설비 수로 나눈 max-min gap으로 계산한다.
+그다음 `NP`, `FN+FL`, `NC` 계열 그룹별 gap을 계산한다. 따라서 NP hard mask로
+Bay 24가 저부하이면 NC가 Bay 24를 보완하는 계획이 먼저 선택되고, 전체 부하가 같은
+후보 사이에서는 계열별 균형을 비교한다.
 
 ```text
-(W/O count gap, CUT_LTH gap, BV_QTY gap)
+(shared W/O gap, series W/O gap,
+ shared CUT_LTH gap, series CUT_LTH gap,
+ shared BV_QTY gap, series BV_QTY gap)
 ```
 
 비교는 weighted sum이 아닌 사전식이다. Phase 1 policy는 pair와 environment

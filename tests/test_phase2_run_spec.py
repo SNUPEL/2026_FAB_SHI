@@ -45,7 +45,7 @@ class Phase2RunSpecTest(unittest.TestCase):
             joint_phase1_bay_capacity_weights(),
         )
         self.assertEqual(spec["phase1_rule_profile"], "multi_series_260711")
-        self.assertEqual(spec["phase1_scope_version"], "joint_five_bay_v2_mapped_eqp")
+        self.assertEqual(spec["phase1_scope_version"], "joint_five_bay_v3_shared_pool")
         self.assertEqual(spec["phase1_score_mode"], "wo_first")
         self.assertNotIn("phase1_long_cut_hard_mask", spec)
 

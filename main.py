@@ -577,8 +577,11 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
     print(f"- validation_candidate_summary_csv: {summary['validation_candidate_summary_csv']}")
     print(f"- validation_wo_gap_png: {summary.get('validation_wo_gap_png', '')}")
+    print(f"- validation_series_wo_gap_png: {summary.get('validation_series_wo_gap_png', '')}")
     print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
+    print(f"- validation_series_cut_gap_png: {summary.get('validation_series_cut_gap_png', '')}")
     print(f"- validation_bevel_gap_png: {summary.get('validation_bevel_gap_png', '')}")
+    print(f"- validation_series_bevel_gap_png: {summary.get('validation_series_bevel_gap_png', '')}")
     print(f"- summary_json: {summary['summary_json']}")
     print(f"- best_source_counts: {summary['best_source_counts']}")
 

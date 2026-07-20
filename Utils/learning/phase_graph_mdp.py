@@ -66,9 +66,12 @@ PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES = [
     "bay_current_cut_per_capacity_ratio",
     "bay_current_bevel_per_capacity_ratio",
     "bay_capacity_weight_ratio",
-    "projected_wo_gap_ratio",
-    "projected_cut_gap_ratio",
-    "projected_bevel_gap_ratio",
+    "projected_shared_wo_gap_ratio",
+    "projected_series_wo_gap_ratio",
+    "projected_shared_cut_gap_ratio",
+    "projected_series_cut_gap_ratio",
+    "projected_shared_bevel_gap_ratio",
+    "projected_series_bevel_gap_ratio",
 ]
 
 PHASE2_WO_NODE_FEATURES = [
@@ -296,7 +299,7 @@ def _phase1_multi_series_block_bay_edge(
     current_loads: Mapping[str, Mapping[str, int | float]],
     totals: Mapping[str, float],
 ) -> Dict:
-    """hard mask를 통과한 `(block, Bay)`의 투입 후 W/O-first gap을 표현한다."""
+    """mask를 통과한 `(block, Bay)`의 투입 후 공유/계열별 W/O-first gap을 표현한다."""
 
     projected_loads = copy.deepcopy(dict(current_loads))
     _add_block_load(projected_loads[bay_id], bay_id, block)
@@ -341,8 +344,11 @@ def _phase1_multi_series_block_bay_edge(
                 totals["capacity_weight_sum"],
             ),
             _ratio(score[0], totals["wo_per_capacity_average"]),
-            _ratio(score[1], totals["cut_per_capacity_average"]),
-            _ratio(score[2], totals["bevel_per_capacity_average"]),
+            _ratio(score[1], totals["wo_per_capacity_average"]),
+            _ratio(score[2], totals["cut_per_capacity_average"]),
+            _ratio(score[3], totals["cut_per_capacity_average"]),
+            _ratio(score[4], totals["bevel_per_capacity_average"]),
+            _ratio(score[5], totals["bevel_per_capacity_average"]),
         ],
     }
 

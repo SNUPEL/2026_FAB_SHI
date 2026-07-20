@@ -2,7 +2,7 @@
 
 import unittest
 
-from scripts.plot_phase1_pair_training import _best_agent_rows_by_episode
+from scripts.plot_phase1_pair_training import _best_agent_rows_by_episode, _score_labels
 
 
 class Phase1PairTrainingPlotTest(unittest.TestCase):
@@ -33,6 +33,19 @@ class Phase1PairTrainingPlotTest(unittest.TestCase):
         best_by_episode = _best_agent_rows_by_episode(rows)
 
         self.assertEqual(best_by_episode[1]["source"], "agent_sample_2")
+
+    def test_wo_first_uses_six_shared_and_series_score_labels(self) -> None:
+        self.assertEqual(
+            _score_labels("wo_first"),
+            [
+                "shared W/O gap",
+                "series W/O gap",
+                "shared cut gap",
+                "series cut gap",
+                "shared bevel gap",
+                "series bevel gap",
+            ],
+        )
 
 
 if __name__ == "__main__":

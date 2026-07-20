@@ -1,8 +1,8 @@
 """MIXED Phase 1 direct pair-action self-labeling.
 
 한 episode의 NP/NC/FN/FL block-series 의사결정 단위를 다섯 Bay에 배정한다.
-정책 계약은 `(block-series, Bay)` pair, 설비 수 정규화 W/O→CUT→BV 사전식
-목적함수, 확정 hard mask로 하나뿐이다.
+정책 계약은 `(block-series, Bay)` pair, 공유 설비군 전체/계열별 W/O→CUT→BV
+사전식 목적함수, 확정 action mask로 하나뿐이다.
 """
 
 # LINE-BY-LINE: 미래 타입 힌트를 문자열로 늦게 평가합니다. 사용: Python 버전별 annotation 충돌을 줄입니다.
@@ -71,16 +71,19 @@ from Phase1.heuristics import (
 
 # MIXED pair 후보는 W/O-first 부하, 계열 그룹, NP hard mask 상태를 포함한다.
 PHASE1_PAIR_FEATURE_NAMES = list(PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES)
-# 전역 상태는 설비 수로 정규화한 W/O/CUT/BV gap과 진행률만 사용한다.
+# 전역 상태는 공유 설비군/계열별 W/O·CUT·BV gap과 진행률을 사용한다.
 PHASE1_PAIR_ENV_FEATURE_NAMES = [
     "progress_ratio",
     "remaining_block_ratio",
-    "wo_gap_ratio",
-    "cut_gap_ratio",
-    "bevel_gap_ratio",
+    "shared_wo_gap_ratio",
+    "series_wo_gap_ratio",
+    "shared_cut_gap_ratio",
+    "series_cut_gap_ratio",
+    "shared_bevel_gap_ratio",
+    "series_bevel_gap_ratio",
 ]
-# LINE-BY-LINE: capacity-normalized 목적함수 tuple을 CSV에 score_0~score_2로 저장하기 위한 고정 column 이름입니다.
-PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(3)]
+# LINE-BY-LINE: 6개 capacity-normalized 목적함수를 CSV에 저장하는 고정 column 이름입니다.
+PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(6)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
 
@@ -313,8 +316,11 @@ def _build_phase1_pair_candidates_from_cache(
                     totals["capacity_weight_sum"],
                 ),
                 _phase1_pair_ratio(score[0], totals["wo_per_capacity_average"]),
-                _phase1_pair_ratio(score[1], totals["cut_per_capacity_average"]),
-                _phase1_pair_ratio(score[2], totals["bevel_per_capacity_average"]),
+                _phase1_pair_ratio(score[1], totals["wo_per_capacity_average"]),
+                _phase1_pair_ratio(score[2], totals["cut_per_capacity_average"]),
+                _phase1_pair_ratio(score[3], totals["cut_per_capacity_average"]),
+                _phase1_pair_ratio(score[4], totals["bevel_per_capacity_average"]),
+                _phase1_pair_ratio(score[5], totals["bevel_per_capacity_average"]),
             ]
             candidates.append(
                 {
@@ -687,6 +693,7 @@ def train_phase1_pair_self_labeling(
                 "hard_case_corr_steel_cut_before": hard_case_corr_before,
                 "hard_case_corr_steel_cut_after": hard_case_corr_after,
                 "best_source": best.source,
+                "score_mode": "wo_first",
                 "loss": loss,
                 "score_json": json.dumps(list(score), ensure_ascii=False),
                 "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
@@ -1489,8 +1496,11 @@ def _pair_env_features(
         assigned_block_count / total_block_count,
         (total_block_count - assigned_block_count) / total_block_count,
         float(score[0]) / totals["wo"],
-        float(score[1]) / totals["cut"],
-        float(score[2]) / totals["bevel"],
+        float(score[1]) / totals["wo"],
+        float(score[2]) / totals["cut"],
+        float(score[3]) / totals["cut"],
+        float(score[4]) / totals["bevel"],
+        float(score[5]) / totals["bevel"],
     ]
 
 
@@ -2095,6 +2105,7 @@ def _write_metrics(path: Path, rows: Sequence[Mapping]) -> None:
             "hard_case_corr_steel_cut_before",
             "hard_case_corr_steel_cut_after",
             "best_source",
+            "score_mode",
             "loss",
             "score_json",
             "phase2_feedback_score_json",
@@ -2205,9 +2216,12 @@ def _validation_plot_specs() -> List[tuple[str, str, str, str, str]]:
     """Return score-column mapping for validation plots."""
 
     return [
-        ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "W/O load gap", "Gap"),
-        ("validation_cut_gap_png", "validation_cut_gap.png", "score_1", "Cut length gap", "Gap"),
-        ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_2", "Bevel quantity gap", "Gap"),
+        ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "Shared-pool W/O load gap", "Gap"),
+        ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_1", "Series-group W/O load gap", "Gap"),
+        ("validation_cut_gap_png", "validation_cut_gap.png", "score_2", "Shared-pool cut length gap", "Gap"),
+        ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_3", "Series-group cut length gap", "Gap"),
+        ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_4", "Shared-pool bevel quantity gap", "Gap"),
+        ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_5", "Series-group bevel quantity gap", "Gap"),
     ]
 
 

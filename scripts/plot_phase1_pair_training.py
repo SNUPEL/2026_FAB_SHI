@@ -15,6 +15,14 @@ from typing import Iterable, Mapping
 
 
 SCORE_LABELS_BY_MODE = {
+    "wo_first": [
+        "shared W/O gap",
+        "series W/O gap",
+        "shared cut gap",
+        "series cut gap",
+        "shared bevel gap",
+        "series bevel gap",
+    ],
     "steel_first": [
         "steel gap",
         "cut gap",

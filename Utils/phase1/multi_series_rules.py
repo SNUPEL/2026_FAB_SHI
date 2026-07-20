@@ -10,7 +10,7 @@ from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_B
 
 
 MULTI_SERIES_RULE_PROFILE = "multi_series_260711"
-PHASE1_MULTI_SERIES_SCOPE_VERSION = "joint_five_bay_v2_mapped_eqp"
+PHASE1_MULTI_SERIES_SCOPE_VERSION = "joint_five_bay_v3_shared_pool"
 
 SERIES_BALANCING_GROUP = {
     "NP": "NP",
