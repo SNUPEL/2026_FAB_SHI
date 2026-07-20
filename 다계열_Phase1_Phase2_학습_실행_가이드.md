@@ -80,7 +80,7 @@ python main.py phase1-train-pair-self-labeling --config config_np_100.yaml --epi
 ### 4.3 Loss 그래프
 
 ```cmd
-python scripts/plot_phase1_loss_only.py output/phase1_mixed_shared_pool_v3 --window 100
+python scripts/plot_phase1_loss_only.py output/phase1_mixed --window 100
 ```
 
 `metrics.csv`만 읽어 `loss_curve.png`, `loss_curve_normalized.png`,
