@@ -100,6 +100,39 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(series_balanced_score, (5.5, 5.5, 0.0, 0.0, 0.0, 0.0))
         self.assertLess(compensated_score, series_balanced_score)
 
+    def test_series_only_score_excludes_shared_pool_components(self) -> None:
+        compensated = self._bay_loads(
+            np_wo={"22": 40, "23": 30, "24": 18},
+            nc_wo={"22": 0, "23": 0, "24": 22},
+        )
+        series_balanced = self._bay_loads(
+            np_wo={"22": 40, "23": 30, "24": 18},
+            nc_wo={"22": 8, "23": 6, "24": 8},
+        )
+
+        compensated_score = score_phase1_bay_loads(
+            compensated,
+            objective_scope="series_only",
+        )
+        series_balanced_score = score_phase1_bay_loads(
+            series_balanced,
+            objective_scope="series_only",
+        )
+
+        self.assertEqual(compensated_score, (11.0, 0.0, 0.0))
+        self.assertEqual(series_balanced_score, (5.5, 0.0, 0.0))
+        self.assertLess(series_balanced_score, compensated_score)
+
+    def test_invalid_objective_scope_is_rejected(self) -> None:
+        with self.assertRaises(RuntimeError):
+            score_phase1_bay_loads(
+                self._bay_loads(
+                    np_wo={"22": 1, "23": 1, "24": 1},
+                    nc_wo={"22": 0, "23": 0, "24": 0},
+                ),
+                objective_scope="unknown",
+            )
+
     def test_mixed_family_inside_one_block_series_fails(self) -> None:
         jobs = {
             "WO_A": self._job("WO_A", "P1::NP::BLK_1", "NP", cut=100.0),

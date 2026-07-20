@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Sequence
 
-from Utils.phase1.multi_series_rules import joint_phase1_bay_capacity_weights
+from Utils.phase1.multi_series_rules import (
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    joint_phase1_bay_capacity_weights,
+    normalize_phase1_objective_scope,
+)
 from Utils.phase1.phase1_bay_balancer import (
     Phase1Block,
     _add_block_load,
@@ -40,9 +44,11 @@ def run_phase1_heuristic_candidate(
     bay_ids: Sequence[str],
     algorithm: str,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Phase1HeuristicCandidate:
     """확정된 MIXED mask와 공유 설비군 우선 W/O-first score로 한 후보를 만든다."""
 
+    normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
     if algorithm not in PHASE1_HEURISTIC_BANK:
         print(
             "[ERROR][phase1_heuristics.run_phase1_heuristic_candidate] "
@@ -80,7 +86,12 @@ def run_phase1_heuristic_candidate(
     for block in blocks:
         selected_bay = min(
             block.allowed_bay_ids,
-            key=lambda bay_id: _projected_score(bay_loads, bay_id, block),
+            key=lambda bay_id: _projected_score(
+                bay_loads,
+                bay_id,
+                block,
+                normalized_objective_scope,
+            ),
         )
         assignments[block.block_set_id] = selected_bay
         _add_block_load(bay_loads[selected_bay], selected_bay, block)
@@ -95,10 +106,11 @@ def run_phase1_heuristic_candidate(
 
 def score_phase1_bay_loads(
     bay_loads: Mapping[str, Mapping[str, int | float]],
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> tuple:
-    """공유 설비군/계열별 W/O -> CUT -> BV 사전식 score를 반환한다."""
+    """선택한 범위의 W/O -> CUT -> BV 사전식 score를 반환한다."""
 
-    return _multi_objective_load_score(bay_loads)
+    return _multi_objective_load_score(bay_loads, objective_scope)
 
 
 def _sort_blocks(blocks: Sequence[Phase1Block], order_name: str) -> List[Phase1Block]:
@@ -136,10 +148,11 @@ def _projected_score(
     bay_loads: Mapping[str, Mapping[str, int | float]],
     bay_id: str,
     block: Phase1Block,
+    objective_scope: str,
 ) -> tuple:
     projected = {
         current_bay_id: dict(loads)
         for current_bay_id, loads in bay_loads.items()
     }
     _add_block_load(projected[bay_id], bay_id, block)
-    return score_phase1_bay_loads(projected) + (str(bay_id),)
+    return score_phase1_bay_loads(projected, objective_scope) + (str(bay_id),)

@@ -13,11 +13,14 @@ from typing import Dict, List, Mapping, Sequence, Tuple
 from Utils.phase1.multi_series_rules import (
     GROUP_BAY_CAPACITY_WEIGHTS,
     PHASE1_BALANCING_GROUP_ORDER,
+    PHASE1_OBJECTIVE_SCOPE_SERIES_ONLY,
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     add_multi_series_group_load,
     apply_phase1_series_bay_mask,
     initialize_multi_series_group_loads,
     joint_phase1_bay_capacity_weights,
     multi_series_group_load_value,
+    normalize_phase1_objective_scope,
 )
 
 
@@ -412,8 +415,11 @@ def _add_block_load(loads: Dict[str, int | float], bay_id: str, block: Phase1Blo
 
 def _multi_objective_load_score(
     bay_loads: Mapping[str, Mapping[str, int | float]],
-) -> Tuple[float, float, float, float, float, float]:
-    """공유 설비군 전체 gap과 계열별 gap을 W/O -> CUT -> BV 순서로 반환한다."""
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+) -> Tuple[float, ...]:
+    """선택한 범위의 capacity-normalized W/O -> CUT -> BV score를 반환한다."""
+
+    normalized_scope = normalize_phase1_objective_scope(objective_scope)
 
     shared_pool_scores = {
         "wo_count": 0.0,
@@ -474,11 +480,16 @@ def _multi_objective_load_score(
                 for bay_id in group_weights
             ]
             series_group_scores[metric] += _gap(values)
-    return tuple(
+    shared_and_series_score = tuple(
         _round_score(score)
         for metric in ("wo_count", "cut_length_sum", "bevel_quantity_sum")
         for score in (shared_pool_scores[metric], series_group_scores[metric])
     )
+    if normalized_scope == PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES:
+        return shared_and_series_score
+    if normalized_scope == PHASE1_OBJECTIVE_SCOPE_SERIES_ONLY:
+        return shared_and_series_score[1::2]
+    raise AssertionError(f"unreachable Phase 1 objective scope: {normalized_scope}")
 
 
 def _require_capacity_weight(row: Mapping[str, int | float], location: str) -> float:

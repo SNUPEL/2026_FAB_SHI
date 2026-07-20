@@ -53,6 +53,28 @@ MULTI_SERIES_LOAD_METRICS = (
     "bevel_quantity_sum",
 )
 
+PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES = "shared_and_series"
+PHASE1_OBJECTIVE_SCOPE_SERIES_ONLY = "series_only"
+PHASE1_OBJECTIVE_SCOPES = (
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    PHASE1_OBJECTIVE_SCOPE_SERIES_ONLY,
+)
+PHASE1_OBJECTIVE_FIELDS_BY_SCOPE = {
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES: (
+        "shared_wo_gap",
+        "series_wo_gap",
+        "shared_cut_gap",
+        "series_cut_gap",
+        "shared_bevel_gap",
+        "series_bevel_gap",
+    ),
+    PHASE1_OBJECTIVE_SCOPE_SERIES_ONLY: (
+        "series_wo_gap",
+        "series_cut_gap",
+        "series_bevel_gap",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Phase1BayMaskResult:
@@ -62,6 +84,27 @@ class Phase1BayMaskResult:
     balancing_group: str
     allowed_bay_ids: tuple[str, ...]
     reason_codes: tuple[str, ...]
+
+
+def normalize_phase1_objective_scope(value: object) -> str:
+    """Phase 1 목적함수 범위를 검증하고 canonical 문자열로 반환한다."""
+
+    normalized = str(value).strip().lower()
+    if normalized not in PHASE1_OBJECTIVE_SCOPES:
+        print(
+            "[ERROR][multi_series_rules.normalize_phase1_objective_scope] "
+            f"cause=invalid_objective_scope value={value} "
+            f"allowed={list(PHASE1_OBJECTIVE_SCOPES)}"
+        )
+        raise RuntimeError(f"invalid Phase 1 objective scope: {value}")
+    return normalized
+
+
+def phase1_objective_field_names(objective_scope: object) -> tuple[str, ...]:
+    """선택한 scope의 사전식 score 의미를 순서대로 반환한다."""
+
+    normalized = normalize_phase1_objective_scope(objective_scope)
+    return PHASE1_OBJECTIVE_FIELDS_BY_SCOPE[normalized]
 
 
 def balancing_group_for_series(series: object) -> str:

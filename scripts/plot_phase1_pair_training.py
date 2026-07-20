@@ -15,7 +15,14 @@ from typing import Iterable, Mapping
 
 
 SCORE_LABELS_BY_MODE = {
-    "wo_first": [
+    "steel_first": [
+        "steel gap",
+        "cut gap",
+        "bevel gap",
+    ],
+}
+WO_FIRST_SCORE_LABELS_BY_OBJECTIVE_SCOPE = {
+    "shared_and_series": [
         "shared W/O gap",
         "series W/O gap",
         "shared cut gap",
@@ -23,10 +30,10 @@ SCORE_LABELS_BY_MODE = {
         "shared bevel gap",
         "series bevel gap",
     ],
-    "steel_first": [
-        "steel gap",
-        "cut gap",
-        "bevel gap",
+    "series_only": [
+        "series W/O gap",
+        "series cut gap",
+        "series bevel gap",
     ],
 }
 
@@ -40,6 +47,12 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     rows = _read_metrics(output_dir / "metrics.csv")
     candidate_rows = _read_candidate_summary(output_dir / "candidate_summary.csv")
+    rows, objective_scope = _latest_objective_scope_rows(rows)
+    if objective_scope:
+        candidate_rows = [
+            row for row in candidate_rows
+            if _row_objective_scope(row) == objective_scope
+        ]
     proposed_rows = _best_agent_rows_by_episode(candidate_rows)
     _write_plots(output_dir, rows, proposed_rows, window=args.window)
 
@@ -100,7 +113,8 @@ def _write_plots(
     proposed_sources = [_proposed_row(proposed_rows, episode)["source"] for episode in episodes]
     scores = [json.loads(_proposed_row(proposed_rows, episode)["score_json"]) for episode in episodes]
     score_mode = rows[0].get("score_mode", "steel_first")
-    labels = _score_labels(score_mode)
+    objective_scope = _objective_scope(rows, score_mode)
+    labels = _score_labels(score_mode, objective_scope)
 
     _plot_loss(output_dir / "loss_curve.png", plt, episodes, losses, normalized=False, window=window)
     _plot_loss(output_dir / "loss_curve_normalized.png", plt, episodes, losses, normalized=True, window=window)
@@ -209,7 +223,69 @@ def _plot_agent_rate(path: Path, plt, episodes: list[int], sources: list[str]) -
     plt.close()
 
 
-def _score_labels(score_mode: str) -> list[str]:
+def _objective_scope(rows: list[dict[str, str]], score_mode: str) -> str:
+    """CSV 전체에서 하나의 Phase 1 objective scope를 엄격히 확인한다."""
+
+    if score_mode != "wo_first":
+        return ""
+    scopes = {
+        str(row.get("objective_scope") or "shared_and_series")
+        for row in rows
+    }
+    if len(scopes) != 1:
+        print(
+            "[ERROR][plot_phase1_pair_training._objective_scope] "
+            f"cause=mixed_objective_scopes values={sorted(scopes)}"
+        )
+        raise RuntimeError("metrics.csv contains multiple Phase 1 objective scopes")
+    objective_scope = next(iter(scopes))
+    if objective_scope not in WO_FIRST_SCORE_LABELS_BY_OBJECTIVE_SCOPE:
+        print(
+            "[ERROR][plot_phase1_pair_training._objective_scope] "
+            f"cause=unknown_objective_scope value={objective_scope}"
+        )
+        raise RuntimeError(f"unknown Phase 1 objective scope: {objective_scope}")
+    return objective_scope
+
+
+def _row_objective_scope(row: Mapping[str, str]) -> str:
+    """Interpret old rows without an explicit scope as shared_and_series."""
+
+    return str(row.get("objective_scope") or "shared_and_series")
+
+
+def _latest_objective_scope_rows(
+    rows: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], str]:
+    """Keep the latest objective-scope segment when one output contains a transition."""
+
+    score_mode = str(rows[-1].get("score_mode") or "steel_first")
+    if score_mode != "wo_first":
+        return rows, ""
+    latest_scope = _row_objective_scope(rows[-1])
+    scopes = {_row_objective_scope(row) for row in rows}
+    if len(scopes) > 1:
+        print(
+            "[CHECK][plot_phase1_pair_training._latest_objective_scope_rows] "
+            f"objective_scope_transition=true latest={latest_scope} "
+            f"available={sorted(scopes)}"
+        )
+    return [row for row in rows if _row_objective_scope(row) == latest_scope], latest_scope
+
+
+def _score_labels(
+    score_mode: str,
+    objective_scope: str = "shared_and_series",
+) -> list[str]:
+    if score_mode == "wo_first":
+        labels = WO_FIRST_SCORE_LABELS_BY_OBJECTIVE_SCOPE.get(objective_scope)
+        if labels is None:
+            print(
+                "[ERROR][plot_phase1_pair_training._score_labels] "
+                f"cause=unknown_objective_scope value={objective_scope}"
+            )
+            raise RuntimeError(f"unknown Phase 1 objective scope: {objective_scope}")
+        return labels
     labels = SCORE_LABELS_BY_MODE.get(score_mode)
     if labels is None:
         print(f"[ERROR][plot_phase1_pair_training._score_labels] cause=unknown_score_mode score_mode={score_mode}")

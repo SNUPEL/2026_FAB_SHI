@@ -8,7 +8,9 @@ import torch.nn as nn
 from Train.network.mlp import build_mlp
 from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    normalize_phase1_objective_scope,
 )
 
 
@@ -22,11 +24,13 @@ class Phase1PairPointerPolicy(nn.Module):
         hidden_dim: int = 128,
         rule_profile: str = MULTI_SERIES_RULE_PROFILE,
         score_mode: str = "wo_first",
+        objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     ) -> None:
         super().__init__()
         _require_positive_dim(pair_feature_dim, "pair_feature_dim")
         _require_positive_dim(env_feature_dim, "env_feature_dim")
         _require_positive_dim(hidden_dim, "hidden_dim")
+        normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
         if rule_profile != MULTI_SERIES_RULE_PROFILE or score_mode != "wo_first":
             print(
                 "[ERROR][phase1_pointer.Phase1PairPointerPolicy] "
@@ -40,6 +44,7 @@ class Phase1PairPointerPolicy(nn.Module):
         self.hidden_dim = hidden_dim
         self.rule_profile = MULTI_SERIES_RULE_PROFILE
         self.score_mode = "wo_first"
+        self.objective_scope = normalized_objective_scope
         self.episode_scope_version = PHASE1_MULTI_SERIES_SCOPE_VERSION
 
         self.pair_encoder = build_mlp(pair_feature_dim, [hidden_dim], hidden_dim)

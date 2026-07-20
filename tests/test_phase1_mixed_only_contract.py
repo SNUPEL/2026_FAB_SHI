@@ -42,6 +42,7 @@ class Phase1MixedOnlyContractTests(unittest.TestCase):
         )
         self.assertEqual(model.rule_profile, MULTI_SERIES_RULE_PROFILE)
         self.assertEqual(model.score_mode, "wo_first")
+        self.assertEqual(model.objective_scope, "shared_and_series")
         self.assertEqual(model.episode_scope_version, PHASE1_MULTI_SERIES_SCOPE_VERSION)
 
 

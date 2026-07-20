@@ -93,6 +93,7 @@ from Utils.phase1.multi_series_planner import (
 from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    PHASE1_OBJECTIVE_SCOPES,
     joint_phase1_bay_capacity_weights,
 )
 from Utils.data.report_formula_data_generator import (
@@ -504,6 +505,7 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print("- synthetic_source: mixed_physical_block_joint_distribution")
     print("- rule_profile: multi_series_260711")
     print("- score_mode: wo_first")
+    print(f"- objective_scope: {args.objective_scope}")
     print(f"- episode_scope: {PHASE1_MULTI_SERIES_SCOPE_VERSION}")
     print(f"- bay_ids: {','.join(bay_ids)}")
     print(f"- bay_capacity_weights: {capacity_weights}")
@@ -567,6 +569,7 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         phase2_feedback_contract=phase2_feedback_contract,
         bay_capacity_weights=capacity_weights,
         device=args.device,
+        objective_scope=args.objective_scope,
     )
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
@@ -990,6 +993,7 @@ def _phase1_agent_assignment_builder(
         raise RuntimeError("--phase1-temperature must be positive")
     checkpoint_path = _phase1_checkpoint_path(checkpoint)
     model = load_phase1_pair_pointer_checkpoint(checkpoint_path)
+    objective_scope = model.objective_scope
     capacity_weights = joint_phase1_bay_capacity_weights()
     bay_ids = tuple(capacity_weights)
 
@@ -1022,11 +1026,18 @@ def _phase1_agent_assignment_builder(
                         bay_capacity_weights=capacity_weights,
                     )
                 )
-        best = min(candidates, key=lambda candidate: score_phase1_bay_loads(candidate.bay_loads))
+        best = min(
+            candidates,
+            key=lambda candidate: score_phase1_bay_loads(
+                candidate.bay_loads,
+                objective_scope=objective_scope,
+            ),
+        )
         print(
             "[CHECK][main._phase1_agent_assignment_builder] "
             f"assignment_seed={assignment_seed} source={best.source} samples={sample_count} "
-            f"score={score_phase1_bay_loads(best.bay_loads)}",
+            f"objective_scope={objective_scope} "
+            f"score={score_phase1_bay_loads(best.bay_loads, objective_scope=objective_scope)}",
             flush=True,
         )
         return dict(best.assignments)
@@ -1167,6 +1178,7 @@ def _load_or_build_phase1_plan_for_full_flow(
         raise RuntimeError("--phase1-temperature must be positive")
 
     model = load_phase1_pair_pointer_checkpoint(phase1_checkpoint)
+    objective_scope = model.objective_scope
     candidates = []
     if args.phase1_samples == 1:
         candidates.append(
@@ -1202,11 +1214,18 @@ def _load_or_build_phase1_plan_for_full_flow(
                     bay_capacity_weights=bay_capacity_weights,
                 )
             )
-    best = min(candidates, key=lambda candidate: score_phase1_bay_loads(candidate.bay_loads))
+    best = min(
+        candidates,
+        key=lambda candidate: score_phase1_bay_loads(
+            candidate.bay_loads,
+            objective_scope=objective_scope,
+        ),
+    )
     plan = candidate_to_phase1_plan(
         jobs=jobs,
         bay_ids=bay_ids,
         candidate=best,
+        objective_scope=objective_scope,
     )
     plan_dir = Path(args.output_dir) / "phase1_agent_plan"
     plan_paths = write_phase1_bay_plan(plan, plan_dir)
@@ -2449,6 +2468,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--heuristic-algorithms",
         default="all",
         help="all/mixed3 or a comma-separated subset of wo_first_balanced,cut_first_balanced,bevel_first_balanced",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--objective-scope",
+        choices=PHASE1_OBJECTIVE_SCOPES,
+        default="shared_and_series",
+        help=(
+            "Phase 1 lexicographic objective: shared_and_series keeps shared-pool and "
+            "series-group gaps; series_only uses series-group W/O, CUT_LTH, BV_QTY gaps only."
+        ),
     )
     phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     phase1_train_pair_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")

@@ -14,7 +14,9 @@ from Utils.learning.phase_graph_mdp import build_phase1_block_bay_graph
 from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     joint_phase1_bay_capacity_weights,
+    normalize_phase1_objective_scope,
 )
 from Utils.phase1.phase1_bay_balancer import _collect_blocks, _normalize_bay_ids
 
@@ -72,7 +74,9 @@ def _candidate_to_plan(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
     candidate: Any,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
+    normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
     blocks = _collect_blocks(jobs=jobs, bay_ids=tuple(bay_ids))
     assignments = []
     for block in blocks:
@@ -104,11 +108,17 @@ def _candidate_to_plan(
                 "bay_mask_reason_codes": "|".join(block.bay_mask_reason_codes),
             }
         )
-    score = list(score_phase1_bay_loads(candidate.bay_loads))
+    score = list(
+        score_phase1_bay_loads(
+            candidate.bay_loads,
+            objective_scope=normalized_objective_scope,
+        )
+    )
     return {
         "phase": "phase1_block_series_to_bay",
         "algorithm": candidate.source,
         "score_mode": "wo_first",
+        "objective_scope": normalized_objective_scope,
         "rule_profile": MULTI_SERIES_RULE_PROFILE,
         "scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
         "score": score,
@@ -131,11 +141,17 @@ def candidate_to_phase1_plan(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
     candidate: Any,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
     """완성된 MIXED 후보를 Phase 2가 읽는 plan 계약으로 변환한다."""
 
     weights = joint_phase1_bay_capacity_weights()
-    return _candidate_to_plan(jobs, _joint_bay_ids(bay_ids, weights), candidate)
+    return _candidate_to_plan(
+        jobs,
+        _joint_bay_ids(bay_ids, weights),
+        candidate,
+        objective_scope=objective_scope,
+    )
 
 
 def _joint_bay_ids(

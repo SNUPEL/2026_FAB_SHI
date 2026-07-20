@@ -25,6 +25,8 @@ from Phase1.pointer_policy import Phase1PairPointerPolicy
 from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    normalize_phase1_objective_scope,
 )
 
 
@@ -40,12 +42,14 @@ def load_phase1_pair_pointer_checkpoint(checkpoint_path: str | Path) -> Phase1Pa
         )
         raise RuntimeError("Phase 1 checkpoint hidden_dim is invalid")
     feature_schema = phase1_pair_feature_schema()
+    objective_scope = str(checkpoint["objective_scope"])
     model = Phase1PairPointerPolicy(
         pair_feature_dim=len(feature_schema["pair"]),
         env_feature_dim=len(feature_schema["env"]),
         hidden_dim=hidden_dim,
         rule_profile=MULTI_SERIES_RULE_PROFILE,
         score_mode="wo_first",
+        objective_scope=objective_scope,
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.episode_scope_version = PHASE1_MULTI_SERIES_SCOPE_VERSION
@@ -53,7 +57,8 @@ def load_phase1_pair_pointer_checkpoint(checkpoint_path: str | Path) -> Phase1Pa
     print(
         "[CHECK][phase_agent_checkpoints.load_phase1_pair_pointer_checkpoint] "
         f"path={path} hidden_dim={hidden_dim} rule_profile={MULTI_SERIES_RULE_PROFILE} "
-        f"score_mode=wo_first pair_feature_dim={len(feature_schema['pair'])} "
+        f"score_mode=wo_first objective_scope={objective_scope} "
+        f"pair_feature_dim={len(feature_schema['pair'])} "
         f"env_feature_dim={len(feature_schema['env'])}"
     )
     return model
@@ -141,6 +146,14 @@ def _load_phase1_checkpoint_payload(
             f"score_mode={score_mode}"
         )
         raise RuntimeError("only MIXED/wo_first Phase 1 checkpoints are supported")
+    objective_scope = checkpoint.get("objective_scope")
+    if objective_scope is None:
+        objective_scope = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES
+        print(
+            "[CHECK][phase_agent_checkpoints._load_phase1_checkpoint_payload] "
+            f"path={path} legacy_objective_scope={objective_scope}"
+        )
+    objective_scope = normalize_phase1_objective_scope(objective_scope)
     expected_scope_version = PHASE1_MULTI_SERIES_SCOPE_VERSION
     checkpoint_scope_version = checkpoint.get("episode_scope_version")
     if checkpoint_scope_version != expected_scope_version:
@@ -172,6 +185,7 @@ def _load_phase1_checkpoint_payload(
     normalized_checkpoint = dict(checkpoint)
     normalized_checkpoint["rule_profile"] = rule_profile
     normalized_checkpoint["score_mode"] = score_mode
+    normalized_checkpoint["objective_scope"] = objective_scope
     normalized_checkpoint["episode_scope_version"] = checkpoint_scope_version
     return path, normalized_checkpoint
 

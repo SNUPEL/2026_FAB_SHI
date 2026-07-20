@@ -1,8 +1,8 @@
 """MIXED Phase 1 direct pair-action self-labeling.
 
 한 episode의 NP/NC/FN/FL block-series 의사결정 단위를 다섯 Bay에 배정한다.
-정책 계약은 `(block-series, Bay)` pair, 공유 설비군 전체/계열별 W/O→CUT→BV
-사전식 목적함수, 확정 action mask로 하나뿐이다.
+정책 계약은 `(block-series, Bay)` pair와 확정 action mask를 사용한다. 목적함수는
+공유 설비군+계열별 또는 계열별 전용 W/O→CUT→BV 사전식 범위를 명시적으로 선택한다.
 """
 
 # LINE-BY-LINE: 미래 타입 힌트를 문자열로 늦게 평가합니다. 사용: Python 버전별 annotation 충돌을 줄입니다.
@@ -57,10 +57,13 @@ from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
     PHASE1_BALANCING_GROUP_ORDER,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
+    PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     add_multi_series_group_load,
     initialize_multi_series_group_loads,
     joint_phase1_bay_capacity_weights,
     multi_series_group_load_value,
+    normalize_phase1_objective_scope,
+    phase1_objective_field_names,
 )
 # LINE-BY-LINE: 8개 휴리스틱 후보 bank와 complete heuristic assignment 생성 함수를 재사용합니다.
 from Phase1.heuristics import (
@@ -82,7 +85,7 @@ PHASE1_PAIR_ENV_FEATURE_NAMES = [
     "shared_bevel_gap_ratio",
     "series_bevel_gap_ratio",
 ]
-# LINE-BY-LINE: 6개 capacity-normalized 목적함수를 CSV에 저장하는 고정 column 이름입니다.
+# LINE-BY-LINE: 최대 6개 capacity-normalized 목적함수를 CSV에 저장하는 고정 column 이름입니다.
 PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(6)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
@@ -484,6 +487,7 @@ def train_phase1_pair_self_labeling(
     phase2_feedback_contract: Mapping[str, object] | None = None,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     device: str = "cpu",
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
     """Train a pair-action policy from best-of-K complete assignments.
 
@@ -516,6 +520,7 @@ def train_phase1_pair_self_labeling(
         phase2_feedback_contract,
     )
     normalized_feedback_contract = _normalize_phase2_feedback_contract(phase2_feedback_contract)
+    normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
     feature_schema = phase1_pair_feature_schema()
     # LINE-BY-LINE: PyTorch 난수 seed를 고정해 같은 입력에서 같은 초기 모델/샘플링을 재현합니다.
     torch.manual_seed(seed)
@@ -534,6 +539,7 @@ def train_phase1_pair_self_labeling(
         hidden_dim=hidden_dim,
         rule_profile=MULTI_SERIES_RULE_PROFILE,
         score_mode="wo_first",
+        objective_scope=normalized_objective_scope,
     ).to(torch_device)
     # LINE-BY-LINE: Adam optimizer를 생성합니다. 학습 대상은 model parameter 전체입니다.
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
@@ -544,16 +550,21 @@ def train_phase1_pair_self_labeling(
     resume_path = _resolve_resume_checkpoint(output_path, resume_checkpoint)
     # LINE-BY-LINE: 새 학습이면 1 episode부터, resume이면 checkpoint 다음 episode부터 시작합니다.
     start_episode = 1
+    previous_objective_scope = normalized_objective_scope
+    objective_scope_transition = False
     if resume_path is not None:
         # LINE-BY-LINE: checkpoint에서 model/optimizer state를 복원하고 완료 episode 번호를 읽습니다.
-        start_episode = _load_pair_checkpoint(
+        completed_episode, previous_objective_scope = _load_pair_checkpoint(
             model=model,
             optimizer=optimizer,
             path=resume_path,
             hidden_dim=hidden_dim,
             phase2_feedback_contract=normalized_feedback_contract,
             feature_schema=feature_schema,
-        ) + 1
+            objective_scope=normalized_objective_scope,
+        )
+        start_episode = completed_episode + 1
+        objective_scope_transition = previous_objective_scope != normalized_objective_scope
         _move_optimizer_state(optimizer, torch_device)
     # LINE-BY-LINE: resume 시 기존 metrics.csv에서 start_episode 이전 row만 보존합니다.
     metrics_rows: List[Dict] = _read_csv_rows(output_path / "metrics.csv", "episode", start_episode)
@@ -566,7 +577,11 @@ def train_phase1_pair_self_labeling(
     # LINE-BY-LINE: resume 시 기존 validation 후보별 score CSV에서 start_episode 이전 row만 보존합니다.
     validation_candidate_rows: List[Dict] = _read_csv_rows(output_path / "validation_candidate_summary.csv", "train_episode", start_episode)
     # LINE-BY-LINE: best validation checkpoint 비교를 위해 이전 summary의 best score를 읽습니다.
-    best_validation_score: tuple | None = _read_best_validation_score(output_path / "summary.json") if resume_path is not None else None
+    best_validation_score: tuple | None = (
+        _read_best_validation_score(output_path / "summary.json")
+        if resume_path is not None and not objective_scope_transition
+        else None
+    )
     # LINE-BY-LINE: validation 기준으로 가장 좋은 모델을 저장할 path입니다.
     best_checkpoint_path = output_path / "phase1_pair_pointer_best.pt"
     # LINE-BY-LINE: validation을 한 번이라도 돌리면 여기에 PNG 경로들이 들어갑니다.
@@ -580,6 +595,9 @@ def train_phase1_pair_self_labeling(
     print(f"- heuristic_algorithms: {','.join(heuristic_algorithms)}")
     print(f"- rule_profile: {MULTI_SERIES_RULE_PROFILE}")
     print("- score_mode: wo_first")
+    print(f"- objective_scope: {normalized_objective_scope}")
+    print(f"- objective_scope_transition: {objective_scope_transition}")
+    print(f"- previous_objective_scope: {previous_objective_scope}")
     print(f"- episode_mode: {'on_the_fly' if episode_factory is not None else 'prebuilt'}")
     print(f"- resume_checkpoint: {resume_path or ''}")
     print(f"- device: {torch_device}")
@@ -634,6 +652,7 @@ def train_phase1_pair_self_labeling(
                     episode_bay_ids,
                     algorithm,
                     bay_capacity_weights=episode_capacity_weights,
+                    objective_scope=normalized_objective_scope,
                 )
             )
 
@@ -644,6 +663,7 @@ def train_phase1_pair_self_labeling(
                 jobs=jobs,
                 bay_ids=episode_bay_ids,
                 phase2_feedback_scorer=phase2_feedback_scorer,
+                objective_scope=normalized_objective_scope,
             )
             for candidate in candidates
         }
@@ -669,6 +689,7 @@ def train_phase1_pair_self_labeling(
                     best=best,
                     score=candidate_scores[id(candidate)][0],
                     phase2_feedback_score=candidate_scores[id(candidate)][1],
+                    objective_scope=normalized_objective_scope,
                 )
             )
         # LINE-BY-LINE: 실제 학습 target으로 사용한 best 후보의 step별 action table을 JSONL에 누적합니다.
@@ -679,6 +700,7 @@ def train_phase1_pair_self_labeling(
                 block_count=block_count,
                 problem_seed=problem_seed,
                 best=best,
+                objective_scope=normalized_objective_scope,
             )
         )
         # LINE-BY-LINE: episode 단위 학습 metric row를 누적합니다.
@@ -694,6 +716,7 @@ def train_phase1_pair_self_labeling(
                 "hard_case_corr_steel_cut_after": hard_case_corr_after,
                 "best_source": best.source,
                 "score_mode": "wo_first",
+                "objective_scope": normalized_objective_scope,
                 "loss": loss,
                 "score_json": json.dumps(list(score), ensure_ascii=False),
                 "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
@@ -739,6 +762,7 @@ def train_phase1_pair_self_labeling(
                 rollout_samples=resolved_validation_rollout_samples,
                 bay_capacity_weights=normalized_capacity_weights,
                 phase2_feedback_scorer=phase2_feedback_scorer,
+                objective_scope=normalized_objective_scope,
             )
             # LINE-BY-LINE: validation episode별 agent 요약 row를 누적합니다.
             validation_rows.extend(validation["rows"])
@@ -753,6 +777,7 @@ def train_phase1_pair_self_labeling(
                 output_path=output_path,
                 candidate_rows=validation_candidate_rows,
                 summary_rows=validation_rows,
+                objective_scope=normalized_objective_scope,
             )
             # LINE-BY-LINE: 모든 MIXED validation 문제의 best-of-K 평균을 checkpoint 기준으로 사용합니다.
             current_score = validation["agent_mean_score"]
@@ -822,12 +847,18 @@ def train_phase1_pair_self_labeling(
         "bay_capacity_weights": dict(normalized_capacity_weights),
         "heuristic_algorithms": list(heuristic_algorithms),
         "score_mode": "wo_first",
+        "objective_scope": normalized_objective_scope,
+        "objective_scope_transition": objective_scope_transition,
+        "previous_objective_scope": previous_objective_scope,
         "rule_profile": MULTI_SERIES_RULE_PROFILE,
         "episode_scope_mode": "joint_five_bay",
         "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
         "pair_feature_names": list(feature_schema["pair"]),
         "env_feature_names": list(feature_schema["env"]),
-        "score_field_names": list(PHASE1_SCORE_FIELD_NAMES),
+        "score_field_names": list(
+            PHASE1_SCORE_FIELD_NAMES[:len(phase1_objective_field_names(normalized_objective_scope))]
+        ),
+        "objective_field_names": list(phase1_objective_field_names(normalized_objective_scope)),
         "best_source_counts": _source_counts(metrics_rows),
         "episode_mode": "on_the_fly" if episode_factory is not None else "prebuilt",
         "checkpoint_every": checkpoint_every,
@@ -935,6 +966,15 @@ def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) 
         return
     model_rule_profile = getattr(model, "rule_profile", None)
     model_score_mode = getattr(model, "score_mode", None)
+    model_objective_scope = getattr(model, "objective_scope", None)
+    try:
+        normalized_objective_scope = normalize_phase1_objective_scope(model_objective_scope)
+    except RuntimeError as exc:
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_pair_policy_model_contract] "
+            f"cause=model_objective_scope_mismatch value={model_objective_scope}"
+        )
+        raise RuntimeError("Phase 1 pair model objective scope is invalid") from exc
     if model_rule_profile != MULTI_SERIES_RULE_PROFILE or model_score_mode != "wo_first":
         print(
             "[ERROR][phase1_pair_self_labeling._validate_pair_policy_model_contract] "
@@ -942,6 +982,13 @@ def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) 
             f"model_score={model_score_mode}"
         )
         raise RuntimeError("Phase 1 pair model must use the MIXED/wo_first contract")
+    if model_objective_scope != normalized_objective_scope:
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_pair_policy_model_contract] "
+            f"cause=noncanonical_model_objective_scope value={model_objective_scope} "
+            f"normalized={normalized_objective_scope}"
+        )
+        raise RuntimeError("Phase 1 pair model objective scope must be canonical")
     feature_schema = phase1_pair_feature_schema()
     if model.pair_feature_dim != len(feature_schema["pair"]) or model.env_feature_dim != len(feature_schema["env"]):
         print(
@@ -963,6 +1010,7 @@ def _validate_pair_policy(
     rollout_samples: int,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
     """Evaluate best-of-K policy samples against the heuristic bank."""
 
@@ -1009,6 +1057,7 @@ def _validate_pair_policy(
                     validation_bay_ids,
                     algorithm,
                     bay_capacity_weights=validation_capacity_weights,
+                    objective_scope=objective_scope,
                 )
             )
         if not candidates:
@@ -1023,6 +1072,7 @@ def _validate_pair_policy(
                 jobs=jobs,
                 bay_ids=validation_bay_ids,
                 phase2_feedback_scorer=phase2_feedback_scorer,
+                objective_scope=objective_scope,
             )
             for candidate in candidates
         }
@@ -1073,6 +1123,7 @@ def _validate_pair_policy(
                     rank=rank_by_source[candidate.source],
                     score=candidate_scores[id(candidate)][0],
                     phase2_feedback_score=candidate_scores[id(candidate)][1],
+                    objective_scope=objective_scope,
                 )
             )
         rows.append(
@@ -1096,6 +1147,7 @@ def _validate_pair_policy(
                 "agent_is_best": agent_is_best,
                 "agent_rank": agent_rank,
                 "candidate_count": len(candidates),
+                "objective_scope": objective_scope,
             }
         )
     return {
@@ -1132,6 +1184,7 @@ def _save_pair_checkpoint(
             "env_feature_names": list(feature_schema["env"]),
             "rule_profile": MULTI_SERIES_RULE_PROFILE,
             "score_mode": "wo_first",
+            "objective_scope": model.objective_scope,
             "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
             "hidden_dim": hidden_dim,
             "episode": episode,
@@ -1174,8 +1227,9 @@ def _load_pair_checkpoint(
     hidden_dim: int,
     phase2_feedback_contract: Mapping[str, object] | None,
     feature_schema: Mapping[str, Sequence[str]],
-) -> int:
-    """Load model/optimizer state and return the completed episode number."""
+    objective_scope: str,
+) -> tuple[int, str]:
+    """Load model/optimizer state and return episode plus previous objective scope."""
 
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     checkpoint_hidden_dim = int(checkpoint.get("hidden_dim", -1))
@@ -1194,6 +1248,21 @@ def _load_pair_checkpoint(
             f"checkpoint_profile={checkpoint_rule_profile} checkpoint_score={checkpoint_score_mode}"
         )
         raise RuntimeError("only MIXED/wo_first Phase 1 checkpoints are supported")
+    checkpoint_objective_scope = checkpoint.get("objective_scope")
+    if checkpoint_objective_scope is None:
+        checkpoint_objective_scope = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES
+        print(
+            "[CHECK][phase1_pair_self_labeling._load_pair_checkpoint] "
+            f"path={path} legacy_objective_scope={checkpoint_objective_scope}"
+        )
+    checkpoint_objective_scope = normalize_phase1_objective_scope(checkpoint_objective_scope)
+    if checkpoint_objective_scope != objective_scope:
+        print(
+            "[CHECK][phase1_pair_self_labeling._load_pair_checkpoint] "
+            f"objective_scope_transition=true path={path} "
+            f"checkpoint={checkpoint_objective_scope} requested={objective_scope} "
+            "validation_best_reset=true"
+        )
     checkpoint_scope_version = checkpoint.get("episode_scope_version")
     if checkpoint_scope_version != PHASE1_MULTI_SERIES_SCOPE_VERSION:
         print(
@@ -1236,7 +1305,7 @@ def _load_pair_checkpoint(
         "[CHECK][phase1_pair_self_labeling._load_pair_checkpoint] "
         f"path={path} completed_episode={episode}"
     )
-    return episode
+    return episode, checkpoint_objective_scope
 
 
 def _resolve_torch_device(device: str) -> torch.device:
@@ -1405,6 +1474,7 @@ def _run_phase1_pair_heuristic_candidate(
     bay_ids: Sequence[str],
     algorithm: str,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Phase1PairCandidate:
     """Convert an existing complete heuristic assignment into pair transitions."""
 
@@ -1413,6 +1483,7 @@ def _run_phase1_pair_heuristic_candidate(
         bay_ids=bay_ids,
         algorithm=algorithm,
         bay_capacity_weights=bay_capacity_weights,
+        objective_scope=objective_scope,
     )
     transitions = _pair_transitions_from_assignment(
         jobs,
@@ -1577,10 +1648,13 @@ def _candidate_index(candidate_ids: Sequence[str], selected: str) -> int:
         raise RuntimeError(f"selected pair is not feasible: {selected}") from exc
 
 
-def _score_bay_loads(bay_loads: Mapping[str, Mapping[str, int | float]]) -> tuple:
+def _score_bay_loads(
+    bay_loads: Mapping[str, Mapping[str, int | float]],
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+) -> tuple:
     """Score final Bay loads with the confirmed Phase 1 objective."""
 
-    return _multi_objective_load_score(bay_loads)
+    return _multi_objective_load_score(bay_loads, objective_scope)
 
 
 def _candidate_learning_score(
@@ -1588,6 +1662,7 @@ def _candidate_learning_score(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> tuple:
     """Return the score used to choose the self-labeling teacher candidate."""
 
@@ -1596,6 +1671,7 @@ def _candidate_learning_score(
         jobs=jobs,
         bay_ids=bay_ids,
         phase2_feedback_scorer=phase2_feedback_scorer,
+        objective_scope=objective_scope,
     )[2]
 
 
@@ -1604,10 +1680,11 @@ def _candidate_score_components(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> tuple[tuple, tuple, tuple]:
     """Phase 1 score, optional Phase 2 feedback, combined teacher score를 한 번 계산한다."""
 
-    phase1_score = _score_bay_loads(candidate.bay_loads)
+    phase1_score = _score_bay_loads(candidate.bay_loads, objective_scope)
     phase2_feedback_score = _candidate_phase2_feedback_score(
         candidate=candidate,
         jobs=jobs,
@@ -1955,6 +2032,7 @@ def _candidate_summary_row(
     best: Phase1PairCandidate,
     score: tuple,
     phase2_feedback_score: tuple,
+    objective_scope: str,
 ) -> Dict:
     """Return one candidate audit row."""
 
@@ -1968,6 +2046,7 @@ def _candidate_summary_row(
         "source": candidate.source,
         "is_best": int(candidate is best),
         "score_mode": "wo_first",
+        "objective_scope": objective_scope,
         "score_json": json.dumps(list(score), ensure_ascii=False),
         "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
         "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
@@ -1992,6 +2071,7 @@ def _validation_candidate_summary_row(
     rank: int | str,
     score: tuple,
     phase2_feedback_score: tuple | None,
+    objective_scope: str,
 ) -> Dict:
     """Return one validation candidate audit row."""
 
@@ -2014,6 +2094,7 @@ def _validation_candidate_summary_row(
         "rank": rank,
         "is_best": int(candidate is best),
         "score_mode": "wo_first",
+        "objective_scope": objective_scope,
         "score_json": json.dumps(list(score), ensure_ascii=False),
         "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
         "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
@@ -2056,6 +2137,7 @@ def _best_action_rows(
     block_count: int,
     problem_seed: int | str,
     best: Phase1PairCandidate,
+    objective_scope: str,
 ) -> List[Dict]:
     """Return JSONL rows for selected pair pseudo-label sequence."""
 
@@ -2067,6 +2149,7 @@ def _best_action_rows(
             "problem_seed": problem_seed,
             "step": step,
             "source": best.source,
+            "objective_scope": objective_scope,
             "phase": transition.phase,
             "selected_action_index": transition.selected_action_index,
             "selected_action_id": transition.selected_action_id,
@@ -2106,6 +2189,7 @@ def _write_metrics(path: Path, rows: Sequence[Mapping]) -> None:
             "hard_case_corr_steel_cut_after",
             "best_source",
             "score_mode",
+            "objective_scope",
             "loss",
             "score_json",
             "phase2_feedback_score_json",
@@ -2130,6 +2214,7 @@ def _write_candidate_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "source",
             "is_best",
             "score_mode",
+            "objective_scope",
             "score_json",
             "phase2_feedback_score_json",
             "learning_score_json",
@@ -2159,6 +2244,7 @@ def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> 
             "rank",
             "is_best",
             "score_mode",
+            "objective_scope",
             "score_json",
             "phase2_feedback_score_json",
             "learning_score_json",
@@ -2175,6 +2261,7 @@ def _write_validation_plots(
     output_path: Path,
     candidate_rows: Sequence[Mapping],
     summary_rows: Sequence[Mapping],
+    objective_scope: str,
 ) -> Dict[str, str]:
     """Write validation comparison plots for the latest validation checkpoint."""
 
@@ -2192,7 +2279,9 @@ def _write_validation_plots(
     latest_summary_rows = _latest_rows(summary_rows, "train_episode")
     latest_candidate_rows = _collapse_agent_samples_for_validation_plot(latest_candidate_rows)
     plot_paths: Dict[str, str] = {}
-    for output_key, filename, score_field, title, ylabel in _validation_plot_specs():
+    for output_key, filename, score_field, title, ylabel in _validation_plot_specs(
+        objective_scope
+    ):
         path = output_path / filename
         _plot_validation_metric(
             plt=plt,
@@ -2212,16 +2301,25 @@ def _write_validation_plots(
     return plot_paths
 
 
-def _validation_plot_specs() -> List[tuple[str, str, str, str, str]]:
+def _validation_plot_specs(
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+) -> List[tuple[str, str, str, str, str]]:
     """Return score-column mapping for validation plots."""
 
+    normalized_scope = normalize_phase1_objective_scope(objective_scope)
+    if normalized_scope == PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES:
+        return [
+            ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "Shared-pool W/O load gap", "Gap"),
+            ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_1", "Series-group W/O load gap", "Gap"),
+            ("validation_cut_gap_png", "validation_cut_gap.png", "score_2", "Shared-pool cut length gap", "Gap"),
+            ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_3", "Series-group cut length gap", "Gap"),
+            ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_4", "Shared-pool bevel quantity gap", "Gap"),
+            ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_5", "Series-group bevel quantity gap", "Gap"),
+        ]
     return [
-        ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "Shared-pool W/O load gap", "Gap"),
-        ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_1", "Series-group W/O load gap", "Gap"),
-        ("validation_cut_gap_png", "validation_cut_gap.png", "score_2", "Shared-pool cut length gap", "Gap"),
-        ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_3", "Series-group cut length gap", "Gap"),
-        ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_4", "Shared-pool bevel quantity gap", "Gap"),
-        ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_5", "Series-group bevel quantity gap", "Gap"),
+        ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_0", "Series-group W/O load gap", "Gap"),
+        ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_1", "Series-group cut length gap", "Gap"),
+        ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_2", "Series-group bevel quantity gap", "Gap"),
     ]
 
 
@@ -2451,6 +2549,7 @@ def _write_validation_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "agent_is_best",
             "agent_rank",
             "candidate_count",
+            "objective_scope",
         ],
         rows,
     )
