@@ -519,6 +519,8 @@ def generate_report_formula_data(
     gyel: str = "NP",
     thickness_specs: Sequence[float] = DEFAULT_THICKNESS_SPECS,
     bth_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
+    bth_profile: BthFormulaProfile | None = None,
+    stl_quantity_profile: StlQuantityProfile | None = None,
     wo_counts: Sequence[int] | None = None,
     block_seeds: Sequence[int] | None = None,
 ) -> ReportFormulaGeneration:
@@ -582,13 +584,27 @@ def generate_report_formula_data(
         block_rows.append(_aggregate_block_row(project_no, block_no, normalized_gyel, block_wo_rows))
 
     wo_df = pd.DataFrame(wo_rows)
-    resolved_source = str(Path(bth_source_path).resolve())
-    bth_profile = load_bth_formula_profile(resolved_source, normalized_gyel)
+    if (bth_profile is None) != (stl_quantity_profile is None):
+        print(
+            "[ERROR][report_formula_data_generator.generate_report_formula_data] "
+            "cause=incomplete_fixed_profile bth_and_stl_must_be_supplied_together"
+        )
+        raise RuntimeError("BTH and STL profiles must be supplied together")
+    if bth_profile is None:
+        resolved_source = str(Path(bth_source_path).resolve())
+        bth_profile = load_bth_formula_profile(resolved_source, normalized_gyel)
+        stl_quantity_profile = load_stl_quantity_profile(resolved_source, normalized_gyel)
+    if bth_profile.series != normalized_gyel or stl_quantity_profile.series != normalized_gyel:
+        print(
+            "[ERROR][report_formula_data_generator.generate_report_formula_data] "
+            f"cause=profile_series_mismatch gyel={normalized_gyel} "
+            f"bth={bth_profile.series} stl={stl_quantity_profile.series}"
+        )
+        raise RuntimeError("fixed profile series does not match generated series")
     bth_rng = np.random.default_rng(np.random.SeedSequence([int(seed), BTH_RANDOM_STREAM_SALT]))
     wo_df["BTH"] = sample_bth_formula(wo_df, bth_profile, bth_rng)
-    stl_profile = load_stl_quantity_profile(resolved_source, normalized_gyel)
     stl_rng = np.random.default_rng(np.random.SeedSequence([int(seed), STL_RANDOM_STREAM_SALT]))
-    wo_df["STL_QTY"] = sample_stl_quantity(wo_df, stl_profile, stl_rng)
+    wo_df["STL_QTY"] = sample_stl_quantity(wo_df, stl_quantity_profile, stl_rng)
     wo_df = wo_df[list(WO_COLUMNS)]
     bth_by_block = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)["BTH"].max()
     stl_by_block = wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"], sort=True)["STL_QTY"].sum()

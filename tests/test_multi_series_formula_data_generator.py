@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -10,6 +14,7 @@ from pandas.testing import assert_frame_equal
 
 from Utils.data import multi_series_formula_data_generator as multi_formula
 from Utils.data.multi_series_formula_data_generator import (
+    DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
     DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
     SUPPORTED_SERIES,
     build_multi_series_formula_episode_jobs,
@@ -39,6 +44,48 @@ def _joint_block_row(project: str, block: str, series: str, base: float) -> dict
 
 
 class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
+    def test_mixed_runtime_uses_fixed_profile_without_reading_excel(self) -> None:
+        self.assertTrue(DEFAULT_MULTI_SERIES_GENERATION_PROFILE.is_file())
+        multi_formula._load_multi_series_generation_profile.cache_clear()
+
+        with patch.object(
+            pd,
+            "read_excel",
+            side_effect=AssertionError("MIXED runtime must not read Excel"),
+        ):
+            generated = generate_multi_series_formula_data(
+                n_physical_blocks=3,
+                seed=20260720,
+            )
+
+        self.assertEqual(generated.physical_block_count, 3)
+        self.assertGreater(len(generated.wo_df), 0)
+
+    def test_missing_fixed_profile_fails_without_fallback(self) -> None:
+        missing = Path(__file__).parent / "missing_multi_series_profile.json"
+
+        with self.assertRaises(FileNotFoundError):
+            multi_formula.load_multi_series_generation_profile(missing)
+
+    def test_invalid_schema_and_missing_series_fail_without_excel_fallback(self) -> None:
+        payload = json.loads(DEFAULT_MULTI_SERIES_GENERATION_PROFILE.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.object(
+            pd,
+            "read_excel",
+            side_effect=AssertionError("invalid profile must not fall back to Excel"),
+        ):
+            for name, mutate in (
+                ("schema", lambda value: value.__setitem__("schema", "invalid")),
+                ("series", lambda value: value["empirical_series"].pop("NC")),
+            ):
+                broken = json.loads(json.dumps(payload))
+                mutate(broken)
+                profile_path = Path(temp_dir) / f"{name}.json"
+                profile_path.write_text(json.dumps(broken), encoding="utf-8")
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    multi_formula.load_multi_series_generation_profile(profile_path)
+
     def test_python_seed_conversion_preserves_uint32_range(self) -> None:
         values = pd.Series(
             [

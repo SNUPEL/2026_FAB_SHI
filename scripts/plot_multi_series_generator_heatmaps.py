@@ -689,8 +689,6 @@ def generate_heatmaps(
     generated = generate_multi_series_formula_data(
         n_physical_blocks=physical_block_count,
         seed=seed,
-        wo_source_path=actual_wo_path,
-        block_source_path=actual_block_path,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     generated.wo_df.to_csv(output_dir / f"mixed_wo_seed{seed}.csv", index=False, encoding="utf-8-sig")

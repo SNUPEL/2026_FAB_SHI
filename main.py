@@ -97,16 +97,15 @@ from Utils.phase1.multi_series_rules import (
 )
 from Utils.data.report_formula_data_generator import (
     BTH_FORMULA_FEATURES,
-    DEFAULT_MULTI_SERIES_WO_SOURCE,
     TACT_A_CUT,
     TACT_A_MARK,
     TACT_A_PTLST,
     TACT_A_THK,
-    load_bth_formula_profile,
     scenario_jobs_from_report_formula_jobs,
 )
 from Utils.data.multi_series_formula_data_generator import (
     generate_multi_series_formula_data,
+    load_multi_series_generation_profile,
     load_physical_block_joint_profile,
 )
 # LINE-BY-LINE: `Utils.reporting.playback_builder` 모듈에서 `write_actual_replay_artifacts, write_playback_artifacts`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
@@ -1470,12 +1469,20 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
         "WO_QTY": "W/O row count",
     }
     formula_series = ("NP", "FN", "FL", "NC")
+    fixed_profile = load_multi_series_generation_profile()
+    fixed_bth_profiles = {
+        "NP": fixed_profile.np_bth,
+        **{
+            series: fixed_profile.empirical_generators[series].conditional_bth_stl[
+                "bth_formula"
+            ]
+            for series in formula_series
+            if series != "NP"
+        },
+    }
     bth_profiles = {}
     for series in formula_series:
-        profile = load_bth_formula_profile(
-            str(DEFAULT_MULTI_SERIES_WO_SOURCE.resolve()),
-            series,
-        )
+        profile = fixed_bth_profiles[series]
         bth_profiles[series] = {
             "coefficients": {
                 "intercept": profile.coefficients[0],

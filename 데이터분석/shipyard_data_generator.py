@@ -67,6 +67,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from Utils.data.report_formula_data_generator import (
+    BthFormulaProfile,
     BTH_FORMULA_FEATURES,
     TACT_A_CUT,
     TACT_A_MARK,
@@ -91,6 +92,37 @@ TACT_PT = TACT_A_PTLST
 TACT_FORMULA_SCOPE = 'all_series_shared_np_ppt_case6'
 STL_LOCAL_WEIGHT = 0.75
 EMPIRICAL_SERIES = ('FN', 'FL', 'NC')
+EMPIRICAL_GENERATION_PROFILE_SCHEMA = 'shipyard_empirical_generation_profile_v1'
+
+
+def _profile_json_value(value):
+    """numpy 값을 손실 없이 JSON 기본형으로 변환한다."""
+
+    if isinstance(value, np.ndarray):
+        return _profile_json_value(value.tolist())
+    if isinstance(value, np.generic):
+        return _profile_json_value(value.item())
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, tuple):
+        return [_profile_json_value(item) for item in value]
+    if isinstance(value, list):
+        return [_profile_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _profile_json_value(item) for key, item in value.items()}
+    return value
+
+
+def _require_profile_keys(profile, required, context):
+    """고정 profile에 필요한 필드가 없으면 fallback 없이 실패한다."""
+
+    missing = sorted(set(required) - set(profile))
+    if missing:
+        print(
+            "[ERROR][shipyard_data_generator._require_profile_keys] "
+            f"cause=missing_profile_keys context={context} keys={missing}"
+        )
+        raise RuntimeError(f"missing generation profile keys: {context}: {missing}")
 
 
 def _powf(u, a, b):
@@ -848,6 +880,195 @@ class ShipyardGenerator:
         self.n_max = self.block_chain['wo_count_max']
         self._fitted = True
         return self
+
+    def to_generation_profile(self):
+        """Excel 적합 결과 중 생성에 필요한 상태만 JSON 호환 dict로 내보낸다."""
+
+        if not self._fitted:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.to_generation_profile] "
+                f"cause=generator_not_fitted series={self.series}"
+            )
+            raise RuntimeError("generator must be fitted before profile export")
+        common_parameters = (
+            'pa', 'bconst', 'sAp', 'puL', 'floorL', 'pmu', 'psd', 'zTp',
+            'thk_grid', 'thk_freq', 'cmu', 'csg', 'zRp', 'mk_lo', 'ct_lo',
+            'mkA', 'mkB', 'mkS', 'ctA', 'ctB', 'ctS', 'bH', 'Tm', 'Ts',
+            'blk_thk_vals', 'thk_a', 'thk_b', 'thk_sig', 'n_min', 'n_max',
+        )
+        mode_parameters = (
+            ('cB', 'sB', 'cQ', 'sQ', 'cP', 'sP')
+            if self.mode == 'spearman'
+            else ('cBlin', 'sBlin', 'cQlin', 'sQlin', 'cPlin', 'sPlin')
+        )
+        required_attributes = common_parameters + mode_parameters
+        missing = [name for name in required_attributes if not hasattr(self, name)]
+        if missing:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.to_generation_profile] "
+                f"cause=missing_fitted_attributes series={self.series} attributes={missing}"
+            )
+            raise RuntimeError(f"missing fitted generation attributes: {missing}")
+
+        conditional = self.conditional_bth_stl
+        _require_profile_keys(
+            conditional,
+            ('features', 'mean', 'scale', 'tree', 'bth_formula', 'stl_quantity', 'stl_classes', 'stl_priors'),
+            'conditional_bth_stl',
+        )
+        bth = conditional['bth_formula']
+        profile = {
+            'schema': EMPIRICAL_GENERATION_PROFILE_SCHEMA,
+            'series': self.series,
+            'mode': self.mode,
+            'mark_aggregation': self.mark_aggregation,
+            'block_chain': _profile_json_value(self.block_chain),
+            'parameters': {
+                name: _profile_json_value(getattr(self, name))
+                for name in required_attributes
+            },
+            'conditional_bth_stl': {
+                'features': list(conditional['features']),
+                'mean': _profile_json_value(conditional['mean']),
+                'scale': _profile_json_value(conditional['scale']),
+                'normalized_actual_features': _profile_json_value(conditional['tree'].data),
+                'bth_formula': {
+                    'series': bth.series,
+                    'coefficients': list(bth.coefficients),
+                    'residual_std': bth.residual_std,
+                    'r_squared': bth.r_squared,
+                    'observed_specs': list(bth.observed_specs),
+                },
+                'stl_quantity': _profile_json_value(conditional['stl_quantity']),
+                'stl_classes': _profile_json_value(conditional['stl_classes']),
+                'stl_priors': _profile_json_value(conditional['stl_priors']),
+            },
+        }
+        return profile
+
+    @classmethod
+    def from_generation_profile(cls, profile):
+        """고정 JSON profile을 Excel 없이 생성 가능한 객체로 복원한다."""
+
+        if not isinstance(profile, dict):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                f"cause=invalid_profile_type type={type(profile).__name__}"
+            )
+            raise RuntimeError("generation profile must be a dictionary")
+        _require_profile_keys(
+            profile,
+            ('schema', 'series', 'mode', 'mark_aggregation', 'block_chain', 'parameters', 'conditional_bth_stl'),
+            'root',
+        )
+        if profile['schema'] != EMPIRICAL_GENERATION_PROFILE_SCHEMA:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                f"cause=schema_mismatch actual={profile['schema']} "
+                f"expected={EMPIRICAL_GENERATION_PROFILE_SCHEMA}"
+            )
+            raise RuntimeError("empirical generation profile schema mismatch")
+        series = str(profile['series']).strip().upper()
+        mode = str(profile['mode']).strip().lower()
+        mark_aggregation = str(profile['mark_aggregation']).strip().lower()
+        if series not in EMPIRICAL_SERIES or mode not in ('spearman', 'pearson') or mark_aggregation not in ('max', 'sum'):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                f"cause=invalid_contract series={series} mode={mode} mark={mark_aggregation}"
+            )
+            raise RuntimeError("invalid empirical generation profile contract")
+
+        common_arrays = ('pa', 'puL', 'pmu', 'psd', 'thk_grid', 'thk_freq', 'cmu', 'csg', 'bH', 'blk_thk_vals')
+        common_tuples = ('sAp', 'zTp', 'zRp')
+        common_floats = (
+            'bconst', 'mk_lo', 'ct_lo', 'mkA', 'mkB', 'mkS', 'ctA', 'ctB',
+            'ctS', 'Tm', 'Ts', 'thk_a', 'thk_b', 'thk_sig',
+        )
+        common_ints = ('floorL', 'n_min', 'n_max')
+        mode_arrays = ('cB', 'cQ', 'cP') if mode == 'spearman' else ('cBlin', 'cQlin', 'cPlin')
+        mode_floats = ('sB', 'sQ', 'sP') if mode == 'spearman' else ('sBlin', 'sQlin', 'sPlin')
+        required_parameters = common_arrays + common_tuples + common_floats + common_ints + mode_arrays + mode_floats
+        parameters = profile['parameters']
+        if not isinstance(parameters, dict):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                "cause=invalid_parameters_type"
+            )
+            raise RuntimeError("generation profile parameters must be a dictionary")
+        _require_profile_keys(parameters, required_parameters, 'parameters')
+
+        instance = cls.__new__(cls)
+        instance.series = series
+        instance.mode = mode
+        instance.mark_aggregation = mark_aggregation
+        instance.block_chain = {str(key): value for key, value in profile['block_chain'].items()}
+        for name in common_arrays + mode_arrays:
+            setattr(instance, name, np.asarray(parameters[name], dtype=float))
+        for name in common_tuples:
+            setattr(instance, name, tuple(float(value) for value in parameters[name]))
+        for name in common_floats + mode_floats:
+            setattr(instance, name, float(parameters[name]))
+        for name in common_ints:
+            setattr(instance, name, int(parameters[name]))
+
+        conditional = profile['conditional_bth_stl']
+        _require_profile_keys(
+            conditional,
+            ('features', 'mean', 'scale', 'normalized_actual_features', 'bth_formula', 'stl_quantity', 'stl_classes', 'stl_priors'),
+            'conditional_bth_stl',
+        )
+        bth = conditional['bth_formula']
+        _require_profile_keys(
+            bth,
+            ('series', 'coefficients', 'residual_std', 'r_squared', 'observed_specs'),
+            'conditional_bth_stl.bth_formula',
+        )
+        normalized_features = np.asarray(conditional['normalized_actual_features'], dtype=float)
+        mean = np.asarray(conditional['mean'], dtype=float)
+        scale = np.asarray(conditional['scale'], dtype=float)
+        stl_quantity = np.asarray(conditional['stl_quantity'], dtype=int)
+        stl_classes = np.asarray(conditional['stl_classes'], dtype=int)
+        stl_priors = np.asarray(conditional['stl_priors'], dtype=float)
+        features = [str(value) for value in conditional['features']]
+        if (
+            normalized_features.ndim != 2
+            or normalized_features.shape != (len(stl_quantity), len(features))
+            or mean.shape != (len(features),)
+            or scale.shape != (len(features),)
+            or (scale <= 0).any()
+            or stl_classes.shape != stl_priors.shape
+            or not np.isclose(stl_priors.sum(), 1.0)
+        ):
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                f"cause=invalid_conditional_shape series={series}"
+            )
+            raise RuntimeError("invalid conditional BTH/STL generation profile")
+        bth_profile = BthFormulaProfile(
+            series=str(bth['series']).strip().upper(),
+            coefficients=tuple(float(value) for value in bth['coefficients']),
+            residual_std=float(bth['residual_std']),
+            r_squared=float(bth['r_squared']),
+            observed_specs=tuple(float(value) for value in bth['observed_specs']),
+        )
+        if bth_profile.series != series:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
+                f"cause=bth_series_mismatch profile={series} bth={bth_profile.series}"
+            )
+            raise RuntimeError("BTH profile series mismatch")
+        instance.conditional_bth_stl = {
+            'features': features,
+            'mean': mean,
+            'scale': scale,
+            'tree': cKDTree(normalized_features),
+            'bth_formula': bth_profile,
+            'stl_quantity': stl_quantity,
+            'stl_classes': stl_classes,
+            'stl_priors': stl_priors,
+        }
+        instance._fitted = True
+        return instance
 
     # ---- 적합 보조 ----
     @staticmethod

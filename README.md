@@ -68,7 +68,8 @@ Phase 2에서 해당 Bay의 PLS 설비만 선택합니다.
 
 ## MIXED 합성데이터
 
-공개 생성기는 `Utils/data/multi_series_formula_data_generator.py`입니다.
+공개 생성기는 `Utils/data/multi_series_formula_data_generator.py`이며, 학습 파라미터는
+`Utils/data/multi_series_generation_profile.json`에 고정되어 있습니다.
 
 1. 발표자료 고정식으로 물리 블록 목표 특성과 전체 `WO_QTY`를 먼저 생성합니다.
 2. 전체 `WO_QTY`로 배분 가능한 실적 계열 조합 하나를 실적 확률로 표본화합니다.
@@ -102,6 +103,28 @@ TACT_TIME = 0.3037*CUT_LTH + 0.1325*MARK_LTH
 ```
 
 `WO_QTY`와 `STL_QTY`는 서로 다른 변수이며 대체하지 않습니다.
+
+### 고정 generation profile
+
+MIXED Phase 1/2 학습은 원천 Excel을 실행 중 다시 적합하지 않고 다음 JSON만
+읽습니다.
+
+```text
+Utils/data/multi_series_generation_profile.json
+```
+
+이 파일에는 NP 고정식 계약, NP BTH/STL profile, FN/FL/NC 계수·입력분포·잔차분포,
+물리 블록 계열 조합과 조건부 W/O 수 분포, 원천 파일 SHA256이 포함됩니다.
+profile 누락, schema 불일치, 계열 누락은 Excel fallback 없이 실패합니다.
+
+원천 Excel 또는 적합 방법이 변경된 경우에만 profile을 명시적으로 재생성합니다.
+
+```bash
+python scripts/build_multi_series_generation_profile.py
+```
+
+같은 원천에서 재생성한 JSON은 byte 단위로 동일해야 하며, 변경된 JSON은 코드와
+함께 Git에서 검토합니다.
 
 ## 주요 실행
 
@@ -223,7 +246,7 @@ heuristic bank, sampling 수, Phase 1 용량비와 제약 profile이 다르면 �
 - `Environment/`: 공통 state, 제약, metric, custom event-driven DES
 - `Phase1/`: MIXED Block-Series-to-Bay 휴리스틱·pair policy·self-labeling
 - `Phase2/`: merged batch-machine state·set pointer policy·self-labeling·full flow
-- `Utils/data/`: strict loader와 MIXED 공동분포 생성
+- `Utils/data/`: strict loader, MIXED 공동분포 생성, 고정 generation profile
 - `Utils/phase1/`: 다계열 규칙, Bay balancer, episode builder
 - `Utils/learning/`: Phase 간 message/checkpoint 계약
 - `Agent/heuristics.py`: NP100 DES baseline 휴리스틱

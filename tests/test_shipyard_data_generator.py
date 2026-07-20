@@ -9,6 +9,7 @@ import unittest
 
 import numpy as np
 import pandas as pd
+from pandas.testing import assert_frame_equal
 
 
 def _load_generator_module():
@@ -22,6 +23,35 @@ def _load_generator_module():
 
 
 class ShipyardDataGeneratorTest(unittest.TestCase):
+    def test_empirical_profile_roundtrip_preserves_exact_generation(self) -> None:
+        module = _load_generator_module()
+        root = Path(__file__).parents[1]
+        fitted = module.ShipyardGenerator(
+            root / "변경사항" / "절단WO_데이터.xlsx",
+            root / "변경사항" / "절단블록_데이터.xlsx",
+            mode="spearman",
+            series="FN",
+        ).fit()
+        restored = module.ShipyardGenerator.from_generation_profile(
+            fitted.to_generation_profile()
+        )
+
+        expected_wo, expected_blocks = fitted.generate(
+            n_blocks=3,
+            seed=20260720,
+            wo_counts=(1, 4, 2),
+            block_seeds=(101, 202, 303),
+        )
+        actual_wo, actual_blocks = restored.generate(
+            n_blocks=3,
+            seed=20260720,
+            wo_counts=(1, 4, 2),
+            block_seeds=(101, 202, 303),
+        )
+
+        assert_frame_equal(actual_wo, expected_wo, check_exact=True)
+        assert_frame_equal(actual_blocks, expected_blocks, check_exact=True)
+
     def test_empirical_generator_accepts_prescribed_wo_counts(self) -> None:
         module = _load_generator_module()
         root = Path(__file__).parents[1]

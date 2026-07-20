@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, Sequence
+from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
+from Utils.data import report_formula_data_generator as report_formula
 from Utils.data.report_formula_data_generator import (
+    BthFormulaProfile,
+    StlQuantityProfile,
     DEFAULT_MULTI_SERIES_WO_SOURCE,
+    fit_bth_formula,
+    fit_stl_quantity_profile,
     generate_report_formula_block_seeds,
     jobs_from_report_formula_wo,
     generate_report_formula_data,
@@ -25,6 +32,66 @@ CONDITIONAL_NEIGHBOR_COUNT = 8
 SERIES_RANDOM_STREAM_INDEX = {"FL": 1, "FN": 2, "NC": 3, "NP": 4}
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MULTI_SERIES_BLOCK_SOURCE = REPO_ROOT / "변경사항" / "절단블록_데이터.xlsx"
+MULTI_SERIES_GENERATION_PROFILE_SCHEMA = "multi_series_generation_profile_v1"
+DEFAULT_MULTI_SERIES_GENERATION_PROFILE = Path(__file__).with_name(
+    "multi_series_generation_profile.json"
+)
+NP_FIXED_FORMULA_CONSTANT_NAMES = (
+    "BLOCK_LENGTH_MEAN",
+    "BLOCK_LENGTH_STD",
+    "BLOCK_LENGTH_MIN",
+    "BLOCK_LENGTH_MAX",
+    "BLOCK_MARK_A",
+    "BLOCK_MARK_B",
+    "BLOCK_MARK_ZERO_INFLATION",
+    "BLOCK_MARK_GAMMA_SHAPE",
+    "BLOCK_MARK_GAMMA_SCALE",
+    "BLOCK_MARK_GAMMA_SHIFT",
+    "BLOCK_CUT_A",
+    "BLOCK_CUT_B",
+    "BLOCK_CUT_GAMMA_SHAPE",
+    "BLOCK_CUT_GAMMA_SCALE",
+    "BLOCK_STEEL_A",
+    "BLOCK_STEEL_B",
+    "BLOCK_STEEL_GAMMA_SHAPE",
+    "BLOCK_STEEL_GAMMA_SCALE",
+    "BLOCK_THICKNESS_A",
+    "BLOCK_THICKNESS_B",
+    "BLOCK_THICKNESS_STD",
+    "WO_LENGTH_A",
+    "WO_LENGTH_B",
+    "WO_LENGTH_POWER",
+    "WO_THICKNESS_BASE",
+    "WO_THICKNESS_AMP",
+    "WO_THICKNESS_DECAY",
+    "WO_THICKNESS_SKEW_SHAPE",
+    "WO_THICKNESS_SKEW_LOC",
+    "WO_THICKNESS_SKEW_SCALE",
+    "WO_CUT_A",
+    "WO_CUT_B",
+    "WO_CUT_STD",
+    "WO_MARK_A",
+    "WO_MARK_B",
+    "WO_MARK_STD",
+    "WO_BEVEL_A_THK",
+    "WO_BEVEL_A_LTH",
+    "WO_BEVEL_A_MARK",
+    "WO_BEVEL_B",
+    "WO_BEVEL_STD",
+    "WO_BVQ_A_BVL",
+    "WO_BVQ_A_CUT",
+    "WO_BVQ_B",
+    "WO_BVQ_STD",
+    "WO_PTLST_A_CUT",
+    "WO_PTLST_A_LTH",
+    "WO_PTLST_A_MARK",
+    "WO_PTLST_B",
+    "WO_PTLST_STD",
+    "TACT_A_CUT",
+    "TACT_A_MARK",
+    "TACT_A_THK",
+    "TACT_A_PTLST",
+)
 MULTI_SERIES_WO_COLUMNS = (
     "PROJ_NO",
     "BLK_NO",
@@ -81,6 +148,212 @@ class MultiSeriesFormulaGeneration:
     physical_block_count: int
     series_combinations: tuple[tuple[str, ...], ...]
     allocation_df: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class MultiSeriesGenerationProfile:
+    """학습 중 Excel 없이 사용하는 검증 완료 고정 profile."""
+
+    physical: PhysicalBlockJointProfile
+    np_bth: BthFormulaProfile
+    np_stl: StlQuantityProfile
+    empirical_generators: Mapping[str, object]
+    sources: Mapping[str, Mapping[str, object]]
+
+
+def _json_value(value: Any) -> Any:
+    """numpy/pandas 값을 표준 JSON 값으로 변환한다."""
+
+    if isinstance(value, np.ndarray):
+        return _json_value(value.tolist())
+    if isinstance(value, np.generic):
+        return _json_value(value.item())
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, (tuple, list)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    return value
+
+
+def _require_profile_keys(mapping: Mapping[str, object], required: Sequence[str], context: str) -> None:
+    missing = sorted(set(required) - set(mapping))
+    if missing:
+        print(
+            "[ERROR][multi_series_formula_data_generator._require_profile_keys] "
+            f"cause=missing_profile_keys context={context} keys={missing}"
+        )
+        raise RuntimeError(f"missing fixed profile keys: {context}: {missing}")
+
+
+def _frame_payload(frame: pd.DataFrame) -> dict:
+    return {
+        "columns": list(frame.columns),
+        "records": _json_value(frame.to_dict(orient="records")),
+    }
+
+
+def _frame_from_payload(payload: Mapping[str, object], context: str) -> pd.DataFrame:
+    _require_profile_keys(payload, ("columns", "records"), context)
+    columns = payload["columns"]
+    records = payload["records"]
+    if not isinstance(columns, list) or not isinstance(records, list) or len(set(columns)) != len(columns):
+        print(
+            "[ERROR][multi_series_formula_data_generator._frame_from_payload] "
+            f"cause=invalid_frame_payload context={context}"
+        )
+        raise RuntimeError(f"invalid fixed profile frame: {context}")
+    return pd.DataFrame.from_records(records, columns=columns)
+
+
+def _serialize_physical_profile(profile: PhysicalBlockJointProfile) -> dict:
+    return {
+        "rows": _frame_payload(profile.rows),
+        "physical_rows": _frame_payload(profile.physical_rows),
+        "physical_keys": _json_value(profile.physical_keys),
+        "combinations": _json_value(profile.combinations),
+        "probabilities": list(profile.probabilities),
+        "counts": list(profile.counts),
+        "physical_block_count": profile.physical_block_count,
+    }
+
+
+def _deserialize_physical_profile(payload: Mapping[str, object]) -> PhysicalBlockJointProfile:
+    _require_profile_keys(
+        payload,
+        ("rows", "physical_rows", "physical_keys", "combinations", "probabilities", "counts", "physical_block_count"),
+        "physical_block_joint",
+    )
+    rows = _frame_from_payload(payload["rows"], "physical_block_joint.rows")
+    physical_rows = _frame_from_payload(payload["physical_rows"], "physical_block_joint.physical_rows")
+    if "SERIES_COMBINATION" in physical_rows:
+        physical_rows["SERIES_COMBINATION"] = physical_rows["SERIES_COMBINATION"].map(tuple)
+    profile = PhysicalBlockJointProfile(
+        rows=rows,
+        physical_rows=physical_rows,
+        physical_keys=tuple(tuple(str(value) for value in key) for key in payload["physical_keys"]),
+        combinations=tuple(tuple(str(value) for value in combination) for combination in payload["combinations"]),
+        probabilities=tuple(float(value) for value in payload["probabilities"]),
+        counts=tuple(int(value) for value in payload["counts"]),
+        physical_block_count=int(payload["physical_block_count"]),
+    )
+    if (
+        profile.physical_block_count <= 0
+        or len(profile.physical_rows) != profile.physical_block_count
+        or len(profile.combinations) != len(profile.probabilities)
+        or len(profile.combinations) != len(profile.counts)
+        or sum(profile.counts) != profile.physical_block_count
+        or not np.isclose(sum(profile.probabilities), 1.0)
+    ):
+        print(
+            "[ERROR][multi_series_formula_data_generator._deserialize_physical_profile] "
+            "cause=invalid_physical_profile_counts"
+        )
+        raise RuntimeError("invalid fixed physical-block profile")
+    return profile
+
+
+def _serialize_bth_profile(profile: BthFormulaProfile) -> dict:
+    return {
+        "series": profile.series,
+        "coefficients": list(profile.coefficients),
+        "residual_std": profile.residual_std,
+        "r_squared": profile.r_squared,
+        "observed_specs": list(profile.observed_specs),
+    }
+
+
+def _deserialize_bth_profile(payload: Mapping[str, object]) -> BthFormulaProfile:
+    _require_profile_keys(
+        payload,
+        ("series", "coefficients", "residual_std", "r_squared", "observed_specs"),
+        "np.bth",
+    )
+    return BthFormulaProfile(
+        series=str(payload["series"]).strip().upper(),
+        coefficients=tuple(float(value) for value in payload["coefficients"]),
+        residual_std=float(payload["residual_std"]),
+        r_squared=float(payload["r_squared"]),
+        observed_specs=tuple(float(value) for value in payload["observed_specs"]),
+    )
+
+
+def _serialize_stl_profile(profile: StlQuantityProfile) -> dict:
+    return {
+        "series": profile.series,
+        "features": list(profile.features),
+        "feature_mean": list(profile.feature_mean),
+        "feature_scale": list(profile.feature_scale),
+        "normalized_actual_features": _json_value(profile.normalized_actual_features),
+        "actual_values": _json_value(profile.actual_values),
+        "classes": list(profile.classes),
+        "priors": list(profile.priors),
+    }
+
+
+def _deserialize_stl_profile(payload: Mapping[str, object]) -> StlQuantityProfile:
+    _require_profile_keys(
+        payload,
+        ("series", "features", "feature_mean", "feature_scale", "normalized_actual_features", "actual_values", "classes", "priors"),
+        "np.stl_quantity",
+    )
+    profile = StlQuantityProfile(
+        series=str(payload["series"]).strip().upper(),
+        features=tuple(str(value) for value in payload["features"]),
+        feature_mean=tuple(float(value) for value in payload["feature_mean"]),
+        feature_scale=tuple(float(value) for value in payload["feature_scale"]),
+        normalized_actual_features=np.asarray(payload["normalized_actual_features"], dtype=float),
+        actual_values=np.asarray(payload["actual_values"], dtype=int),
+        classes=tuple(int(value) for value in payload["classes"]),
+        priors=tuple(float(value) for value in payload["priors"]),
+    )
+    if (
+        profile.normalized_actual_features.shape != (len(profile.actual_values), len(profile.features))
+        or len(profile.feature_mean) != len(profile.features)
+        or len(profile.feature_scale) != len(profile.features)
+        or len(profile.classes) != len(profile.priors)
+        or not np.isclose(sum(profile.priors), 1.0)
+    ):
+        print(
+            "[ERROR][multi_series_formula_data_generator._deserialize_stl_profile] "
+            "cause=invalid_np_stl_profile"
+        )
+        raise RuntimeError("invalid fixed NP STL_QTY profile")
+    return profile
+
+
+def _np_fixed_formula_contract() -> dict:
+    """JSON profile과 코드의 발표자료 고정식이 같은지 확인할 계약을 만든다."""
+
+    return {
+        "version": "np_ppt_fixed_formula_v1",
+        "constants": {
+            name: _json_value(getattr(report_formula, name))
+            for name in NP_FIXED_FORMULA_CONSTANT_NAMES
+        },
+        "thickness_specs": list(report_formula.DEFAULT_THICKNESS_SPECS),
+        "bth_features": list(report_formula.BTH_FORMULA_FEATURES),
+        "bth_random_stream_salt": report_formula.BTH_RANDOM_STREAM_SALT,
+        "stl_random_stream_salt": report_formula.STL_RANDOM_STREAM_SALT,
+        "stl_local_weight": report_formula.STL_LOCAL_WEIGHT,
+    }
+
+
+def _source_metadata(path: Path) -> dict:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    try:
+        display_path = str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        display_path = str(path.resolve())
+    return {
+        "path": display_path,
+        "sha256": digest.hexdigest(),
+        "size_bytes": path.stat().st_size,
+    }
 
 
 def _python_int_tuple(values: Iterable[object]) -> tuple[int, ...]:
@@ -480,11 +753,196 @@ def _apportion_empirical_count_vector(
     return allocated
 
 
+def build_multi_series_generation_profile(
+    wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
+    block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+) -> dict:
+    """실적 Excel을 한 번 적합해 재현 가능한 고정 JSON payload를 만든다."""
+
+    wo_path = Path(wo_source_path).resolve()
+    block_path = Path(block_source_path).resolve()
+    missing = [path for path in (wo_path, block_path) if not path.is_file()]
+    if missing:
+        print(
+            "[ERROR][multi_series_formula_data_generator.build_multi_series_generation_profile] "
+            f"cause=source_not_found paths={missing}"
+        )
+        raise FileNotFoundError(missing[0])
+    work_orders = pd.read_excel(wo_path, sheet_name="Sheet1")
+    blocks = pd.read_excel(block_path, sheet_name="Sheet1")
+    physical = fit_physical_block_joint_profile(work_orders, blocks)
+    np_bth = fit_bth_formula(work_orders, series="NP")
+    np_stl = fit_stl_quantity_profile(work_orders, series="NP")
+
+    from 데이터분석.shipyard_data_generator import ShipyardGenerator
+
+    empirical = {}
+    for series in sorted(SUPPORTED_SERIES - {"NP"}):
+        empirical[series] = ShipyardGenerator(
+            wo_path,
+            block_path,
+            mode="spearman",
+            series=series,
+        ).fit().to_generation_profile()
+    payload = {
+        "schema": MULTI_SERIES_GENERATION_PROFILE_SCHEMA,
+        "sources": {
+            "work_orders": _source_metadata(wo_path),
+            "blocks": _source_metadata(block_path),
+        },
+        "np_fixed_formula": _np_fixed_formula_contract(),
+        "physical_block_joint": _serialize_physical_profile(physical),
+        "np": {
+            "bth": _serialize_bth_profile(np_bth),
+            "stl_quantity": _serialize_stl_profile(np_stl),
+        },
+        "empirical_series": empirical,
+    }
+    print(
+        "[VALIDATION][multi_series_formula_data_generator.build_multi_series_generation_profile] "
+        f"passed=true physical_blocks={physical.physical_block_count} "
+        f"series={','.join(sorted(SUPPORTED_SERIES))}"
+    )
+    return payload
+
+
+def write_multi_series_generation_profile(
+    output_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
+    wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
+    block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+) -> Path:
+    """오프라인 적합 결과를 표준 JSON으로 원자적으로 저장한다."""
+
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_multi_series_generation_profile(wo_source_path, block_source_path)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(serialized + "\n", encoding="utf-8")
+    temporary.replace(path)
+    _load_multi_series_generation_profile.cache_clear()
+    load_multi_series_generation_profile(path)
+    print(
+        "[CHECK][multi_series_formula_data_generator.write_multi_series_generation_profile] "
+        f"output={path} bytes={path.stat().st_size}"
+    )
+    return path
+
+
+def load_multi_series_generation_profile(
+    profile_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
+) -> MultiSeriesGenerationProfile:
+    """고정 profile을 읽는다. 누락·손상 시 Excel 재적합 없이 실패한다."""
+
+    return _load_multi_series_generation_profile(str(Path(profile_path).resolve()))
+
+
+@lru_cache(maxsize=4)
+def _load_multi_series_generation_profile(profile_path: str) -> MultiSeriesGenerationProfile:
+    path = Path(profile_path)
+    if not path.is_file():
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=profile_not_found path={path}"
+        )
+        raise FileNotFoundError(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=invalid_json path={path} error={exc}"
+        )
+        raise RuntimeError(f"invalid multi-series generation profile: {path}") from exc
+    if not isinstance(payload, dict):
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=invalid_root_type path={path} type={type(payload).__name__}"
+        )
+        raise RuntimeError("multi-series generation profile root must be an object")
+    _require_profile_keys(
+        payload,
+        ("schema", "sources", "np_fixed_formula", "physical_block_joint", "np", "empirical_series"),
+        "root",
+    )
+    if payload["schema"] != MULTI_SERIES_GENERATION_PROFILE_SCHEMA:
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=schema_mismatch actual={payload['schema']} "
+            f"expected={MULTI_SERIES_GENERATION_PROFILE_SCHEMA}"
+        )
+        raise RuntimeError("multi-series generation profile schema mismatch")
+    if payload["np_fixed_formula"] != _np_fixed_formula_contract():
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            "cause=np_fixed_formula_contract_mismatch"
+        )
+        raise RuntimeError("NP fixed formula contract does not match the profile")
+
+    sources = payload["sources"]
+    _require_profile_keys(sources, ("work_orders", "blocks"), "sources")
+    for name in ("work_orders", "blocks"):
+        metadata = sources[name]
+        _require_profile_keys(metadata, ("path", "sha256", "size_bytes"), f"sources.{name}")
+        digest = str(metadata["sha256"])
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            print(
+                "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+                f"cause=invalid_source_sha256 source={name} value={digest}"
+            )
+            raise RuntimeError(f"invalid source SHA256 in fixed profile: {name}")
+
+    np_payload = payload["np"]
+    _require_profile_keys(np_payload, ("bth", "stl_quantity"), "np")
+    np_bth = _deserialize_bth_profile(np_payload["bth"])
+    np_stl = _deserialize_stl_profile(np_payload["stl_quantity"])
+    if np_bth.series != "NP" or np_stl.series != "NP":
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=np_profile_series_mismatch bth={np_bth.series} stl={np_stl.series}"
+        )
+        raise RuntimeError("fixed NP profile has the wrong series")
+
+    empirical_payload = payload["empirical_series"]
+    expected_empirical = SUPPORTED_SERIES - {"NP"}
+    if set(empirical_payload) != expected_empirical:
+        print(
+            "[ERROR][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+            f"cause=empirical_series_mismatch actual={sorted(empirical_payload)} "
+            f"expected={sorted(expected_empirical)}"
+        )
+        raise RuntimeError("fixed profile empirical series mismatch")
+    from 데이터분석.shipyard_data_generator import ShipyardGenerator
+
+    empirical_generators = {
+        series: ShipyardGenerator.from_generation_profile(empirical_payload[series])
+        for series in sorted(expected_empirical)
+    }
+    profile = MultiSeriesGenerationProfile(
+        physical=_deserialize_physical_profile(payload["physical_block_joint"]),
+        np_bth=np_bth,
+        np_stl=np_stl,
+        empirical_generators=empirical_generators,
+        sources=sources,
+    )
+    print(
+        "[CHECK][multi_series_formula_data_generator._load_multi_series_generation_profile] "
+        f"path={path} physical_blocks={profile.physical.physical_block_count} "
+        f"series={','.join(sorted(SUPPORTED_SERIES))}"
+    )
+    return profile
+
+
 def generate_multi_series_formula_data(
     n_physical_blocks: int,
     seed: int = 2026,
-    wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
-    block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+    profile_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
 ) -> MultiSeriesFormulaGeneration:
     """전체 W/O 수를 먼저 생성한 뒤 계열별 count vector와 W/O를 생성한다."""
 
@@ -494,9 +952,8 @@ def generate_multi_series_formula_data(
             f"cause=invalid_n_physical_blocks value={n_physical_blocks}"
         )
         raise ValueError("n_physical_blocks must be positive")
-    wo_path = Path(wo_source_path).resolve()
-    block_path = Path(block_source_path).resolve()
-    profile = load_physical_block_joint_profile(wo_path, block_path)
+    generation_profile = load_multi_series_generation_profile(profile_path)
+    profile = generation_profile.physical
     seed_sequence = np.random.SeedSequence(int(seed))
     block_seed_child, allocation_child, physical_child, *series_children = seed_sequence.spawn(
         3 + len(SUPPORTED_SERIES)
@@ -536,8 +993,7 @@ def generate_multi_series_formula_data(
             series=series,
             block_count=len(series_allocations),
             seed=series_seed_map[series],
-            wo_source_path=wo_path,
-            block_source_path=block_path,
+            generation_profile=generation_profile,
             wo_counts=tuple(series_allocations["SERIES_WO_QTY"].astype(int)),
             block_seeds=_python_int_tuple(series_allocations["SERIES_RANDOM_SEED"]),
         )
@@ -586,8 +1042,7 @@ def build_multi_series_formula_episode_jobs(
     min_physical_blocks: int,
     max_physical_blocks: int,
     seed: int = 2026,
-    wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
-    block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+    profile_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
 ) -> list[Dict]:
     """Phase 1/2가 공유하는 가변 크기 다계열 episode를 생성한다."""
 
@@ -606,8 +1061,7 @@ def build_multi_series_formula_episode_jobs(
         generated = generate_multi_series_formula_data(
             n_physical_blocks=physical_count,
             seed=episode_seed,
-            wo_source_path=wo_source_path,
-            block_source_path=block_source_path,
+            profile_path=profile_path,
         )
         episodes.append(
             {
@@ -628,65 +1082,18 @@ def build_multi_series_formula_episode_jobs(
 
 
 def load_physical_block_joint_profile(
-    wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
-    block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+    profile_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
 ) -> PhysicalBlockJointProfile:
-    """실적 물리 블록 공동분포를 캐시해 반환한다."""
+    """고정 JSON에서 실적 물리 블록 공동분포를 반환한다."""
 
-    return _load_physical_block_joint_profile(
-        str(Path(wo_source_path).resolve()),
-        str(Path(block_source_path).resolve()),
-    )
-
-
-@lru_cache(maxsize=8)
-def _load_physical_block_joint_profile(
-    wo_source_path: str,
-    block_source_path: str,
-) -> PhysicalBlockJointProfile:
-    wo_path = Path(wo_source_path)
-    block_path = Path(block_source_path)
-    missing = [path for path in (wo_path, block_path) if not path.exists()]
-    if missing:
-        print(
-            "[ERROR][multi_series_formula_data_generator._load_physical_block_joint_profile] "
-            f"cause=source_not_found paths={missing}"
-        )
-        raise FileNotFoundError(missing[0])
-    work_orders = pd.read_excel(wo_path, sheet_name="Sheet1")
-    blocks = pd.read_excel(block_path, sheet_name="Sheet1")
-    profile = fit_physical_block_joint_profile(work_orders, blocks)
-    print(
-        "[CHECK][multi_series_formula_data_generator._load_physical_block_joint_profile] "
-        f"physical_blocks={profile.physical_block_count} combinations={len(profile.combinations)} "
-        f"wo_path={wo_path} block_path={block_path}"
-    )
-    return profile
-
-
-@lru_cache(maxsize=12)
-def _load_empirical_series_generator(
-    wo_source_path: str,
-    block_source_path: str,
-    series: str,
-):
-    # 기존 계열별 식 적합 구현을 분석 CLI와 공용 실행 경로가 함께 사용한다.
-    from 데이터분석.shipyard_data_generator import ShipyardGenerator
-
-    return ShipyardGenerator(
-        wo_source_path,
-        block_source_path,
-        mode="spearman",
-        series=series,
-    ).fit()
+    return load_multi_series_generation_profile(profile_path).physical
 
 
 def _generate_one_series(
     series: str,
     block_count: int,
     seed: int,
-    wo_source_path: Path,
-    block_source_path: Path,
+    generation_profile: MultiSeriesGenerationProfile,
     wo_counts: Sequence[int],
     block_seeds: Sequence[int],
 ) -> pd.DataFrame:
@@ -695,13 +1102,18 @@ def _generate_one_series(
             n_blocks=block_count,
             seed=seed,
             gyel="NP",
-            bth_source_path=wo_source_path,
+            bth_profile=generation_profile.np_bth,
+            stl_quantity_profile=generation_profile.np_stl,
             wo_counts=wo_counts,
             block_seeds=block_seeds,
         ).wo_df.copy()
-    generator = _load_empirical_series_generator(
-        str(wo_source_path), str(block_source_path), series
-    )
+    if series not in generation_profile.empirical_generators:
+        print(
+            "[ERROR][multi_series_formula_data_generator._generate_one_series] "
+            f"cause=missing_empirical_generator series={series}"
+        )
+        raise RuntimeError(f"missing fixed empirical generator for {series}")
+    generator = generation_profile.empirical_generators[series]
     work_orders, _ = generator.generate(
         n_blocks=block_count,
         seed=seed,
