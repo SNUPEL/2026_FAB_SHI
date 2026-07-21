@@ -10,11 +10,9 @@ from Environment.hierarchical import CommonHierarchicalEnvironment, OpenBatchSta
 from Utils.data.multi_series_cutting_data import SUPPORTED_SERIES
 
 
-PHASE2_STATE_SCHEMA_VERSION = "phase2_set_pointer_v2_family"
-PHASE2_SET_POINTER_POLICY_TYPE = "phase2_set_pointer"
+PHASE2_STATE_SCHEMA_VERSION = "phase2_wo_pointer_v3_family"
+PHASE2_SET_POINTER_POLICY_TYPE = "phase2_wo_pointer"
 PHASE2_BAY_CONTEXT_FEATURE_NAMES = (
-    "stage_select_machine",
-    "stage_select_wo",
     "progress_ratio",
     "remaining_wo_ratio",
     "remaining_tact_ratio",
@@ -90,7 +88,6 @@ def phase2_state_feature_schema() -> Dict[str, list[str]]:
 @dataclass(frozen=True)
 class Phase2PolicyState:
     schema_version: str
-    stage: str
     bay_id: str
     bay_context_features: list[float]
     machine_ids: list[str]
@@ -108,26 +105,21 @@ def build_phase2_policy_state(
     *,
     environment: CommonHierarchicalEnvironment,
     bay_id: str,
-    stage: str,
     actions: Sequence[Mapping[str, Any]],
-    selected_machine_id: str | None = None,
-    open_batch_id: str | None = None,
+    selected_machine_id: str,
+    open_batch_id: str,
 ) -> Phase2PolicyState:
-    """가변 Machine/W/O set과 action-conditioned projected feature를 만든다."""
+    """환경이 정한 설비에서 선택 가능한 W/O pointer state를 만든다."""
 
-    normalized_stage = str(stage).strip().upper()
-    if normalized_stage not in {"SELECT_MACHINE", "SELECT_WO"}:
-        print(f"[ERROR][Phase2.state.build_phase2_policy_state] cause=unknown_stage stage={stage}")
-        raise RuntimeError(f"unknown Phase 2 policy stage: {stage}")
     if not actions:
         print("[ERROR][Phase2.state.build_phase2_policy_state] cause=no_actions")
         raise RuntimeError("Phase 2 policy state requires feasible actions")
-    if normalized_stage == "SELECT_WO" and (not selected_machine_id or not open_batch_id):
+    if not selected_machine_id or not open_batch_id:
         print(
             "[ERROR][Phase2.state.build_phase2_policy_state] "
             "cause=missing_selected_machine_or_open_batch"
         )
-        raise RuntimeError("SELECT_WO state requires selected machine and open batch")
+        raise RuntimeError("Phase 2 W/O state requires selected machine and open batch")
 
     normalized_bay = str(bay_id)
     view = environment.phase2_bay_view(normalized_bay)
@@ -158,8 +150,6 @@ def build_phase2_policy_state(
     current_gaps = _machine_gaps(view.machine_loads, view.machine_available_at)
     scheduled_count = len(all_bay_jobs) - len(view.jobs)
     bay_context = [
-        1.0 if normalized_stage == "SELECT_MACHINE" else 0.0,
-        1.0 if normalized_stage == "SELECT_WO" else 0.0,
         scheduled_count / totals["wo"],
         remaining_totals["wo"] / totals["wo"],
         remaining_totals["tact"] / totals["tact"],
@@ -195,7 +185,7 @@ def build_phase2_policy_state(
                 *_machine_family_flags(machine, machine_id),
             ]
         )
-    if normalized_stage == "SELECT_WO" and selected_machine_index < 0:
+    if selected_machine_index < 0:
         print(
             "[ERROR][Phase2.state.build_phase2_policy_state] "
             f"cause=selected_machine_outside_bay machine_id={selected_machine_id} bay_id={normalized_bay}"
@@ -222,13 +212,12 @@ def build_phase2_policy_state(
     candidate_indices: list[int] = []
     for action_index, action in enumerate(actions):
         action_type = str(action.get("action_type") or "").strip().lower()
-        expected_type = "select_machine" if normalized_stage == "SELECT_MACHINE" else "select_wo"
-        if action_type != expected_type:
+        if action_type != "select_wo":
             print(
                 "[ERROR][Phase2.state.build_phase2_policy_state] "
-                f"cause=action_stage_mismatch index={action_index} action_type={action_type} stage={normalized_stage}"
+                f"cause=non_wo_action index={action_index} action_type={action_type}"
             )
-            raise RuntimeError("Phase 2 action type does not match policy stage")
+            raise RuntimeError("Phase 2 learned action must be select_wo")
         machine_id = str(action.get("machine_id") or "")
         if machine_id not in machine_ids:
             print(
@@ -236,19 +225,15 @@ def build_phase2_policy_state(
                 f"cause=action_machine_outside_bay machine_id={machine_id}"
             )
             raise RuntimeError("Phase 2 action machine is outside Bay view")
-        if normalized_stage == "SELECT_MACHINE":
-            node_index = machine_ids.index(machine_id)
-            action_id = str(action.get("action_id") or f"machine:{machine_id}")
-        else:
-            action_job_ids = tuple(str(value) for value in action.get("job_ids", ()))
-            if len(action_job_ids) != 1 or action_job_ids[0] not in wo_ids:
-                print(
-                    "[ERROR][Phase2.state.build_phase2_policy_state] "
-                    f"cause=invalid_wo_action index={action_index} job_ids={action_job_ids}"
-                )
-                raise RuntimeError("SELECT_WO action must reference one remaining W/O")
-            node_index = wo_ids.index(action_job_ids[0])
-            action_id = str(action.get("action_id") or f"wo:{action_job_ids[0]}")
+        action_job_ids = tuple(str(value) for value in action.get("job_ids", ()))
+        if len(action_job_ids) != 1 or action_job_ids[0] not in wo_ids:
+            print(
+                "[ERROR][Phase2.state.build_phase2_policy_state] "
+                f"cause=invalid_wo_action index={action_index} job_ids={action_job_ids}"
+            )
+            raise RuntimeError("SELECT_WO action must reference one remaining W/O")
+        node_index = wo_ids.index(action_job_ids[0])
+        action_id = str(action.get("action_id") or f"wo:{action_job_ids[0]}")
         action_ids.append(action_id)
         candidate_indices.append(node_index)
         projected_features.append(
@@ -264,7 +249,6 @@ def build_phase2_policy_state(
 
     return Phase2PolicyState(
         schema_version=PHASE2_STATE_SCHEMA_VERSION,
-        stage=normalized_stage,
         bay_id=normalized_bay,
         bay_context_features=bay_context,
         machine_ids=machine_ids,
@@ -291,24 +275,19 @@ def _projected_action_features(
     projected_loads = {key: dict(value) for key, value in machine_loads.items()}
     projected_clock = {key: float(value) for key, value in machine_available_at.items()}
     action_type = str(_required_field(action, "action_type", machine_id))
-    if action_type not in {"select_machine", "select_wo"}:
+    if action_type != "select_wo":
         print(
             "[ERROR][Phase2.state._projected_action_features] "
-            f"cause=unknown_action_type machine_id={machine_id} action_type={action_type}"
+            f"cause=non_wo_action machine_id={machine_id} action_type={action_type}"
         )
-        raise RuntimeError(f"unknown Phase 2 action type: {action_type}")
-    if action_type == "select_wo":
-        projected_loads[machine_id]["wo_count"] += int(action["wo_count"])
-        projected_loads[machine_id]["cut_length_sum"] += float(action["cut_length_sum"])
-        projected_loads[machine_id]["bevel_quantity_sum"] += float(action["bevel_quantity_sum"])
-        projected_clock[machine_id] = float(action["projected_finish_time"])
+        raise RuntimeError(f"Phase 2 projected action must be select_wo: {action_type}")
+    projected_loads[machine_id]["wo_count"] += int(action["wo_count"])
+    projected_loads[machine_id]["cut_length_sum"] += float(action["cut_length_sum"])
+    projected_loads[machine_id]["bevel_quantity_sum"] += float(action["bevel_quantity_sum"])
+    projected_clock[machine_id] = float(action["projected_finish_time"])
     gaps = _machine_gaps(projected_loads, projected_clock)
     time_scale = max(1.0, totals["tact"])
-    duration_increment = (
-        _number_field(action, "duration_increment", machine_id)
-        if action_type == "select_wo"
-        else 0.0
-    )
+    duration_increment = _number_field(action, "duration_increment", machine_id)
     return [
         duration_increment / time_scale,
         float(action["projected_finish_time"]) / time_scale,

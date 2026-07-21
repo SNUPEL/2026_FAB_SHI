@@ -45,11 +45,20 @@ a_t = (선택할 블록-계열, 배정할 Bay)
 | NP 기본 | 22, 23, 24 |
 | NC 기본 | 22, 23, 24 |
 | FN, FL | 25, trans |
-| NP `CUT_LTH >= 1000` | 22, 23 |
+| NP block-series `CUT_LTH` 합 `>= 1000` | 22, 23 |
 | NP `BTH > 4500` | 22, 23 |
 | NP `CNT_BLK` | 22, 23 |
 
 제약을 위반하는 pair는 점수를 낮게 주는 것이 아니라 action 후보에서 제거한다.
+
+장척 판정값은 동일 `PROJ_NO+GYEL+BLK_NO`에 속한 W/O 절단장의 합이다.
+
+```text
+block-series CUT_LTH = sum(W/O CUT_LTH)
+```
+
+개별 W/O의 최댓값을 사용하지 않는다. 합계가 1,000 이상이면 해당 block-series의
+모든 W/O가 함께 상속할 수 있는 Bay 후보를 22/23으로 제한한다.
 
 ## 5. State Feature
 

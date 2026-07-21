@@ -47,6 +47,11 @@ class Phase2RunSpecTest(unittest.TestCase):
         self.assertEqual(spec["phase1_rule_profile"], "multi_series_260711")
         self.assertEqual(spec["phase1_scope_version"], "joint_five_bay_v3_shared_pool")
         self.assertEqual(spec["phase1_score_mode"], "wo_first")
+        self.assertEqual(spec["policy_action"], "select_wo_only")
+        self.assertEqual(
+            spec["machine_dispatch_rule"],
+            "idle_at_current_time_else_next_completion_then_machine_id",
+        )
         self.assertNotIn("phase1_long_cut_hard_mask", spec)
 
     def test_run_spec_mismatch_fails_instead_of_overriding_checkpoint(self) -> None:

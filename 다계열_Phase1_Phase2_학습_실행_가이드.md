@@ -152,6 +152,27 @@ Phase 2는 매 episode마다 MIXED 문제를 생성하고 Phase 1 결과로 bloc
 업데이트하지 않는다. 다음 네 실험을 **동일한 seed와 나머지 Phase 2 인자**로 각각
 실행한다.
 
+현재 Phase 2 학습 action은 `SELECT_WO` 하나다. 환경은 현재 전역 시각에 실행 가능한
+유휴 설비 중 machine ID가 작은 설비를 확정하고 목표 batch 크기를 만든다. 유휴 설비가
+없을 때만 전체 설비의 다음 최소 완료 시각으로 event jump한다. batch close는 설비의
+미래 완료 시각만 예약하므로 여러 설비와 Bay가 같은 시각에 병렬 시작할 수 있다.
+설비 결정과 event jump는 candidate 수, sampling, CE loss에 포함되지 않는다.
+
+Phase 2 후보 비교는 다음 raw 사전식 score를 사용한다.
+
+```text
+hard violation
+-> makespan
+-> Bay 내부 CUT_LTH max-min gap 합
+-> Bay 내부 W/O 수 max-min gap 합
+-> Bay 내부 BV_QTY max-min gap 합
+-> Bay 내부 점유시간 max-min gap 합
+```
+
+Bay별 subproblem의 teacher는 해당 Bay gap으로 선택하고, 여러 Bay를 합친 validation과
+full-flow 결과는 Bay별 gap을 합산한다. `--phase2-score-mode normalized`는 각 Bay의
+`max-min`을 같은 Bay의 평균 부하로 나눈 뒤 합산한다.
+
 | 실험 | Phase 1 upstream | Phase 1 학습 여부 | output |
 | --- | --- | --- | --- |
 | H-WO | `wo_first_balanced` | 고정, 학습 안 함 | `phase2_upstream_wo` |
@@ -222,6 +243,8 @@ python main.py phase2-train-batch-machine-self-labeling --config config_np_100.y
 
 Phase 2도 `--episodes`는 최종 episode 번호다. score mode, batch limit, action pool,
 heuristic bank, Phase 1 upstream 계약이 checkpoint와 다르면 fallback 없이 실패한다.
+`phase2_wo_pointer_v3_family` 이전의 Machine/W/O 2-stage checkpoint는 state 차원과
+학습 action이 다르므로 재개할 수 없으며 새 output 디렉터리에서 처음 학습해야 한다.
 
 ## 7. Phase 2 Loss 및 validation 결과
 

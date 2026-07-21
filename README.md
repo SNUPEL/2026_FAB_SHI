@@ -30,7 +30,7 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
 - hard mask:
   - NP/NC: Bay 22/23/24
   - FN/FL: Bay 25/trans
-  - NP `CUT_LTH >= 1000`, `BTH > 4500`, CNT block: Bay 22/23
+  - NP block-series의 W/O `CUT_LTH` 합 `>= 1000`, `BTH > 4500`, CNT block: Bay 22/23
 
 Phase 1 action은 가능한 `(block-series, Bay)` edge 하나를 선택합니다. 정책 입력은
 19차원 pair feature와 8차원 환경 feature이며, 후보 수와 Bay 수에 독립적인
@@ -38,14 +38,24 @@ pointer-style scorer입니다.
 
 ### Phase 2
 
-- 의사결정: `SELECT_MACHINE -> SELECT_WO` 반복 후 batch 자동 close
+- 학습 action: 환경이 확정한 설비의 open batch에 추가할 `W/O` 하나 선택
+- 설비 dispatch: 현재 전역 시각에 실행 가능한 유휴 설비 중 `machine_id` 오름차순
+- 이벤트 시계: 유휴 설비가 없을 때만 전체 설비의 다음 최소 완료 시각으로 점프
 - batch W/O 수: 1~3개
 - batch `LTH` 합: 55,000 이하
 - batch 처리시간: 포함 W/O `TACT_TIME`의 최댓값
 - 동일 batch의 W/O는 같은 시점에 시작하고 종료합니다.
 - 사전식 score:
-  `hard violation -> makespan -> Bay 내부 CUT_LTH gap -> W/O 수 gap -> BV_QTY gap`
-- 점유시간 gap은 진단 지표로 별도 저장합니다.
+  `hard violation -> makespan -> Bay 내부 CUT_LTH gap 합 -> W/O 수 gap 합 -> BV_QTY gap 합 -> 점유시간 gap 합`
+
+각 부하 gap은 Bay 안 설비의 `max-min`으로 계산한 뒤 Bay별 값을 합합니다. 점유시간
+gap도 마지막 사전식 tie-break 항목이며 진단 CSV/PNG에 함께 저장합니다.
+
+설비 선택은 sampling·logit·CE target이 아닙니다. 환경이 설비와 목표 batch 크기를
+결정한 뒤, 단일 Set-Pointer policy가 해당 설비에 투입 가능한 W/O 후보만 scoring합니다.
+batch close는 해당 설비의 `machine_available_at`만 갱신하므로 여러 설비와 여러 Bay의
+첫 batch가 `t=0`에 병렬 시작할 수 있습니다. 모든 설비가 점유된 뒤에만 전역 시계가
+다음 완료 이벤트로 이동하며, 모든 W/O 배정 후에는 남은 완료 이벤트를 drain합니다.
 
 Phase 2는 확정된 PLS/PLP 15대를 사용합니다.
 

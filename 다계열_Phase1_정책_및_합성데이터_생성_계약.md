@@ -9,7 +9,7 @@
 
 - 공개 학습 데이터: `MIXED` physical-block joint-distribution episode
 - Phase 1: `(PROJ_NO, GYEL, BLK_NO) -> Bay`
-- Phase 2: `SELECT_MACHINE -> SELECT_WO`를 반복하는 batch-machine scheduling
+- Phase 2: 환경이 설비를 dispatch하고 policy가 `SELECT_WO`만 반복하는 batch-machine scheduling
 - 공통 환경: `Environment.hierarchical.CommonHierarchicalEnvironment`
 - 실행 엔진: SimPy가 아닌 custom event-driven DES
 - Phase 1 scope: `joint_five_bay_v3_shared_pool`
@@ -253,10 +253,14 @@ FN-NC 40개처럼 희소한 실적 관계는 표본 불확실성도 크다. 사�
 - FN/FL: Bay 25/trans
 - NP `BTH > 4500`: Bay 22/23
 - NP CNT block: Bay 22/23
-- NP `CUT_LTH >= 1000`: Bay 22/23
+- NP block-series의 W/O `CUT_LTH` 합 `>= 1000`: Bay 22/23
 
 동일 block-series를 두 Bay로 나누는 action은 생성하지 않는다. feasible edge가
 없으면 임의 Bay를 복원하지 않고 실패한다.
+
+NP 장척 여부는 개별 W/O 최댓값이 아니라 동일 `PROJ_NO+GYEL+BLK_NO` W/O의
+`CUT_LTH` 합으로 계산한다. 합계가 1,000 이상이면 그 block-series 전체의 feasible
+Bay를 22/23으로 제한한다.
 
 ### 5.2 Pair feature 19차원
 
@@ -315,10 +319,15 @@ feature를 MLP로 encoding한 뒤 모든 feasible edge에 pointer-style score를
 
 각 Bay는 독립 subproblem으로 풀지만 하나의 Phase 2 policy를 공유한다.
 
-1. `SELECT_MACHINE`: 현재 Bay의 eligible machine 하나를 선택한다.
-2. `SELECT_WO`: 남은 eligible W/O 하나를 open batch에 추가한다.
+1. 환경 dispatch: 현재 전역 시각에 유휴인 eligible machine 중 ID가 작은 설비를 확정한다. 유휴 설비가 없을 때만 전체 설비의 다음 최소 완료 시각으로 event jump한다.
+2. `SELECT_WO`: 선택된 설비의 open batch에 남은 eligible W/O 하나를 추가한다.
 3. batch close: 최대 3개 또는 `LTH` 합 55,000 한계와 남은 W/O 상태에 따라
    환경이 닫는다.
+
+설비 dispatch와 event jump는 policy action, sampling, CE target이 아니다. 목표 batch
+크기도 환경이 선택 Bay의 남은 W/O 수와 현재 유휴·실행 가능 설비 수로 계산한다.
+batch close는 해당 설비의 완료 시각만 예약하고 전역 clock을 이동하지 않으므로 여러
+설비와 Bay가 같은 시각에 병렬 시작한다. 모든 W/O 배정 후 남은 완료 이벤트를 drain한다.
 
 한 batch에는 서로 다른 block과 서로 다른 계열이 섞일 수 있다. 단 선택 machine이
 batch의 모든 계열을 처리할 수 있어야 한다. batch 처리시간은 포함 W/O
@@ -326,7 +335,7 @@ batch의 모든 계열을 처리할 수 있어야 한다. batch 처리시간은 
 
 ### 6.2 State
 
-Bay context 13차원은 stage, 진행률, 남은 W/O/TACT/LTH/CUT/BV 비율과 현재
+Bay context 11차원은 진행률, 남은 W/O/TACT/LTH/CUT/BV 비율과 현재
 W/O/CUT/BV/점유시간 gap, machine 수 비율을 포함한다.
 
 Machine node 11차원은 clock, W/O, CUT, BV, batch 수의 target 대비 비율,
@@ -361,6 +370,11 @@ feature를 MLP set/pointer-style scorer로 평가하며 message-passing GNN은 �
 `normalized` score mode도 제공하지만 checkpoint RunSpec과 실행 옵션이 정확히
 일치해야 한다. 각 Bay teacher는 해당 Bay subproblem 후보 bank에서 score가 가장
 작은 시퀀스를 self-label로 선택하고 CE/NLL update를 수행한다.
+
+지표 `x`의 raw gap은 `max(machine load)-min(machine load)`다. Bay별 teacher는 해당
+Bay의 gap을 사용하고, combined validation/full-flow는 active Bay의 gap을 합한다.
+`normalized`는 각 Bay raw gap을 같은 Bay의 평균 load로 나눈 뒤 합한다. makespan은
+Bay별 합이 아니라 모든 active machine의 최종 완료시각 최댓값이다.
 
 ## 7. Self-labeling
 

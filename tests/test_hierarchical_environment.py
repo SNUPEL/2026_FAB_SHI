@@ -97,6 +97,35 @@ class CommonHierarchicalEnvironmentTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.env.phase2_bay_view("99")
 
+    def test_environment_selects_earliest_feasible_machine_with_stable_tie_break(self) -> None:
+        machine_id, target_size = self.env.select_phase2_machine(
+            feasible_job_ids_by_machine={
+                "PLS22": ("WO_A", "WO_B"),
+                "PLS21": ("WO_A", "WO_B"),
+                "PLS31": (),
+            },
+            remaining_job_count_by_bay={"22": 2},
+        )
+
+        self.assertEqual(machine_id, "PLS21")
+        self.assertEqual(target_size, 1)
+        self.assertEqual(self.env.state.events.current_time, 0.0)
+
+        self.env.state.runtime.machine_available_at["PLS21"] = 30.0
+        self.env.state.runtime.machine_available_at["PLS22"] = 20.0
+        machine_id, target_size = self.env.select_phase2_machine(
+            feasible_job_ids_by_machine={
+                "PLS22": ("WO_A", "WO_B"),
+                "PLS21": ("WO_A", "WO_B"),
+                "PLS31": (),
+            },
+            remaining_job_count_by_bay={"22": 2},
+        )
+
+        self.assertEqual(machine_id, "PLS22")
+        self.assertEqual(target_size, 2)
+        self.assertEqual(self.env.state.events.current_time, 20.0)
+
     def test_open_add_close_commits_max_tact_batch_once_and_emits_events(self) -> None:
         batch_id = self.env.open_batch("PLS21", target_batch_size=2)
         self.env.add_wo(batch_id, "WO_A")
@@ -109,7 +138,7 @@ class CommonHierarchicalEnvironmentTest(unittest.TestCase):
         self.assertEqual(closed["start_time"], 0.0)
         self.assertEqual(closed["finish_time"], 30.0)
         self.assertEqual(self.env.state.runtime.machine_available_at["PLS21"], 30.0)
-        self.assertEqual(self.env.state.events.current_time, 30.0)
+        self.assertEqual(self.env.state.events.current_time, 0.0)
         load = self.env.state.runtime.machine_loads["PLS21"]
         self.assertEqual(load["wo_count"], 2)
         self.assertEqual(load["processing_time_sum"], 40.0)
@@ -125,15 +154,33 @@ class CommonHierarchicalEnvironmentTest(unittest.TestCase):
         self.assertEqual({row["time_min"] for row in finishes}, {30.0})
         self.assertEqual({row["job_id"] for row in starts}, {"WO_A", "WO_B"})
 
+        self.env.advance_phase2_to_completion()
+        self.assertEqual(self.env.state.events.current_time, 30.0)
+
     def test_same_machine_batches_never_overlap(self) -> None:
         first = self.env.open_batch("PLS21", target_batch_size=1)
         self.env.add_wo(first, "WO_A")
         first_row = self.env.close_batch(first)
+
+        machine_id, target_size = self.env.select_phase2_machine(
+            feasible_job_ids_by_machine={
+                "PLS21": ("WO_B",),
+                "PLS22": (),
+                "PLS31": (),
+            },
+            remaining_job_count_by_bay={"22": 1},
+        )
+        self.assertEqual(machine_id, "PLS21")
+        self.assertEqual(target_size, 1)
+        self.assertEqual(self.env.state.events.current_time, 30.0)
+
         second = self.env.open_batch("PLS21", target_batch_size=1)
         self.env.add_wo(second, "WO_B")
         second_row = self.env.close_batch(second)
 
         self.assertEqual(first_row["finish_time"], second_row["start_time"])
+        self.assertEqual(self.env.state.events.current_time, second_row["start_time"])
+        self.env.advance_phase2_to_completion()
         self.assertEqual(self.env.state.events.current_time, second_row["finish_time"])
 
     def test_add_wo_rejects_non_finite_job_values(self) -> None:

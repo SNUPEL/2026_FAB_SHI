@@ -2,7 +2,7 @@
 
 기존 분리 구조는 먼저 모든 W/O를 machine에 배정한 뒤 machine별 batch를
 만들었다. 이 모듈은 중간 고정 배정을 없애되, 조합 폭발을 피하기 위해
-`SELECT_MACHINE -> SELECT_WO... -> 자동 batch close` 순서로 schedule을 만든다.
+환경이 설비를 결정하고 정책이 `SELECT_WO... -> 자동 batch close`로 schedule을 만든다.
 """
 
 from __future__ import annotations
@@ -701,6 +701,9 @@ def run_phase2_batch_machine_candidate(
     transitions: List[Phase2BatchMachineTransition] = []
     step = 0
 
+    remaining_jobs_by_bay: Dict[str, Dict[str, object]] = {}
+    bay_machines_by_bay: Dict[str, Dict[str, object]] = {}
+    dispatch_cache_by_bay: Dict[str, _Phase2DispatchCache] = {}
     for bay_id in sorted(jobs_by_bay):
         bay_view = common_env.phase2_bay_view(bay_id)
         bay_jobs = dict(bay_view.jobs)
@@ -708,7 +711,9 @@ def run_phase2_batch_machine_candidate(
         if not bay_machines:
             print(f"[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] cause=no_machine_for_bay bay_id={bay_id}")
             raise RuntimeError(f"Phase 2 Bay subproblem has no machines: {bay_id}")
-        dispatch_cache = _build_dispatch_cache(
+        remaining_jobs_by_bay[bay_id] = bay_jobs
+        bay_machines_by_bay[bay_id] = bay_machines
+        dispatch_cache_by_bay[bay_id] = _build_dispatch_cache(
             jobs=jobs_by_bay[bay_id],
             machines=bay_machines,
             phase1_assignments=phase1_assignments,
@@ -716,136 +721,155 @@ def run_phase2_batch_machine_candidate(
             max_length_sum=max_length_sum,
             constraint_profile=resolved_constraint_profile,
         )
-        while bay_jobs:
-            bay_machine_loads = {machine_id: machine_loads[machine_id] for machine_id in bay_machines}
-            bay_machine_clock = {machine_id: machine_clock[machine_id] for machine_id in bay_machines}
-            machine_actions = _machine_select_actions(
+
+    while remaining_jobs_by_bay:
+        feasible_by_machine: Dict[str, Sequence[str]] = {
+            str(machine_id): () for machine_id in machines
+        }
+        remaining_job_count_by_bay: Dict[str, int] = {}
+        for bay_id in sorted(remaining_jobs_by_bay):
+            bay_jobs = remaining_jobs_by_bay[bay_id]
+            bay_machines = bay_machines_by_bay[bay_id]
+            bay_machine_loads = {
+                machine_id: machine_loads[machine_id] for machine_id in bay_machines
+            }
+            feasible_by_machine.update(
+                _feasible_jobs_by_machine(
+                    jobs=bay_jobs,
+                    machines=bay_machines,
+                    phase1_assignments=phase1_assignments,
+                    machine_loads=bay_machine_loads,
+                    dispatch_cache=dispatch_cache_by_bay[bay_id],
+                )
+            )
+            remaining_job_count_by_bay[bay_id] = len(bay_jobs)
+
+        machine_id, target_batch_size = common_env.select_phase2_machine(
+            feasible_job_ids_by_machine=feasible_by_machine,
+            remaining_job_count_by_bay=remaining_job_count_by_bay,
+        )
+        bay_id = machine_bay_ids[machine_id]
+        if bay_id not in remaining_jobs_by_bay:
+            print(
+                "[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] "
+                f"cause=selected_machine_bay_has_no_jobs machine_id={machine_id} bay_id={bay_id}"
+            )
+            raise RuntimeError("selected Phase 2 machine belongs to a Bay with no remaining W/O")
+        bay_jobs = remaining_jobs_by_bay[bay_id]
+        bay_machines = bay_machines_by_bay[bay_id]
+        dispatch_cache = dispatch_cache_by_bay[bay_id]
+        bay_machine_loads = {
+            current_machine_id: machine_loads[current_machine_id]
+            for current_machine_id in bay_machines
+        }
+        bay_machine_clock = {
+            current_machine_id: machine_clock[current_machine_id]
+            for current_machine_id in bay_machines
+        }
+        batch_start_time = float(common_env.state.events.current_time)
+        open_batch_id = common_env.open_batch(machine_id, target_batch_size=target_batch_size)
+        job_ids: List[str] = []
+        open_length_sum = 0.0
+        open_batch_duration = 0.0
+        open_processing_sum = 0.0
+        open_cut_length_sum = 0.0
+        open_bevel_quantity_sum = 0.0
+        for _slot in range(target_batch_size):
+            wo_actions = _wo_select_actions(
                 jobs=bay_jobs,
                 machines=bay_machines,
                 phase1_assignments=phase1_assignments,
                 machine_loads=bay_machine_loads,
                 machine_clock=bay_machine_clock,
+                current_time=batch_start_time,
+                selected_machine_id=machine_id,
+                selected_job_ids=job_ids,
+                target_batch_size=target_batch_size,
+                open_length_sum=open_length_sum,
+                open_batch_duration=open_batch_duration,
+                open_processing_sum=open_processing_sum,
+                open_cut_length_sum=open_cut_length_sum,
+                open_bevel_quantity_sum=open_bevel_quantity_sum,
                 max_wo_count=max_wo_count,
                 max_length_sum=max_length_sum,
                 action_pool_limit=action_pool_limit,
                 dispatch_cache=dispatch_cache,
+                constraint_profile=resolved_constraint_profile,
             )
-            machine_policy_state = build_phase2_policy_state(
+            if not wo_actions:
+                if job_ids:
+                    break
+                print(
+                    "[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] "
+                    f"cause=no_feasible_wo_after_machine_select bay_id={bay_id} machine_id={machine_id}"
+                )
+                raise RuntimeError("selected machine has no feasible W/O action")
+            wo_policy_state = build_phase2_policy_state(
                 environment=common_env,
                 bay_id=bay_id,
-                stage="SELECT_MACHINE",
-                actions=machine_actions,
+                actions=wo_actions,
+                selected_machine_id=machine_id,
+                open_batch_id=open_batch_id,
             )
-            selected_machine_index = _action_index(
-                actions=machine_actions,
+            selected_wo_index = _action_index(
+                actions=wo_actions,
                 source=source,
                 model=model,
                 seed=seed + step,
-                policy_state=machine_policy_state,
+                policy_state=wo_policy_state,
             )
-            selected_machine = machine_actions[selected_machine_index]
-            machine_id = str(selected_machine["machine_id"])
-            target_batch_size = int(selected_machine["target_batch_size"])
-            open_batch_id = common_env.open_batch(machine_id, target_batch_size=target_batch_size)
+            selected_wo = wo_actions[selected_wo_index]
+            selected_job_id = str(selected_wo["job_ids"][0])
             transitions.append(
                 Phase2BatchMachineTransition(
-                    policy_state=machine_policy_state,
-                    selected_action_index=selected_machine_index,
+                    policy_state=wo_policy_state,
+                    selected_action_index=selected_wo_index,
                     selected_machine_id=machine_id,
-                    selected_job_ids=(),
-                    action_type="select_machine",
+                    selected_job_ids=(selected_job_id,),
+                    action_type="select_wo",
                     target_batch_size=target_batch_size,
                 )
             )
+            common_env.add_wo(open_batch_id, selected_job_id)
+            job_ids.append(selected_job_id)
+            open_batch = common_env.state.runtime.open_batches[open_batch_id]
+            open_length_sum = float(open_batch.length_sum)
+            open_batch_duration = float(open_batch.max_processing_time)
+            open_processing_sum = float(open_batch.processing_time_sum)
+            open_cut_length_sum = float(open_batch.cut_length_sum)
+            open_bevel_quantity_sum = float(open_batch.bevel_quantity_sum)
             step += 1
-            job_ids: List[str] = []
-            open_length_sum = 0.0
-            open_batch_duration = 0.0
-            open_processing_sum = 0.0
-            open_cut_length_sum = 0.0
-            open_bevel_quantity_sum = 0.0
-            for _slot in range(target_batch_size):
-                wo_actions = _wo_select_actions(
-                    jobs=bay_jobs,
-                    machines=bay_machines,
-                    phase1_assignments=phase1_assignments,
-                    machine_loads=bay_machine_loads,
-                    machine_clock=bay_machine_clock,
-                    selected_machine_id=machine_id,
-                    selected_job_ids=job_ids,
-                    target_batch_size=target_batch_size,
-                    open_length_sum=open_length_sum,
-                    open_batch_duration=open_batch_duration,
-                    open_processing_sum=open_processing_sum,
-                    open_cut_length_sum=open_cut_length_sum,
-                    open_bevel_quantity_sum=open_bevel_quantity_sum,
-                    max_wo_count=max_wo_count,
-                    max_length_sum=max_length_sum,
-                    action_pool_limit=action_pool_limit,
-                    dispatch_cache=dispatch_cache,
-                    constraint_profile=resolved_constraint_profile,
-                )
-                if not wo_actions:
-                    if job_ids:
-                        break
-                    print(
-                        "[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] "
-                        f"cause=no_feasible_wo_after_machine_select bay_id={bay_id} machine_id={machine_id}"
-                    )
-                    raise RuntimeError("selected machine has no feasible W/O action")
-                wo_policy_state = build_phase2_policy_state(
-                    environment=common_env,
-                    bay_id=bay_id,
-                    stage="SELECT_WO",
-                    actions=wo_actions,
-                    selected_machine_id=machine_id,
-                    open_batch_id=open_batch_id,
-                )
-                selected_wo_index = _action_index(
-                    actions=wo_actions,
-                    source=source,
-                    model=model,
-                    seed=seed + step,
-                    policy_state=wo_policy_state,
-                )
-                selected_wo = wo_actions[selected_wo_index]
-                selected_job_id = str(selected_wo["job_ids"][0])
-                transitions.append(
-                    Phase2BatchMachineTransition(
-                        policy_state=wo_policy_state,
-                        selected_action_index=selected_wo_index,
-                        selected_machine_id=machine_id,
-                        selected_job_ids=(selected_job_id,),
-                        action_type="select_wo",
-                        target_batch_size=target_batch_size,
-                    )
-                )
-                common_env.add_wo(open_batch_id, selected_job_id)
-                job_ids.append(selected_job_id)
-                open_batch = common_env.state.runtime.open_batches[open_batch_id]
-                open_length_sum = float(open_batch.length_sum)
-                open_batch_duration = float(open_batch.max_processing_time)
-                open_processing_sum = float(open_batch.processing_time_sum)
-                open_cut_length_sum = float(open_batch.cut_length_sum)
-                open_bevel_quantity_sum = float(open_batch.bevel_quantity_sum)
-                step += 1
-            if not job_ids:
-                print(
-                    "[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] "
-                    f"cause=empty_auto_closed_batch bay_id={bay_id} machine_id={machine_id}"
-                )
-                raise RuntimeError("merged Phase 2 attempted to close an empty batch")
-            common_env.close_batch(open_batch_id)
-            for job_id in job_ids:
-                if job_id not in bay_jobs:
-                    print(f"[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] cause=missing_remaining_job job_id={job_id}")
-                    raise RuntimeError(f"selected job missing from remaining jobs: {job_id}")
-                machine_assignments[job_id] = machine_id
-                del bay_jobs[job_id]
+        if not job_ids:
+            print(
+                "[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] "
+                f"cause=empty_auto_closed_batch bay_id={bay_id} machine_id={machine_id}"
+            )
+            raise RuntimeError("merged Phase 2 attempted to close an empty batch")
+        common_env.close_batch(open_batch_id)
+        for job_id in job_ids:
+            if job_id not in bay_jobs:
+                print(f"[ERROR][Phase2.merged.run_phase2_batch_machine_candidate] cause=missing_remaining_job job_id={job_id}")
+                raise RuntimeError(f"selected job missing from remaining jobs: {job_id}")
+            machine_assignments[job_id] = machine_id
+            del bay_jobs[job_id]
+        if not bay_jobs:
+            del remaining_jobs_by_bay[bay_id]
 
-    batches = list(common_env.state.runtime.completed_batches)
-    timeline = list(common_env.state.events.timeline)
-    event_log = [event.to_dict() for event in common_env.state.events.event_log]
+    common_env.advance_phase2_to_completion()
+    batches = sorted(
+        common_env.state.runtime.completed_batches,
+        key=lambda row: (float(row["start_time"]), str(row["machine_id"]), str(row["batch_id"])),
+    )
+    timeline = sorted(
+        common_env.state.events.timeline,
+        key=lambda row: (float(row["start_time"]), str(row["machine_id"]), str(row["batch_id"])),
+    )
+    event_log = sorted(
+        (event.to_dict() for event in common_env.state.events.event_log),
+        key=lambda row: (float(row["time_min"]), str(row["event_id"])),
+    )
+    for event_index, row in enumerate(event_log, start=1):
+        row["event_id"] = f"HE{event_index:08d}"
     constraint_audit = audit_phase2_schedule_constraints(
         profile=resolved_constraint_profile,
         jobs=jobs,
@@ -1083,86 +1107,13 @@ def _combine_subproblem_bests(
     )
 
 
-def _machine_select_actions(
-    jobs: Mapping[str, object],
-    machines: Mapping[str, object],
-    phase1_assignments: Mapping[str, str],
-    machine_loads: Mapping[str, Mapping[str, int | float]],
-    machine_clock: Mapping[str, float],
-    max_wo_count: int,
-    max_length_sum: float,
-    action_pool_limit: int | None,
-    dispatch_cache: _Phase2DispatchCache | None = None,
-) -> List[Dict]:
-    """현재 Bay에서 먼저 빈 설비 중 다음 batch를 열 machine 후보를 만든다."""
-
-    feasible_by_machine = _feasible_jobs_by_machine(
-        jobs=jobs,
-        machines=machines,
-        phase1_assignments=phase1_assignments,
-        machine_loads=machine_loads,
-        dispatch_cache=dispatch_cache,
-    )
-    actions: List[Dict] = []
-    feasible_machine_ids = [machine_id for machine_id, job_ids in feasible_by_machine.items() if job_ids]
-    if not feasible_machine_ids:
-        print("[ERROR][Phase2.merged._machine_select_actions] cause=no_active_feasible_machine")
-        raise RuntimeError("merged Phase 2 found no machine with feasible jobs")
-    earliest_clock = min(float(machine_clock[machine_id]) for machine_id in feasible_machine_ids)
-    active_machine_ids = [
-        machine_id
-        for machine_id in feasible_machine_ids
-        if math.isclose(float(machine_clock[machine_id]), earliest_clock, rel_tol=0.0, abs_tol=1e-9)
-    ]
-    target_size = min(max_wo_count, math.ceil(len(jobs) / float(len(active_machine_ids))))
-    projected_makespan = max(float(value) for value in machine_clock.values())
-    for machine_id in sorted(active_machine_ids):
-        feasible_count = len(_ordered_feasible_job_ids(jobs, feasible_by_machine[machine_id], action_pool_limit, dispatch_cache))
-        if feasible_count <= 0:
-            continue
-        machine_target_size = min(target_size, feasible_count)
-        machine_load = machine_loads[machine_id]
-        machine_time = float(machine_clock[machine_id])
-        actions.append(
-            {
-                "action_type": "select_machine",
-                "machine_id": machine_id,
-                "job_ids": (),
-                "target_batch_size": machine_target_size,
-                "wo_count": 0,
-                "length_sum": 0.0,
-                "batch_duration": 0.0,
-                "job_processing_time_sum": 0.0,
-                "cut_length_sum": 0.0,
-                "bevel_quantity_sum": 0.0,
-                "candidate_processing_time": 0.0,
-                "candidate_cut_length": 0.0,
-                "candidate_bevel_quantity": 0.0,
-                "machine_clock": round(machine_time, 6),
-                "projected_finish_time": round(machine_time, 6),
-                "projected_makespan": round(projected_makespan, 6),
-                "lookahead_makespan_lower_bound": round(projected_makespan, 6),
-                "remaining_job_count": len(jobs),
-                "machine_current_wo_count": int(machine_load["wo_count"]),
-                "machine_current_cut_length_sum": round(float(machine_load["cut_length_sum"]), 6),
-                "machine_current_bevel_quantity_sum": round(float(machine_load["bevel_quantity_sum"]), 6),
-            }
-        )
-    if not actions:
-        print(
-            "[ERROR][Phase2.merged._machine_select_actions] "
-            f"cause=no_machine_action remaining_jobs={list(jobs)}"
-        )
-        raise RuntimeError("merged Phase 2 found no machine-select action")
-    return actions
-
-
 def _wo_select_actions(
     jobs: Mapping[str, object],
     machines: Mapping[str, object],
     phase1_assignments: Mapping[str, str],
     machine_loads: Mapping[str, Mapping[str, int | float]],
     machine_clock: Mapping[str, float],
+    current_time: float,
     selected_machine_id: str,
     selected_job_ids: Sequence[str],
     target_batch_size: int,
@@ -1178,6 +1129,22 @@ def _wo_select_actions(
     constraint_profile: PhaseConstraintProfile | None = None,
 ) -> List[Dict]:
     """선택된 machine의 열린 batch에 추가 가능한 W/O 후보를 만든다."""
+
+    selected_machine_start_time = float(current_time)
+    if not math.isfinite(selected_machine_start_time) or selected_machine_start_time < 0.0:
+        print(
+            "[ERROR][Phase2.merged._wo_select_actions] "
+            f"cause=invalid_current_time value={current_time}"
+        )
+        raise RuntimeError("Phase 2 W/O action requires a finite non-negative event time")
+    selected_machine_available_at = float(machine_clock[selected_machine_id])
+    if selected_machine_available_at > selected_machine_start_time + 1e-9:
+        print(
+            "[ERROR][Phase2.merged._wo_select_actions] "
+            f"cause=selected_machine_busy machine_id={selected_machine_id} "
+            f"current_time={selected_machine_start_time} available_at={selected_machine_available_at}"
+        )
+        raise RuntimeError("Phase 2 W/O actions cannot be built for a busy machine")
 
     feasible_by_machine = _feasible_jobs_by_machine(
         jobs=jobs,
@@ -1213,7 +1180,7 @@ def _wo_select_actions(
             machines=machines,
             phase1_assignments=phase1_assignments,
             machine_available_at=machine_clock,
-            current_time=float(machine_clock[selected_machine_id]),
+            current_time=selected_machine_start_time,
             candidate_batch_job_ids=projected_job_ids,
             candidate_batch_length_sum=projected_length_sum,
             max_wo_count=max_wo_count,
@@ -1244,7 +1211,7 @@ def _wo_select_actions(
         projected_processing_sum = open_processing_sum + processing_time
         projected_cut_length = open_cut_length_sum + cut_length
         projected_bevel_quantity = open_bevel_quantity_sum + bevel_quantity
-        projected_finish = float(machine_clock[selected_machine_id]) + projected_duration
+        projected_finish = selected_machine_start_time + projected_duration
         projected_makespan = max(projected_finish, *(float(value) for value in machine_clock.values()))
         projected_job_ids = tuple([*selected_job_ids, job_id])
         lookahead_makespan = _lookahead_makespan_lower_bound(
@@ -1254,6 +1221,7 @@ def _wo_select_actions(
             remaining_jobs_by_bay=remaining_jobs_by_bay,
             bay_remaining_processing_sum=bay_remaining_processing_sum,
             selected_machine_id=selected_machine_id,
+            selected_machine_start_time=selected_machine_start_time,
             selected_job_ids=projected_job_ids,
             batch_duration=projected_duration,
             max_wo_count=max_wo_count,
@@ -1278,7 +1246,7 @@ def _wo_select_actions(
                 "candidate_processing_time": round(processing_time, 6),
                 "candidate_cut_length": round(cut_length, 6),
                 "candidate_bevel_quantity": round(bevel_quantity, 6),
-                "machine_clock": round(float(machine_clock[selected_machine_id]), 6),
+                "machine_clock": round(selected_machine_start_time, 6),
                 "projected_finish_time": round(projected_finish, 6),
                 "projected_makespan": round(projected_makespan, 6),
                 "lookahead_makespan_lower_bound": round(lookahead_makespan, 6),
@@ -1339,6 +1307,7 @@ def _lookahead_makespan_lower_bound(
     remaining_jobs_by_bay: Mapping[str, set[str]],
     bay_remaining_processing_sum: Mapping[str, float] | None,
     selected_machine_id: str,
+    selected_machine_start_time: float,
     selected_job_ids: Sequence[str],
     batch_duration: float,
     max_wo_count: int,
@@ -1346,8 +1315,11 @@ def _lookahead_makespan_lower_bound(
 ) -> float:
     """Estimate a cheap makespan lower bound after selecting one batch."""
 
-    projected_clock = {str(machine_id): float(value) for machine_id, value in machine_clock.items()}
-    projected_clock[str(selected_machine_id)] = projected_clock[str(selected_machine_id)] + float(batch_duration)
+    projected_clock = {
+        str(machine_id): max(float(value), float(selected_machine_start_time))
+        for machine_id, value in machine_clock.items()
+    }
+    projected_clock[str(selected_machine_id)] = float(selected_machine_start_time) + float(batch_duration)
     lower_bound = max(projected_clock.values())
     selected = {str(job_id) for job_id in selected_job_ids}
     machines_by_bay: Dict[str, List[str]] = {}
@@ -1399,30 +1371,14 @@ def _action_index(
 
 def _heuristic_key(source: str, action: Mapping) -> tuple:
     action_type = str(action.get("action_type", "select_wo"))
+    if action_type != "select_wo":
+        print(
+            "[ERROR][Phase2.merged._heuristic_key] "
+            f"cause=non_wo_action source={source} action_type={action_type}"
+        )
+        raise RuntimeError("Phase 2 heuristics accept SELECT_WO actions only")
     job_ids = tuple(str(job_id) for job_id in action["job_ids"])
     common = (str(action["machine_id"]), job_ids)
-    if action_type == "select_machine":
-        machine_key = (
-            float(action["machine_clock"]),
-            float(action["projected_makespan"]),
-            -int(action["target_batch_size"]),
-            str(action["machine_id"]),
-        )
-        if source == "workload_makespan_dispatch":
-            return (
-                float(action["machine_clock"]),
-                int(action["machine_current_wo_count"]),
-                float(action["machine_current_cut_length_sum"]),
-                float(action["machine_current_bevel_quantity_sum"]),
-                -int(action["target_batch_size"]),
-                str(action["machine_id"]),
-            )
-        if source in {"min_makespan", "lookahead_min_makespan", "balanced_tact_load", "spt_batch", "lpt_batch"}:
-            return machine_key
-        if source == "best_fit_lth":
-            return (float(action["machine_clock"]), -int(action["target_batch_size"]), str(action["machine_id"]))
-        print(f"[ERROR][Phase2.merged._heuristic_key] cause=unknown_source source={source}")
-        raise RuntimeError(f"unknown merged Phase 2 candidate source: {source}")
     if source == "workload_makespan_dispatch":
         if int(action["open_batch_size"]) == 0:
             return (

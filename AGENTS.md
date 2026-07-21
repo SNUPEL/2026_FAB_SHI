@@ -118,6 +118,7 @@
 - 실적 착수-종료 elapsed time은 처리시간 검증값이 아니라 actual replay identity, 시간축 가시화, 데이터 품질 audit 용도로만 쓴다.
 - `CUT_BAY`와 `downstream_bay`는 섞지 않는다.
 - `Job.cut_bay`는 절단 Bay, `Job.downstream_bay`는 후공정/적치 Bay다.
+- NP 장척은 동일 `PROJ_NO+GYEL+BLK_NO` W/O의 `CUT_LTH` 합이 1,000 이상인지로 판정한다. 개별 W/O 최댓값으로 판정하지 않는다.
 - NP 광폭·CNT·장척 Bay 제약과 계열별 Bay/machine eligibility는 planning action mask에 적용한다.
 - NCG, LSR, LM/크레인, Bay IN/OUT은 현재 모델에서 제외한다.
 
@@ -129,7 +130,9 @@
 - actual replay는 DES 검증 모드다.
 - generated simulation과 actual replay는 같은 event schema를 사용해야 한다.
 - Phase 1 action은 `(block-series, Bay)` pair 선택이다.
-- merged Phase 2 policy action은 `SELECT_MACHINE -> SELECT_WO` 순차 선택이다.
+- merged Phase 2 policy action은 `SELECT_WO` 하나다. 환경은 현재 전역 시각에 실행 가능한 유휴 설비를 `machine_id` 오름차순으로 선택하고, 없을 때만 전체 설비의 다음 최소 완료 시각으로 event jump한다.
+- batch close는 설비의 미래 완료 시각만 예약하며 전역 `current_time`을 이동하지 않는다. 모든 설비가 점유된 경우에만 완료 이벤트로 이동하고, 모든 W/O 배정 후 남은 완료 이벤트를 drain한다.
+- Phase 2 teacher score는 `hard violation -> makespan -> Bay 내부 CUT_LTH gap 합 -> W/O 수 gap 합 -> BV_QTY gap 합 -> 점유시간 gap 합`의 사전식 순서다.
 - DES runtime은 open batch에 W/O를 추가하고 close할 때 machine에 투입하는 동일 batch 계약을 사용한다.
 - batch는 W/O 1~3개를 묶고, W/O `길이(LTH)` 합 55,000 이하일 때만 close되어 같은 시점에 투입/완료되는 구조다.
 - 같은 `PROJ_NO+GYEL+BLK_NO`의 W/O는 같은 절단 Bay에 배정한다. 같은 물리 블록이라도 계열이 다르면 다른 Bay로 갈 수 있다.

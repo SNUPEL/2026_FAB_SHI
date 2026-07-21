@@ -54,12 +54,17 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
         )
 
     def test_feature_schema_contains_variable_sets_and_projected_loads(self) -> None:
-        actions = self._machine_actions()
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
+        actions = [
+            self._wo_action("WO_A", duration=30.0, cut=500.0, bevel=3.0, wo_count=1),
+            self._wo_action("WO_B", duration=10.0, cut=200.0, bevel=1.0, wo_count=1),
+        ]
         state = build_phase2_policy_state(
             environment=self.env,
             bay_id="22",
-            stage="SELECT_MACHINE",
             actions=actions,
+            selected_machine_id="PLS21",
+            open_batch_id=batch_id,
         )
 
         self.assertEqual(len(state.bay_context_features), len(PHASE2_BAY_CONTEXT_FEATURE_NAMES))
@@ -83,35 +88,42 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
 
     def test_machine_feasible_ratio_uses_family_eligibility(self) -> None:
         self.env.jobs["WO_C"].family = "FL"
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
 
         state = build_phase2_policy_state(
             environment=self.env,
             bay_id="22",
-            stage="SELECT_MACHINE",
-            actions=self._machine_actions(),
+            actions=[self._wo_action("WO_A", duration=30.0, cut=500.0, bevel=3.0, wo_count=1)],
+            selected_machine_id="PLS21",
+            open_batch_id=batch_id,
         )
 
         ratio_index = PHASE2_MACHINE_NODE_FEATURE_NAMES.index("feasible_remaining_wo_ratio")
         self.assertEqual(state.machine_node_features[0][ratio_index], 2.0 / 3.0)
 
-    def test_pointer_scores_are_equivariant_to_machine_and_action_permutation(self) -> None:
+    def test_pointer_scores_are_equivariant_to_wo_and_action_permutation(self) -> None:
         torch.manual_seed(7)
         model = Phase2SetPointerPolicy(hidden_dim=16)
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
         state = build_phase2_policy_state(
             environment=self.env,
             bay_id="22",
-            stage="SELECT_MACHINE",
-            actions=self._machine_actions(),
+            actions=[
+                self._wo_action("WO_A", duration=30.0, cut=500.0, bevel=3.0, wo_count=1),
+                self._wo_action("WO_B", duration=10.0, cut=200.0, bevel=1.0, wo_count=1),
+            ],
+            selected_machine_id="PLS21",
+            open_batch_id=batch_id,
         )
         original = model(state)
 
         permuted = replace(
             state,
-            machine_ids=list(reversed(state.machine_ids)),
-            machine_node_features=list(reversed(state.machine_node_features)),
+            wo_ids=list(reversed(state.wo_ids)),
+            wo_node_features=list(reversed(state.wo_node_features)),
             action_ids=list(reversed(state.action_ids)),
             action_projected_features=list(reversed(state.action_projected_features)),
-            action_candidate_node_indices=[0, 1],
+            action_candidate_node_indices=[1, 2],
         )
         reordered = model(permuted)
 
@@ -127,7 +139,6 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
         state = build_phase2_policy_state(
             environment=self.env,
             bay_id="22",
-            stage="SELECT_WO",
             actions=actions,
             selected_machine_id="PLS21",
             open_batch_id=batch_id,
@@ -141,24 +152,28 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
 
     def test_state_rejects_missing_machine_load_field(self) -> None:
         del self.env.state.runtime.machine_loads["PLS21"]["batch_count"]
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
 
         with self.assertRaises(RuntimeError):
             build_phase2_policy_state(
                 environment=self.env,
                 bay_id="22",
-                stage="SELECT_MACHINE",
-                actions=self._machine_actions(),
+                actions=[self._wo_action("WO_A", duration=30.0, cut=500.0, bevel=3.0, wo_count=1)],
+                selected_machine_id="PLS21",
+                open_batch_id=batch_id,
             )
 
     def test_state_rejects_non_finite_processing_time(self) -> None:
         self.env.jobs["WO_A"].base_stage_minutes = {"cut": float("nan")}
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
 
         with self.assertRaises(RuntimeError):
             build_phase2_policy_state(
                 environment=self.env,
                 bay_id="22",
-                stage="SELECT_MACHINE",
-                actions=self._machine_actions(),
+                actions=[self._wo_action("WO_A", duration=30.0, cut=500.0, bevel=3.0, wo_count=1)],
+                selected_machine_id="PLS21",
+                open_batch_id=batch_id,
             )
 
     def test_state_rejects_missing_projected_action_field(self) -> None:
@@ -171,43 +186,28 @@ class Phase2SetPointerPolicyTest(unittest.TestCase):
             build_phase2_policy_state(
                 environment=self.env,
                 bay_id="22",
-                stage="SELECT_WO",
                 actions=actions,
                 selected_machine_id="PLS21",
                 open_batch_id=batch_id,
             )
 
-    def _machine_actions(self):
-        return [
-            {
-                "action_id": "machine:PLS21",
-                "action_type": "select_machine",
-                "machine_id": "PLS21",
-                "job_ids": (),
-                "target_batch_size": 2,
-                "projected_finish_time": 0.0,
-                "projected_makespan": 0.0,
-                "duration_increment": 0.0,
-                "wo_count": 0,
-                "cut_length_sum": 0.0,
-                "bevel_quantity_sum": 0.0,
-                "batch_duration": 0.0,
-            },
-            {
-                "action_id": "machine:PLS22",
-                "action_type": "select_machine",
-                "machine_id": "PLS22",
-                "job_ids": (),
-                "target_batch_size": 2,
-                "projected_finish_time": 0.0,
-                "projected_makespan": 0.0,
-                "duration_increment": 0.0,
-                "wo_count": 0,
-                "cut_length_sum": 0.0,
-                "bevel_quantity_sum": 0.0,
-                "batch_duration": 0.0,
-            },
-        ]
+    def test_state_rejects_machine_selection_action(self) -> None:
+        batch_id = self.env.open_batch("PLS21", target_batch_size=2)
+
+        with self.assertRaises(RuntimeError):
+            build_phase2_policy_state(
+                environment=self.env,
+                bay_id="22",
+                actions=[
+                    {
+                        "action_type": "select_machine",
+                        "machine_id": "PLS21",
+                        "job_ids": (),
+                    }
+                ],
+                selected_machine_id="PLS21",
+                open_batch_id=batch_id,
+            )
 
     @staticmethod
     def _wo_action(job_id, duration, cut, bevel, wo_count):

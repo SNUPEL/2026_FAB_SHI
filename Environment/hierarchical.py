@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 import math
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Sequence
 
 from Environment.constraints.profiles import (
     PhaseConstraintProfile,
@@ -33,6 +33,7 @@ class OpenBatchState:
     machine_id: str
     bay_id: str
     target_batch_size: int
+    start_time: float
     job_ids: list[str] = field(default_factory=list)
     length_sum: float = 0.0
     max_processing_time: float = 0.0
@@ -402,6 +403,120 @@ class CommonHierarchicalEnvironment:
             machine_loads={key: self.state.runtime.machine_loads[key] for key in machines},
         )
 
+    def select_phase2_machine(
+        self,
+        *,
+        feasible_job_ids_by_machine: Mapping[str, Sequence[str]],
+        remaining_job_count_by_bay: Mapping[str, int],
+    ) -> tuple[str, int]:
+        """현재 시각의 유휴 설비를 고르고, 없으면 다음 완료 이벤트로 점프한다."""
+
+        normalized_feasible = {
+            str(machine_id): tuple(str(job_id) for job_id in job_ids)
+            for machine_id, job_ids in feasible_job_ids_by_machine.items()
+        }
+        if set(normalized_feasible) != set(self.machines):
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=machine_set_mismatch expected={sorted(self.machines)} "
+                f"actual={sorted(normalized_feasible)}"
+            )
+            raise RuntimeError("Phase 2 feasible-machine set does not match the environment")
+        remaining_counts: Dict[str, int] = {}
+        for raw_bay_id, raw_count in remaining_job_count_by_bay.items():
+            bay_id = str(raw_bay_id)
+            if (
+                bay_id not in self.bay_ids
+                or isinstance(raw_count, bool)
+                or not isinstance(raw_count, int)
+                or raw_count <= 0
+            ):
+                print(
+                    "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                    f"cause=invalid_remaining_job_count bay_id={bay_id} value={raw_count}"
+                )
+                raise RuntimeError("Phase 2 remaining job counts must be positive integers for known Bays")
+            remaining_counts[bay_id] = raw_count
+        if not remaining_counts:
+            print("[ERROR][Environment.hierarchical.select_phase2_machine] cause=no_remaining_bay")
+            raise RuntimeError("Phase 2 machine dispatch requires remaining jobs")
+        feasible_machine_ids = [
+            machine_id for machine_id, job_ids in normalized_feasible.items() if job_ids
+        ]
+        if not feasible_machine_ids:
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=no_feasible_machine remaining_jobs={remaining_counts}"
+            )
+            raise RuntimeError("Phase 2 environment found no machine with feasible W/O")
+        clocks = {
+            str(machine_id): float(value)
+            for machine_id, value in self.state.runtime.machine_available_at.items()
+        }
+        if any(not math.isfinite(value) or value < 0.0 for value in clocks.values()):
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=invalid_machine_clock clocks={clocks}"
+            )
+            raise RuntimeError("Phase 2 machine clocks must be finite and non-negative")
+        current_time = float(self.state.events.current_time)
+        if not math.isfinite(current_time) or current_time < 0.0:
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=invalid_current_time value={current_time}"
+            )
+            raise RuntimeError("Phase 2 event clock must be finite and non-negative")
+
+        while True:
+            idle_feasible = sorted(
+                machine_id
+                for machine_id in feasible_machine_ids
+                if clocks[machine_id] <= current_time + 1e-9
+            )
+            if idle_feasible:
+                break
+            future_event_times = [
+                clock for clock in clocks.values() if clock > current_time + 1e-9
+            ]
+            if not future_event_times:
+                print(
+                    "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                    f"cause=no_future_completion_event current_time={current_time} "
+                    f"remaining_jobs={remaining_counts}"
+                )
+                raise RuntimeError("Phase 2 has remaining W/O but no future machine completion event")
+            current_time = min(future_event_times)
+            self.state.events.current_time = current_time
+
+        selected_machine_id = idle_feasible[0]
+        selected_bay_id = self.machine_bay_ids[selected_machine_id]
+        if selected_bay_id not in remaining_counts:
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=selected_bay_has_no_remaining_count machine_id={selected_machine_id} "
+                f"bay_id={selected_bay_id}"
+            )
+            raise RuntimeError("selected Phase 2 machine Bay has no remaining-job count")
+        active_machine_ids = [
+            machine_id
+            for machine_id in feasible_machine_ids
+            if self.machine_bay_ids[machine_id] == selected_bay_id
+            and clocks[machine_id] <= current_time + 1e-9
+        ]
+        target_batch_size = min(
+            self.max_batch_wo_count,
+            math.ceil(remaining_counts[selected_bay_id] / float(len(active_machine_ids))),
+            len(normalized_feasible[selected_machine_id]),
+        )
+        if target_batch_size <= 0:
+            print(
+                "[ERROR][Environment.hierarchical.select_phase2_machine] "
+                f"cause=invalid_target_batch_size bay_id={selected_bay_id} "
+                f"machine_id={selected_machine_id} target={target_batch_size}"
+            )
+            raise RuntimeError("Phase 2 environment produced an invalid target batch size")
+        return selected_machine_id, int(target_batch_size)
+
     def open_batch(self, machine_id: str, *, target_batch_size: int) -> str:
         normalized_machine = str(machine_id)
         if normalized_machine not in self.machines:
@@ -422,6 +537,15 @@ class CommonHierarchicalEnvironment:
                 f"cause=machine_already_has_open_batch machine_id={normalized_machine}"
             )
             raise RuntimeError(f"machine already has an open batch: {normalized_machine}")
+        current_time = float(self.state.events.current_time)
+        machine_available_at = float(self.state.runtime.machine_available_at[normalized_machine])
+        if machine_available_at > current_time + 1e-9:
+            print(
+                "[ERROR][Environment.hierarchical.open_batch] "
+                f"cause=machine_busy machine_id={normalized_machine} current_time={current_time} "
+                f"available_at={machine_available_at}"
+            )
+            raise RuntimeError(f"cannot open a batch on a busy machine: {normalized_machine}")
         self.state.runtime.batch_seq += 1
         batch_id = f"HB{self.state.runtime.batch_seq:06d}"
         self.state.runtime.open_batches[batch_id] = OpenBatchState(
@@ -429,6 +553,7 @@ class CommonHierarchicalEnvironment:
             machine_id=normalized_machine,
             bay_id=self.machine_bay_ids[normalized_machine],
             target_batch_size=int(target_batch_size),
+            start_time=current_time,
         )
         return batch_id
 
@@ -453,7 +578,7 @@ class CommonHierarchicalEnvironment:
         job = self.jobs[normalized_job]
         projected_ids = tuple([*batch.job_ids, normalized_job])
         projected_length = batch.length_sum + _non_negative_field(job, "plate_length", normalized_job)
-        start_time = self.state.runtime.machine_available_at[batch.machine_id]
+        start_time = batch.start_time
         result = evaluate_phase2_action_constraints(
             profile=self.constraint_profile,
             job=job,
@@ -490,7 +615,7 @@ class CommonHierarchicalEnvironment:
             print(f"[ERROR][Environment.hierarchical.close_batch] cause=empty_batch batch_id={batch_id}")
             raise RuntimeError(f"cannot close empty batch: {batch_id}")
 
-        start_time = float(self.state.runtime.machine_available_at[batch.machine_id])
+        start_time = float(batch.start_time)
         # DES runtime, timeline, event log가 동일한 시각을 사용하도록 batch 종료 시각을
         # 여기서 한 번만 확정한다. 서로 다른 정밀도를 쓰면 학습 후보와 full-flow
         # 재평가의 score가 달라진다.
@@ -522,12 +647,30 @@ class CommonHierarchicalEnvironment:
         self.state.runtime.scheduled_jobs.update(batch.job_ids)
         self.state.runtime.completed_batches.append(dict(row))
         self.state.events.timeline.append(dict(row))
-        # 여러 설비의 batch를 계획 순서대로 넣어도 공통 DES horizon은 뒤로 가지 않는다.
-        self.state.events.current_time = max(self.state.events.current_time, finish_time)
         for job_id in batch.job_ids:
             self._append_job_events(batch, job_id, start_time, finish_time)
         del self.state.runtime.open_batches[batch_id]
         return row
+
+    def advance_phase2_to_completion(self) -> float:
+        """배정이 끝난 뒤 남은 완료 이벤트를 drain하고 최종 makespan으로 이동한다."""
+
+        if self.state.runtime.open_batches:
+            print(
+                "[ERROR][Environment.hierarchical.advance_phase2_to_completion] "
+                f"cause=open_batches batch_ids={sorted(self.state.runtime.open_batches)}"
+            )
+            raise RuntimeError("cannot finish Phase 2 while batches remain open")
+        makespan = max(float(value) for value in self.state.runtime.machine_available_at.values())
+        if makespan + 1e-9 < self.state.events.current_time:
+            print(
+                "[ERROR][Environment.hierarchical.advance_phase2_to_completion] "
+                f"cause=clock_exceeds_makespan current_time={self.state.events.current_time} "
+                f"makespan={makespan}"
+            )
+            raise RuntimeError("Phase 2 event clock exceeds the schedule makespan")
+        self.state.events.current_time = makespan
+        return makespan
 
     def _append_job_events(self, batch: OpenBatchState, job_id: str, start_time: float, finish_time: float) -> None:
         operation_id = f"{batch.batch_id}:{job_id}"

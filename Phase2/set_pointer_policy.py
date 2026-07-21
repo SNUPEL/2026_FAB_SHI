@@ -1,4 +1,4 @@
-"""가변 Machine/W/O set을 직접 인코딩하는 Phase 2 pointer policy."""
+"""환경이 선택한 Machine context에서 W/O를 고르는 Phase 2 pointer policy."""
 
 from __future__ import annotations
 
@@ -65,12 +65,8 @@ class Phase2SetPointerPolicy(nn.Module):
             )
         )
         indices = torch.tensor(state.action_candidate_node_indices, dtype=torch.long, device=device)
-        if state.stage == "SELECT_MACHINE":
-            candidate_hidden = machine_hidden.index_select(0, indices)
-            selected_machine_hidden = torch.zeros_like(context)
-        else:
-            candidate_hidden = wo_hidden.index_select(0, indices)
-            selected_machine_hidden = machine_hidden[state.selected_machine_node_index]
+        candidate_hidden = wo_hidden.index_select(0, indices)
+        selected_machine_hidden = machine_hidden[state.selected_machine_node_index]
         query = self.query_encoder(torch.cat([context, selected_machine_hidden], dim=-1))
         return self.pointer(
             torch.tanh(candidate_hidden + projected_hidden + query.unsqueeze(0))
@@ -84,9 +80,6 @@ def _validate_state(state: Phase2PolicyState) -> None:
             f"cause=schema_mismatch actual={state.schema_version} expected={PHASE2_STATE_SCHEMA_VERSION}"
         )
         raise RuntimeError("Phase 2 state schema mismatch")
-    if state.stage not in {"SELECT_MACHINE", "SELECT_WO"}:
-        print(f"[ERROR][Phase2.set_pointer_policy._validate_state] cause=unknown_stage stage={state.stage}")
-        raise RuntimeError("unknown Phase 2 policy state stage")
     action_count = len(state.action_ids)
     if action_count == 0 or len(state.action_projected_features) != action_count:
         print("[ERROR][Phase2.set_pointer_policy._validate_state] cause=invalid_action_count")
@@ -94,10 +87,10 @@ def _validate_state(state: Phase2PolicyState) -> None:
     if len(state.action_candidate_node_indices) != action_count:
         print("[ERROR][Phase2.set_pointer_policy._validate_state] cause=invalid_candidate_indices")
         raise RuntimeError("Phase 2 policy state has inconsistent candidate indices")
-    node_count = len(state.machine_ids) if state.stage == "SELECT_MACHINE" else len(state.wo_ids)
+    node_count = len(state.wo_ids)
     if any(index < 0 or index >= node_count for index in state.action_candidate_node_indices):
         print("[ERROR][Phase2.set_pointer_policy._validate_state] cause=candidate_index_out_of_range")
         raise RuntimeError("Phase 2 action candidate node index is out of range")
-    if state.stage == "SELECT_WO" and not 0 <= state.selected_machine_node_index < len(state.machine_ids):
+    if not 0 <= state.selected_machine_node_index < len(state.machine_ids):
         print("[ERROR][Phase2.set_pointer_policy._validate_state] cause=selected_machine_index_out_of_range")
         raise RuntimeError("Phase 2 selected machine node index is out of range")

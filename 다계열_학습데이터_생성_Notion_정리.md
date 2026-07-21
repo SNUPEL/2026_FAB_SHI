@@ -729,6 +729,7 @@ PTLST_QTY = max(1, round(exp(
 episode seed로 MIXED 데이터 생성
 -> W/O를 block-series로 집계
 -> block-series별 WO_QTY/CUT_LTH/BV_QTY를 Phase 1 state에 입력
+-> NP block-series의 W/O CUT_LTH 합이 1,000 이상이면 Bay 22/23으로 hard mask
 -> (block-series, Bay) pair 선택
 ```
 
@@ -738,8 +739,14 @@ episode seed로 MIXED 데이터 생성
 같은 MIXED 데이터 생성
 -> Phase 1 휴리스틱 또는 frozen agent로 Bay 결정
 -> Bay별 W/O subproblem 생성
--> SELECT_MACHINE -> SELECT_WO 학습
+-> 환경이 다음 가용 설비와 목표 batch 크기 결정
+-> SELECT_WO만 학습
 ```
+
+Phase 2 teacher는 `hard violation -> makespan -> Bay 내부 CUT_LTH gap 합 -> W/O 수
+gap 합 -> BV_QTY gap 합 -> 점유시간 gap 합`의 사전식 score로 선택한다. Bay별
+self-labeling에서는 해당 Bay의 gap을 사용하고, combined validation/full-flow에서는
+active Bay의 gap을 합산한다.
 
 Phase 1과 Phase 2는 같은 생성 함수와 seed 계약을 사용한다. 따라서 같은 seed의 `PROJ_NO`, `BLK_NO`, `WK_ORD_NO`, 계열 조합과 W/O 특성이 서로 일치한다.
 

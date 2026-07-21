@@ -15,7 +15,8 @@ from Utils.phase1.multi_series_rules import (
 from Phase2.state import PHASE2_STATE_SCHEMA_VERSION
 
 
-PHASE2_RUN_SPEC_SCHEMA_VERSION = "phase2_run_spec_v2_mixed_only"
+PHASE2_RUN_SPEC_SCHEMA_VERSION = "phase2_run_spec_v4_event_clock"
+PHASE2_MACHINE_DISPATCH_RULE = "idle_at_current_time_else_next_completion_then_machine_id"
 
 
 def build_phase2_run_spec(
@@ -37,6 +38,8 @@ def build_phase2_run_spec(
         "run_spec_schema_version": PHASE2_RUN_SPEC_SCHEMA_VERSION,
         "metric_schema_version": PHASE2_METRIC_SCHEMA_VERSION,
         "feature_schema_version": PHASE2_STATE_SCHEMA_VERSION,
+        "policy_action": "select_wo_only",
+        "machine_dispatch_rule": PHASE2_MACHINE_DISPATCH_RULE,
         "score_mode": score_mode,
         "score_fields": list(score_fields),
         "action_pool_limit": action_pool_limit,
@@ -72,6 +75,8 @@ def validate_phase2_run_spec(spec: Mapping[str, Any]) -> None:
         "run_spec_schema_version",
         "metric_schema_version",
         "feature_schema_version",
+        "policy_action",
+        "machine_dispatch_rule",
         "score_mode",
         "score_fields",
         "action_pool_limit",
@@ -104,6 +109,17 @@ def validate_phase2_run_spec(spec: Mapping[str, Any]) -> None:
             print(
                 "[ERROR][Phase2.run_spec.validate_phase2_run_spec] "
                 f"cause=version_mismatch field={key} actual={spec[key]} expected={expected}"
+            )
+            raise RuntimeError(f"Phase 2 RunSpec {key} mismatch")
+    expected_action_contract = {
+        "policy_action": "select_wo_only",
+        "machine_dispatch_rule": PHASE2_MACHINE_DISPATCH_RULE,
+    }
+    for key, expected in expected_action_contract.items():
+        if spec[key] != expected:
+            print(
+                "[ERROR][Phase2.run_spec.validate_phase2_run_spec] "
+                f"cause=action_contract_mismatch field={key} actual={spec[key]} expected={expected}"
             )
             raise RuntimeError(f"Phase 2 RunSpec {key} mismatch")
     score_mode = spec["score_mode"]

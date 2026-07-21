@@ -1,7 +1,7 @@
 """Phase 1 plan을 merged Phase 2 batch-machine 실행·리포트에 연결한다.
 
-Phase 2는 Phase 1의 Block->Bay 결과를 받은 뒤 Bay 내부에서
-`SELECT_MACHINE -> SELECT_WO 반복`으로 batch와 설비를 함께 결정한다.
+Phase 2는 Phase 1의 Block->Bay 결과를 받은 뒤 Bay 내부에서 환경이 다음
+가용 설비를 확정하고, policy는 해당 설비의 batch에 넣을 W/O만 선택한다.
 """
 
 from __future__ import annotations
