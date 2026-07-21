@@ -730,8 +730,16 @@ episode seed로 MIXED 데이터 생성
 -> W/O를 block-series로 집계
 -> block-series별 WO_QTY/CUT_LTH/BV_QTY를 Phase 1 state에 입력
 -> NP block-series의 W/O CUT_LTH 합이 1,000 이상이면 Bay 22/23으로 hard mask
--> (block-series, Bay) pair 선택
+-> NP/NC block-series를 NP_NC(22/23/24) 서브문제로 분리
+-> FN/FL block-series를 FN_FL(25/trans) 서브문제로 분리
+-> 각 서브문제에서 (block-series, Bay) pair를 순차 선택
+-> 각 teacher sequence로 공유 policy를 별도 CE update
+-> 두 assignment를 하나의 Phase 1 plan으로 병합
 ```
+
+이 분할은 학습데이터를 다시 생성하거나 identity를 바꾸는 과정이 아니다. 하나의
+부모 MIXED episode에서 서로 설비를 공유하지 않는 W/O만 학습 시점에 분할한다.
+한 자원군이 없으면 해당 서브문제와 metric row는 생성하지 않는다.
 
 ### Phase 2
 

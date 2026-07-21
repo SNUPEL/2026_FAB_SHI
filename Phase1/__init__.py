@@ -1,14 +1,23 @@
 """Phase 1 블록-Bay pair-pointer 공개 API."""
 
 from Phase1.orchestrator import run_phase1_graph_workflow
-from Phase1.pair_self_labeling import run_phase1_pair_policy_rollout, train_phase1_pair_self_labeling
+from Phase1.pair_self_labeling import (
+    run_phase1_pair_policy_resource_pool_best_of_k,
+    run_phase1_pair_policy_rollout,
+    train_phase1_pair_self_labeling,
+)
 from Phase1.pointer_policy import Phase1PairPointerPolicy
-from Phase1.heuristics import run_phase1_heuristic_candidate
+from Phase1.heuristics import (
+    run_phase1_heuristic_candidate,
+    run_phase1_resource_pool_heuristic_candidate,
+)
 
 __all__ = [
     "Phase1PairPointerPolicy",
     "run_phase1_graph_workflow",
     "run_phase1_heuristic_candidate",
+    "run_phase1_resource_pool_heuristic_candidate",
+    "run_phase1_pair_policy_resource_pool_best_of_k",
     "run_phase1_pair_policy_rollout",
     "train_phase1_pair_self_labeling",
 ]

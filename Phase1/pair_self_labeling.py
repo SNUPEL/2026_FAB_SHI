@@ -1,8 +1,8 @@
 """MIXED Phase 1 direct pair-action self-labeling.
 
-한 episode의 NP/NC/FN/FL block-series 의사결정 단위를 다섯 Bay에 배정한다.
-정책 계약은 `(block-series, Bay)` pair와 확정 action mask를 사용한다. 목적함수는
-공유 설비군+계열별 또는 계열별 전용 W/O→CUT→BV 사전식 범위를 명시적으로 선택한다.
+한 물리 episode를 `NP_NC(22/23/24)`와 `FN_FL(25/trans)` 두 자원군
+서브문제로 나눈다. 하나의 공유 정책이 각 서브문제에서 `(block-series, Bay)`
+pair를 선택하지만, 후보 bank·teacher 선정·CE update는 자원군별로 독립한다.
 """
 
 # LINE-BY-LINE: 미래 타입 힌트를 문자열로 늦게 평가합니다. 사용: Python 버전별 annotation 충돌을 줄입니다.
@@ -41,6 +41,7 @@ from Utils.phase1.phase1_bay_balancer import (
     Phase1Block,
     _add_block_load,
     _collect_blocks,
+    _job_attr,
     _multi_objective_load_score,
     _normalize_bay_capacity_weights,
     _normalize_bay_ids,
@@ -58,12 +59,17 @@ from Utils.phase1.multi_series_rules import (
     PHASE1_BALANCING_GROUP_ORDER,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
     PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    PHASE1_RESOURCE_POOL_BAYS,
+    PHASE1_RESOURCE_POOL_ORDER,
+    PHASE1_RESOURCE_POOL_SERIES,
     add_multi_series_group_load,
     initialize_multi_series_group_loads,
     joint_phase1_bay_capacity_weights,
     multi_series_group_load_value,
     normalize_phase1_objective_scope,
+    phase1_resource_pool_for_series,
     phase1_objective_field_names,
+    split_phase1_jobs_by_resource_pool,
 )
 # LINE-BY-LINE: 8개 휴리스틱 후보 bank와 complete heuristic assignment 생성 함수를 재사용합니다.
 from Phase1.heuristics import (
@@ -74,7 +80,7 @@ from Phase1.heuristics import (
 
 # MIXED pair 후보는 W/O-first 부하, 계열 그룹, NP hard mask 상태를 포함한다.
 PHASE1_PAIR_FEATURE_NAMES = list(PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES)
-# 전역 상태는 공유 설비군/계열별 W/O·CUT·BV gap과 진행률을 사용한다.
+# 활성 자원군의 공유/계열별 W/O·CUT·BV gap과 진행률을 사용한다.
 PHASE1_PAIR_ENV_FEATURE_NAMES = [
     "progress_ratio",
     "remaining_block_ratio",
@@ -89,6 +95,12 @@ PHASE1_PAIR_ENV_FEATURE_NAMES = [
 PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(6)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
+PHASE1_VALIDATION_VIEW_ORDER = ("NP", "NC", "NP_NC", "FN", "FL", "FN_FL")
+PHASE1_VALIDATION_GAP_FIELDS = tuple(
+    f"{scope}_{metric}_gap"
+    for scope in ("np", "nc", "np_nc", "fn", "fl", "fn_fl")
+    for metric in ("wo", "cut", "bv")
+)
 
 
 def phase1_pair_feature_schema() -> Dict[str, List[str]]:
@@ -106,9 +118,9 @@ class Phase1PairTransition:
 
     # LINE-BY-LINE: decision phase 이름입니다. 현재 pair action에서는 항상 `SELECT_PAIR`입니다.
     phase: str
-    # LINE-BY-LINE: 현재 step에서 가능한 모든 pair 후보 feature matrix입니다. shape 예: `(남은 block 수*Bay 수, 10)`.
+    # LINE-BY-LINE: 현재 step의 feasible pair 후보 feature matrix입니다. shape: `(feasible pair 수, 20)`.
     candidate_features: List[List[float]]
-    # LINE-BY-LINE: 현재 step의 환경 feature vector입니다. shape 예: `(5,)`.
+    # LINE-BY-LINE: 현재 step의 환경 feature vector입니다. shape: `(8,)`.
     env_features: List[float]
     # LINE-BY-LINE: pseudo-label로 선택된 후보 index입니다. cross entropy target으로 사용합니다.
     selected_action_index: int
@@ -122,10 +134,10 @@ class Phase1PairTransition:
     selected_bay: str
 
 
-# LINE-BY-LINE: `Phase1PairCandidate`는 한 episode 전체를 끝까지 배정한 complete solution 후보입니다.
+# LINE-BY-LINE: `Phase1PairCandidate`는 한 서브문제 또는 병합 parent의 complete assignment입니다.
 @dataclass(frozen=True)
 class Phase1PairCandidate:
-    """One complete Phase 1 pair-action assignment candidate."""
+    """한 자원군 또는 병합된 Phase 1 완전 배정 후보."""
 
     # LINE-BY-LINE: 후보를 만든 방법입니다. 예: `agent_greedy`, `agent_sample_3`, `bevel_first_long_cut_preferred`.
     source: str
@@ -141,7 +153,7 @@ class Phase1PairCandidate:
 class _Phase1PairEpisodeCache:
     """Phase 1 한 episode 안에서 변하지 않는 block 집계와 denominator cache."""
 
-    # LINE-BY-LINE: 정규화된 Bay ID입니다. 예: ("22", "23", "24").
+    # LINE-BY-LINE: 부모 문제의 정규화된 5개 Bay ID입니다.
     bay_ids: Tuple[str, ...]
     # LINE-BY-LINE: Bay별 설비 수/가중치입니다. score와 feature denominator에 동일하게 사용합니다.
     bay_capacity_weights: Dict[str, float]
@@ -415,7 +427,7 @@ def _phase1_pair_graph_totals(
 def _phase1_pair_group_flags(block: Phase1Block) -> List[float]:
     """다계열 block의 평준화 그룹 one-hot을 반환한다."""
 
-    groups = ("NP", "FN_FL", "NC")
+    groups = ("NP", "NC", "FN", "FL")
     if block.balancing_group not in groups:
         print(
             "[ERROR][phase1_pair_self_labeling._phase1_pair_group_flags] "
@@ -489,15 +501,15 @@ def train_phase1_pair_self_labeling(
     device: str = "cpu",
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
-    """Train a pair-action policy from best-of-K complete assignments.
+    """Train one shared pair policy with independent resource-pool teachers.
 
     학습 절차:
-    1. episode 문제를 하나 가져온다.
-    2. 현재 policy rollout 후보 K개를 만든다. 첫 번째는 greedy, 나머지는 sample.
-    3. 3개 MIXED dispatching 휴리스틱 complete assignment 후보를 만든다.
-    4. 목적함수 tuple 기준 best 후보 하나를 pseudo-label로 선택한다.
-    5. best 후보의 step별 선택 index를 cross entropy target으로 학습한다.
-    6. 일정 주기마다 checkpoint와 validation report를 저장한다.
+    1. 부모 episode를 `NP_NC`와 `FN_FL` 서브문제로 나눈다.
+    2. 각 서브문제에서 policy greedy/sample K개와 dispatching 휴리스틱을 비교한다.
+    3. 해당 자원군의 사전식 score로 teacher를 하나 선정한다.
+    4. teacher sequence의 step별 index로 즉시 CE update한다.
+    5. 두 자원군이 모두 있으면 하나의 부모 episode에서 update가 2번 일어난다.
+    6. 병합된 배정은 parent audit/report에만 사용하고 teacher 비교에는 쓰지 않는다.
     """
 
     # LINE-BY-LINE: validation sampling 수를 별도 지정하지 않으면 기존 호환성을 위해 train rollout 수를 그대로 씁니다.
@@ -526,7 +538,7 @@ def train_phase1_pair_self_labeling(
     torch.manual_seed(seed)
     # LINE-BY-LINE: 학습 device를 검증합니다. CUDA 요청 시 사용 불가하면 CPU로 조용히 내려가지 않고 실패합니다.
     torch_device = _resolve_torch_device(device)
-    # LINE-BY-LINE: Bay ID를 정규화합니다. 현재 Phase 1 권장값은 `("22", "23", "24")`입니다.
+    # LINE-BY-LINE: 부모 episode의 5개 Bay ID를 정규화합니다.
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
     normalized_capacity_weights = _normalize_bay_capacity_weights(normalized_bay_ids, bay_capacity_weights)
     # LINE-BY-LINE: output_dir를 Path 객체로 바꾸고 없으면 생성합니다.
@@ -568,6 +580,10 @@ def train_phase1_pair_self_labeling(
         _move_optimizer_state(optimizer, torch_device)
     # LINE-BY-LINE: resume 시 기존 metrics.csv에서 start_episode 이전 row만 보존합니다.
     metrics_rows: List[Dict] = _read_csv_rows(output_path / "metrics.csv", "episode", start_episode)
+    # 한 parent episode의 자원군별 CE update를 독립 행으로 보존한다.
+    subproblem_metric_rows: List[Dict] = _read_csv_rows(
+        output_path / "subproblem_metrics.csv", "episode", start_episode
+    )
     # LINE-BY-LINE: resume 시 기존 후보 audit CSV에서 start_episode 이전 row만 보존합니다.
     candidate_rows: List[Dict] = _read_csv_rows(output_path / "candidate_summary.csv", "episode", start_episode)
     # LINE-BY-LINE: resume 시 기존 pseudo-label JSONL에서 start_episode 이전 row만 보존합니다.
@@ -625,84 +641,121 @@ def train_phase1_pair_self_labeling(
         hard_case_corr_before = metadata.get("hard_case_corr_steel_cut_before", "")
         # LINE-BY-LINE: hard-case 적용 후 corr(STL_QTY,CUT_LTH)입니다. 일반 episode는 빈 값입니다.
         hard_case_corr_after = metadata.get("hard_case_corr_steel_cut_after", "")
-        # LINE-BY-LINE: 현재 episode에서 비교할 complete assignment 후보 목록입니다.
-        candidates: List[Phase1PairCandidate] = []
-        # LINE-BY-LINE: 현재 policy로 rollout 후보를 만듭니다. 첫 sample은 greedy, 나머지는 확률 sampling입니다.
-        for sample_index in range(1, rollout_samples + 1):
-            # LINE-BY-LINE: sample_index=1은 deterministic greedy 후보로 두어 검증/추론 기준과 맞춥니다.
-            is_greedy = sample_index == 1
-            # LINE-BY-LINE: policy rollout 결과 complete assignment 후보를 후보 bank에 추가합니다.
-            candidates.append(
-                run_phase1_pair_policy_rollout(
-                    jobs=jobs,
-                    bay_ids=episode_bay_ids,
-                    model=model,
-                    temperature=temperature,
-                    seed=seed + episode * 1000 + sample_index,
-                    source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
-                    selection="greedy" if is_greedy else "sample",
-                    bay_capacity_weights=episode_capacity_weights,
+        subproblems = split_phase1_jobs_by_resource_pool(jobs)
+        selected_subproblems: List[tuple[str, Phase1PairCandidate]] = []
+        subproblem_losses: List[float] = []
+        total_candidate_count = 0
+        for pool_index, pool_id in enumerate(PHASE1_RESOURCE_POOL_ORDER):
+            pool_jobs = subproblems.get(pool_id)
+            if not pool_jobs:
+                continue
+            pool_block_count = len(_collect_blocks(pool_jobs, episode_bay_ids))
+            candidates: List[Phase1PairCandidate] = []
+            for sample_index in range(1, rollout_samples + 1):
+                is_greedy = sample_index == 1
+                candidates.append(
+                    run_phase1_pair_policy_rollout(
+                        jobs=pool_jobs,
+                        bay_ids=episode_bay_ids,
+                        model=model,
+                        temperature=temperature,
+                        seed=seed + episode * 10_000 + pool_index * 1_000 + sample_index,
+                        source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
+                        selection="greedy" if is_greedy else "sample",
+                        bay_capacity_weights=episode_capacity_weights,
+                    )
                 )
-            )
-        # LINE-BY-LINE: 3개 MIXED 휴리스틱 complete assignment도 같은 후보 bank에 추가합니다.
-        for algorithm in heuristic_algorithms:
-            candidates.append(
-                _run_phase1_pair_heuristic_candidate(
-                    jobs,
-                    episode_bay_ids,
-                    algorithm,
-                    bay_capacity_weights=episode_capacity_weights,
+            for algorithm in heuristic_algorithms:
+                candidates.append(
+                    _run_phase1_pair_heuristic_candidate(
+                        pool_jobs,
+                        episode_bay_ids,
+                        algorithm,
+                        bay_capacity_weights=episode_capacity_weights,
+                        objective_scope=normalized_objective_scope,
+                    )
+                )
+            candidate_scores = {
+                id(candidate): _candidate_score_components(
+                    candidate=candidate,
+                    jobs=pool_jobs,
+                    bay_ids=episode_bay_ids,
+                    phase2_feedback_scorer=phase2_feedback_scorer,
                     objective_scope=normalized_objective_scope,
                 )
-            )
-
-        # LINE-BY-LINE: expensive Phase 2 feedback은 후보마다 한 번만 계산하고 teacher/audit에서 재사용합니다.
-        candidate_scores = {
-            id(candidate): _candidate_score_components(
-                candidate=candidate,
-                jobs=jobs,
-                bay_ids=episode_bay_ids,
-                phase2_feedback_scorer=phase2_feedback_scorer,
-                objective_scope=normalized_objective_scope,
-            )
-            for candidate in candidates
-        }
-        # LINE-BY-LINE: 모든 후보 중 Phase2 feedback + Phase1 목적함수 tuple이 가장 작은 후보를 pseudo-label teacher로 선택합니다.
-        best = min(
-            candidates,
-            key=lambda candidate: candidate_scores[id(candidate)][2],
-        )
-        # LINE-BY-LINE: best 후보의 transition sequence를 target으로 cross entropy 학습 1회를 수행합니다.
-        loss = _teacher_forcing_update(model, optimizer, best.transitions)
-        # LINE-BY-LINE: 선택된 best 후보의 목적함수 score tuple입니다. 낮을수록 좋습니다.
-        score, phase2_feedback_score, learning_score = candidate_scores[id(best)]
-        # LINE-BY-LINE: 모든 agent/heuristic 후보를 CSV audit row로 저장합니다.
-        for candidate_index, candidate in enumerate(candidates, start=1):
-            candidate_rows.append(
-                _candidate_summary_row(
+                for candidate in candidates
+            }
+            best = min(candidates, key=lambda candidate: candidate_scores[id(candidate)][2])
+            loss = _teacher_forcing_update(model, optimizer, best.transitions)
+            score, phase2_feedback_score, learning_score = candidate_scores[id(best)]
+            selected_subproblems.append((pool_id, best))
+            subproblem_losses.append(loss)
+            total_candidate_count += len(candidates)
+            for candidate_index, candidate in enumerate(candidates, start=1):
+                candidate_rows.append(
+                    _candidate_summary_row(
+                        episode=episode,
+                        problem_id=problem_id,
+                        block_count=pool_block_count,
+                        problem_seed=problem_seed,
+                        subproblem_id=pool_id,
+                        candidate_index=candidate_index,
+                        candidate=candidate,
+                        best=best,
+                        score=candidate_scores[id(candidate)][0],
+                        phase2_feedback_score=candidate_scores[id(candidate)][1],
+                        objective_scope=normalized_objective_scope,
+                    )
+                )
+            best_action_rows.extend(
+                _best_action_rows(
                     episode=episode,
                     problem_id=problem_id,
-                    block_count=block_count,
+                    block_count=pool_block_count,
                     problem_seed=problem_seed,
-                    candidate_index=candidate_index,
-                    candidate=candidate,
+                    subproblem_id=pool_id,
                     best=best,
-                    score=candidate_scores[id(candidate)][0],
-                    phase2_feedback_score=candidate_scores[id(candidate)][1],
                     objective_scope=normalized_objective_scope,
                 )
             )
-        # LINE-BY-LINE: 실제 학습 target으로 사용한 best 후보의 step별 action table을 JSONL에 누적합니다.
-        best_action_rows.extend(
-            _best_action_rows(
-                episode=episode,
-                problem_id=problem_id,
-                block_count=block_count,
-                problem_seed=problem_seed,
-                best=best,
-                objective_scope=normalized_objective_scope,
+            subproblem_metric_rows.append(
+                {
+                    "episode": episode,
+                    "problem_id": problem_id,
+                    "subproblem_id": pool_id,
+                    "series": "|".join(PHASE1_RESOURCE_POOL_SERIES[pool_id]),
+                    "block_count": pool_block_count,
+                    "job_count": len(pool_jobs),
+                    "best_source": best.source,
+                    "objective_scope": normalized_objective_scope,
+                    "loss": loss,
+                    "score_json": json.dumps(list(score), ensure_ascii=False),
+                    "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
+                    "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
+                    "candidate_count": len(candidates),
+                }
             )
+            print(
+                "[CHECK][phase1_pair_self_labeling.train.subproblem] "
+                f"episode={episode} subproblem_id={pool_id} block_count={pool_block_count} "
+                f"best_source={best.source} loss={loss:.6f} phase1_score={score}"
+            )
+
+        combined_best = _merge_phase1_resource_pool_candidates(
+            jobs=jobs,
+            bay_ids=episode_bay_ids,
+            bay_capacity_weights=episode_capacity_weights,
+            selected=selected_subproblems,
         )
+        loss = sum(subproblem_losses) / len(subproblem_losses)
+        score = _score_bay_loads(combined_best.bay_loads, normalized_objective_scope)
+        phase2_feedback_score = _candidate_phase2_feedback_score(
+            candidate=combined_best,
+            jobs=jobs,
+            bay_ids=episode_bay_ids,
+            phase2_feedback_scorer=phase2_feedback_scorer,
+        )
+        learning_score = phase2_feedback_score + score
         # LINE-BY-LINE: episode 단위 학습 metric row를 누적합니다.
         metrics_rows.append(
             {
@@ -714,18 +767,20 @@ def train_phase1_pair_self_labeling(
                 "hard_case_mode": hard_case_mode,
                 "hard_case_corr_steel_cut_before": hard_case_corr_before,
                 "hard_case_corr_steel_cut_after": hard_case_corr_after,
-                "best_source": best.source,
+                "best_source": combined_best.source,
                 "score_mode": "wo_first",
                 "objective_scope": normalized_objective_scope,
                 "loss": loss,
                 "score_json": json.dumps(list(score), ensure_ascii=False),
                 "phase2_feedback_score_json": json.dumps(list(phase2_feedback_score), ensure_ascii=False),
                 "learning_score_json": json.dumps(list(learning_score), ensure_ascii=False),
-                "candidate_count": len(candidates),
+                "candidate_count": total_candidate_count,
+                "subproblem_count": len(selected_subproblems),
             }
         )
         # LINE-BY-LINE: 현재까지 metrics를 즉시 파일에 씁니다. 중간 중단되어도 진행 상황이 남습니다.
         _write_metrics(output_path / "metrics.csv", metrics_rows)
+        _write_subproblem_metrics(output_path / "subproblem_metrics.csv", subproblem_metric_rows)
         # LINE-BY-LINE: 현재까지 후보 audit row를 즉시 파일에 씁니다.
         _write_candidate_summary(output_path / "candidate_summary.csv", candidate_rows)
         # LINE-BY-LINE: 현재까지 pseudo-label action table을 즉시 파일에 씁니다.
@@ -734,7 +789,8 @@ def train_phase1_pair_self_labeling(
         print(
             "[CHECK][phase1_pair_self_labeling.train] "
             f"episode={episode} problem_id={problem_id} block_count={block_count} "
-            f"best_source={best.source} loss={loss:.6f} "
+            f"best_source={combined_best.source} subproblem_count={len(selected_subproblems)} "
+            f"loss={loss:.6f} "
             f"learning_score={learning_score} phase1_score={score}"
         )
         # LINE-BY-LINE: checkpoint interval에 도달하면 주기 checkpoint를 저장합니다.
@@ -834,6 +890,7 @@ def train_phase1_pair_self_labeling(
         "checkpoint_path": str(checkpoint_path),
         "best_checkpoint_path": str(best_checkpoint_path) if best_validation_score is not None else "",
         "metrics_csv": str(output_path / "metrics.csv"),
+        "subproblem_metrics_csv": str(output_path / "subproblem_metrics.csv"),
         "candidate_summary_csv": str(output_path / "candidate_summary.csv"),
         "best_action_table_jsonl": str(output_path / "best_action_table.jsonl"),
         "validation_summary_csv": str(output_path / "validation_summary.csv") if validation_rows else "",
@@ -851,8 +908,9 @@ def train_phase1_pair_self_labeling(
         "objective_scope_transition": objective_scope_transition,
         "previous_objective_scope": previous_objective_scope,
         "rule_profile": MULTI_SERIES_RULE_PROFILE,
-        "episode_scope_mode": "joint_five_bay",
+        "episode_scope_mode": "two_resource_pool_subproblems",
         "episode_scope_version": PHASE1_MULTI_SERIES_SCOPE_VERSION,
+        "optimizer_update_count": len(subproblem_metric_rows),
         "pair_feature_names": list(feature_schema["pair"]),
         "env_feature_names": list(feature_schema["env"]),
         "score_field_names": list(
@@ -889,7 +947,7 @@ def run_phase1_pair_policy_rollout(
     selection: str = "sample",
     bay_capacity_weights: Mapping[str, int | float] | None = None,
 ) -> Phase1PairCandidate:
-    """MIXED hard mask를 지키며 complete pair assignment 하나를 생성한다."""
+    """한 자원군의 hard mask를 지키는 complete pair assignment를 생성한다."""
 
     if temperature <= 0:
         print(f"[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_rollout] cause=non_positive_temperature value={temperature}")
@@ -959,6 +1017,160 @@ def run_phase1_pair_policy_rollout(
     )
 
 
+def run_phase1_pair_policy_resource_pool_best_of_k(
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    model: Phase1PairPointerPolicy | None,
+    sample_count: int,
+    temperature: float,
+    seed: int,
+    bay_capacity_weights: Mapping[str, int | float] | None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+) -> Phase1PairCandidate:
+    """두 자원군에서 best-of-K를 독립 선택한 뒤 하나의 완전 배정으로 병합한다."""
+
+    if sample_count <= 0:
+        print(
+            "[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_resource_pool_best_of_k] "
+            f"cause=non_positive_sample_count value={sample_count}"
+        )
+        raise RuntimeError("Phase 1 best-of-K sample_count must be positive")
+    normalized_scope = normalize_phase1_objective_scope(objective_scope)
+    if model is not None and model.objective_scope != normalized_scope:
+        print(
+            "[ERROR][phase1_pair_self_labeling.run_phase1_pair_policy_resource_pool_best_of_k] "
+            f"cause=objective_scope_mismatch model={model.objective_scope} requested={normalized_scope}"
+        )
+        raise RuntimeError("Phase 1 best-of-K objective scope mismatch")
+    subproblems = split_phase1_jobs_by_resource_pool(jobs)
+    selected: List[tuple[str, Phase1PairCandidate]] = []
+    for pool_index, pool_id in enumerate(PHASE1_RESOURCE_POOL_ORDER):
+        pool_jobs = subproblems.get(pool_id)
+        if not pool_jobs:
+            continue
+        candidates = []
+        for sample_index in range(1, sample_count + 1):
+            is_greedy = sample_index == 1
+            candidates.append(
+                run_phase1_pair_policy_rollout(
+                    jobs=pool_jobs,
+                    bay_ids=bay_ids,
+                    model=model,
+                    temperature=temperature,
+                    seed=seed + pool_index * 1_000_000 + sample_index,
+                    source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
+                    selection="greedy" if is_greedy else "sample",
+                    bay_capacity_weights=bay_capacity_weights,
+                )
+            )
+        best = min(
+            candidates,
+            key=lambda candidate: _score_bay_loads(
+                candidate.bay_loads,
+                objective_scope=normalized_scope,
+            ),
+        )
+        selected.append((pool_id, best))
+    return _merge_phase1_resource_pool_candidates(
+        jobs=jobs,
+        bay_ids=bay_ids,
+        bay_capacity_weights=bay_capacity_weights,
+        selected=selected,
+    )
+
+
+def _merge_phase1_resource_pool_candidates(
+    *,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    bay_capacity_weights: Mapping[str, int | float] | None,
+    selected: Sequence[tuple[str, Phase1PairCandidate]],
+) -> Phase1PairCandidate:
+    """독립 자원군 후보의 중복·누락을 검사하고 전체 Bay load를 재계산한다."""
+
+    normalized_bays = _normalize_bay_ids(bay_ids)
+    normalized_weights = _normalize_bay_capacity_weights(normalized_bays, bay_capacity_weights)
+    subproblems = split_phase1_jobs_by_resource_pool(jobs)
+    selected_by_pool: Dict[str, Phase1PairCandidate] = {}
+    for pool_id, candidate in selected:
+        if pool_id in selected_by_pool:
+            print(
+                "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+                f"cause=duplicate_subproblem_selection pool_id={pool_id}"
+            )
+            raise RuntimeError("duplicate Phase 1 resource-pool selection")
+        selected_by_pool[pool_id] = candidate
+    if set(selected_by_pool) != set(subproblems):
+        print(
+            "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+            f"cause=subproblem_scope_mismatch expected={sorted(subproblems)} "
+            f"actual={sorted(selected_by_pool)}"
+        )
+        raise RuntimeError("Phase 1 resource-pool selections are incomplete")
+    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bays)
+    expected_block_ids = {block.block_set_id for block in blocks}
+    expected_blocks_by_pool = {
+        pool_id: {
+            block.block_set_id
+            for block in blocks
+            if phase1_resource_pool_for_series(block.family) == pool_id
+        }
+        for pool_id in subproblems
+    }
+    assignments: Dict[str, str] = {}
+    transitions: List[Phase1PairTransition] = []
+    sources: List[str] = []
+    for pool_id in PHASE1_RESOURCE_POOL_ORDER:
+        candidate = selected_by_pool.get(pool_id)
+        if candidate is None:
+            continue
+        if set(candidate.assignments) != expected_blocks_by_pool[pool_id]:
+            print(
+                "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+                f"cause=assignment_scope_mismatch pool_id={pool_id} "
+                f"expected={sorted(expected_blocks_by_pool[pool_id])} "
+                f"actual={sorted(candidate.assignments)}"
+            )
+            raise RuntimeError(f"Phase 1 resource-pool assignment scope mismatch: {pool_id}")
+        for block_id, assigned_bay in candidate.assignments.items():
+            if assigned_bay not in PHASE1_RESOURCE_POOL_BAYS[pool_id]:
+                print(
+                    "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+                    f"cause=resource_pool_bay_mismatch pool_id={pool_id} "
+                    f"block_set_id={block_id} bay_id={assigned_bay}"
+                )
+                raise RuntimeError(f"Phase 1 resource-pool Bay mismatch: {pool_id}")
+        duplicate_ids = sorted(set(assignments) & set(candidate.assignments))
+        if duplicate_ids:
+            print(
+                "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+                f"cause=duplicate_assignments pool_id={pool_id} block_ids={duplicate_ids}"
+            )
+            raise RuntimeError("duplicate Phase 1 resource-pool assignments")
+        assignments.update(candidate.assignments)
+        transitions.extend(candidate.transitions)
+        sources.append(f"{pool_id}:{candidate.source}")
+    if set(assignments) != expected_block_ids:
+        missing = sorted(expected_block_ids - set(assignments))
+        extra = sorted(set(assignments) - expected_block_ids)
+        print(
+            "[ERROR][phase1_pair_self_labeling._merge_phase1_resource_pool_candidates] "
+            f"cause=incomplete_assignment missing={missing} extra={extra}"
+        )
+        raise RuntimeError("incomplete Phase 1 resource-pool assignment")
+
+    planning_state = _create_pair_planning_state(normalized_weights)
+    for block in blocks:
+        _apply_block_to_planning_state(planning_state, assignments[block.block_set_id], block)
+    complete_phase1_planning(planning_state, expected_block_ids)
+    return Phase1PairCandidate(
+        source="|".join(sources),
+        transitions=transitions,
+        assignments=dict(assignments),
+        bay_loads=_plain_bay_loads(planning_state.bay_loads),
+    )
+
+
 def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) -> None:
     """모델이 유일한 MIXED feature 계약과 정확히 일치하는지 검증한다."""
 
@@ -1012,7 +1224,7 @@ def _validate_pair_policy(
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
-    """Evaluate best-of-K policy samples against the heuristic bank."""
+    """Evaluate six series/resource-pool views without mixing independent teachers."""
 
     rows: List[Dict] = []
     candidate_rows: List[Dict] = []
@@ -1025,137 +1237,225 @@ def _validate_pair_policy(
             default_bay_ids=bay_ids,
             default_capacity_weights=_normalize_bay_capacity_weights(bay_ids, bay_capacity_weights),
         )
-        problem_id = str(metadata.get("problem_id") or metadata.get("episode_id") or f"VAL{validation_index:05d}")
-        block_count = int(metadata.get("block_count") or len(jobs))
+        parent_problem_id = str(
+            metadata.get("problem_id") or metadata.get("episode_id") or f"VAL{validation_index:05d}"
+        )
         validation_source = str(metadata.get("validation_source") or "synthetic")
         evaluation_input_type = _validation_input_type(metadata, validation_source)
         case_type = str(metadata.get("case_type") or "")
         hard_case_mode = str(metadata.get("hard_case_mode") or "")
         hard_case_corr_before = metadata.get("hard_case_corr_steel_cut_before", "")
         hard_case_corr_after = metadata.get("hard_case_corr_steel_cut_after", "")
-        candidates = []
-        # LINE-BY-LINE: 학습과 동일하게 validation도 best-of-K agent 후보를 평가합니다. 예: rollout_samples=64이면 agent 후보 64개.
-        for sample_index in range(1, rollout_samples + 1):
-            # LINE-BY-LINE: 첫 후보는 deterministic greedy, 나머지는 확률 sampling 후보입니다.
-            is_greedy = sample_index == 1
-            candidates.append(
-                run_phase1_pair_policy_rollout(
-                    jobs=jobs,
-                    bay_ids=validation_bay_ids,
-                    model=model,
-                    temperature=1.0,
-                    seed=episode * 100_000 + validation_index * 1_000 + sample_index,
-                    source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
-                    selection="greedy" if is_greedy else "sample",
-                    bay_capacity_weights=validation_capacity_weights,
+        for view_index, (validation_view, view_jobs) in enumerate(
+            _phase1_validation_views(jobs).items(), start=1
+        ):
+            problem_id = f"{parent_problem_id}::{validation_view}"
+            first_view_job = next(iter(view_jobs.values()))
+            subproblem_id = phase1_resource_pool_for_series(
+                _job_attr(first_view_job, "family")
+            )
+            block_count = len(_collect_blocks(view_jobs, validation_bay_ids))
+            candidates: List[Phase1PairCandidate] = []
+            for sample_index in range(1, rollout_samples + 1):
+                is_greedy = sample_index == 1
+                candidates.append(
+                    run_phase1_pair_policy_rollout(
+                        jobs=view_jobs,
+                        bay_ids=validation_bay_ids,
+                        model=model,
+                        temperature=1.0,
+                        seed=(
+                            episode * 1_000_000
+                            + validation_index * 10_000
+                            + view_index * 100
+                            + sample_index
+                        ),
+                        source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
+                        selection="greedy" if is_greedy else "sample",
+                        bay_capacity_weights=validation_capacity_weights,
+                    )
                 )
-            )
-        for algorithm in heuristic_algorithms:
-            candidates.append(
-                _run_phase1_pair_heuristic_candidate(
-                    jobs,
-                    validation_bay_ids,
-                    algorithm,
-                    bay_capacity_weights=validation_capacity_weights,
-                    objective_scope=objective_scope,
+            for algorithm in heuristic_algorithms:
+                candidates.append(
+                    _run_phase1_pair_heuristic_candidate(
+                        view_jobs,
+                        validation_bay_ids,
+                        algorithm,
+                        bay_capacity_weights=validation_capacity_weights,
+                        objective_scope=objective_scope,
+                    )
                 )
-            )
-        if not candidates:
-            print(
-                "[ERROR][phase1_pair_self_labeling._validate_pair_policy] "
-                f"cause=no_rankable_candidates problem_id={problem_id}"
-            )
-            raise RuntimeError("validation has no rankable Phase 1 candidates")
-        candidate_scores = {
-            id(candidate): _candidate_score_components(
-                candidate=candidate,
-                jobs=jobs,
-                bay_ids=validation_bay_ids,
-                phase2_feedback_scorer=phase2_feedback_scorer,
-                objective_scope=objective_scope,
-            )
-            for candidate in candidates
-        }
-        scored = [
-            (
-                candidate_scores[id(candidate)][2],
-                candidate,
-            )
-            for candidate in candidates
-        ]
-        scored.sort(key=lambda item: item[0])
-        rank_by_source = {
-            candidate.source: rank
-            for rank, (_, candidate) in enumerate(scored, start=1)
-        }
-        # LINE-BY-LINE: Proposed 성능은 greedy 1개가 아니라 validation에서 만든 agent 후보 중 best-of-K로 계산합니다.
-        agent_candidates = [candidate for candidate in candidates if _is_agent_source(candidate.source)]
-        best_agent_learning_score, best_agent_candidate = min(
-            [
-                (
-                    candidate_scores[id(candidate)][2],
-                    candidate,
-                )
-                for candidate in agent_candidates
-            ],
-            key=lambda item: item[0],
-        )
-        agent_score = candidate_scores[id(best_agent_candidate)][0]
-        agent_learning_score = best_agent_learning_score
-        best_learning_score, best_candidate = scored[0]
-        best_score = candidate_scores[id(best_candidate)][0]
-        agent_rank = rank_by_source[best_agent_candidate.source]
-        agent_is_best = int(agent_rank == 1)
-        agent_best_count += agent_is_best
-        agent_scores.append(agent_learning_score)
-        for candidate_index, candidate in enumerate(candidates, start=1):
-            candidate_rows.append(
-                _validation_candidate_summary_row(
-                    train_episode=episode,
-                    validation_episode=validation_index,
-                    validation_source=validation_source,
-                    evaluation_input_type=evaluation_input_type,
-                    problem_id=problem_id,
-                    block_count=block_count,
-                    candidate_index=candidate_index,
+            candidate_scores = {
+                id(candidate): _candidate_score_components(
                     candidate=candidate,
-                    best=best_candidate,
-                    rank=rank_by_source[candidate.source],
-                    score=candidate_scores[id(candidate)][0],
-                    phase2_feedback_score=candidate_scores[id(candidate)][1],
+                    jobs=view_jobs,
+                    bay_ids=validation_bay_ids,
+                    phase2_feedback_scorer=phase2_feedback_scorer,
                     objective_scope=objective_scope,
                 )
-            )
-        rows.append(
-            {
-                "train_episode": episode,
-                "validation_episode": validation_index,
-                "validation_source": validation_source,
-                "evaluation_input_type": evaluation_input_type,
-                "problem_id": problem_id,
-                "block_count": block_count,
-                "case_type": case_type,
-                "hard_case_mode": hard_case_mode,
-                "hard_case_corr_steel_cut_before": hard_case_corr_before,
-                "hard_case_corr_steel_cut_after": hard_case_corr_after,
-                "agent_score_json": json.dumps(list(agent_score), ensure_ascii=False),
-                "agent_learning_score_json": json.dumps(list(agent_learning_score), ensure_ascii=False),
-                "best_score_json": json.dumps(list(best_score), ensure_ascii=False),
-                "best_learning_score_json": json.dumps(list(best_learning_score), ensure_ascii=False),
-                "best_source": best_candidate.source,
-                "agent_best_source": best_agent_candidate.source,
-                "agent_is_best": agent_is_best,
-                "agent_rank": agent_rank,
-                "candidate_count": len(candidates),
-                "objective_scope": objective_scope,
+                for candidate in candidates
             }
-        )
+            scored = sorted(
+                ((candidate_scores[id(candidate)][2], candidate) for candidate in candidates),
+                key=lambda item: item[0],
+            )
+            rank_by_source = {
+                candidate.source: rank
+                for rank, (_, candidate) in enumerate(scored, start=1)
+            }
+            agent_candidates = [candidate for candidate in candidates if _is_agent_source(candidate.source)]
+            best_agent_learning_score, best_agent_candidate = min(
+                ((candidate_scores[id(candidate)][2], candidate) for candidate in agent_candidates),
+                key=lambda item: item[0],
+            )
+            agent_score = candidate_scores[id(best_agent_candidate)][0]
+            best_learning_score, best_candidate = scored[0]
+            best_score = candidate_scores[id(best_candidate)][0]
+            agent_rank = rank_by_source[best_agent_candidate.source]
+            agent_is_best = int(agent_rank == 1)
+            agent_best_count += agent_is_best
+            agent_scores.append(best_agent_learning_score)
+            for candidate_index, candidate in enumerate(candidates, start=1):
+                candidate_rows.append(
+                    _validation_candidate_summary_row(
+                        train_episode=episode,
+                        validation_episode=validation_index,
+                        validation_source=validation_source,
+                        evaluation_input_type=evaluation_input_type,
+                        parent_problem_id=parent_problem_id,
+                        problem_id=problem_id,
+                        subproblem_id=subproblem_id,
+                        validation_view=validation_view,
+                        block_count=block_count,
+                        candidate_index=candidate_index,
+                        candidate=candidate,
+                        best=best_candidate,
+                        rank=rank_by_source[candidate.source],
+                        score=candidate_scores[id(candidate)][0],
+                        phase2_feedback_score=candidate_scores[id(candidate)][1],
+                        objective_scope=objective_scope,
+                        gap_breakdown=_phase1_validation_gap_breakdown(
+                            candidate.bay_loads, view_jobs
+                        ),
+                    )
+                )
+            agent_gaps = _phase1_validation_gap_breakdown(
+                best_agent_candidate.bay_loads, view_jobs
+            )
+            rows.append(
+                {
+                    "train_episode": episode,
+                    "validation_episode": validation_index,
+                    "validation_source": validation_source,
+                    "evaluation_input_type": evaluation_input_type,
+                    "parent_problem_id": parent_problem_id,
+                    "problem_id": problem_id,
+                    "subproblem_id": subproblem_id,
+                    "validation_view": validation_view,
+                    "block_count": block_count,
+                    "case_type": case_type,
+                    "hard_case_mode": hard_case_mode,
+                    "hard_case_corr_steel_cut_before": hard_case_corr_before,
+                    "hard_case_corr_steel_cut_after": hard_case_corr_after,
+                    "agent_score_json": json.dumps(list(agent_score), ensure_ascii=False),
+                    "agent_learning_score_json": json.dumps(
+                        list(best_agent_learning_score), ensure_ascii=False
+                    ),
+                    "best_score_json": json.dumps(list(best_score), ensure_ascii=False),
+                    "best_learning_score_json": json.dumps(
+                        list(best_learning_score), ensure_ascii=False
+                    ),
+                    "best_source": best_candidate.source,
+                    "agent_best_source": best_agent_candidate.source,
+                    "agent_is_best": agent_is_best,
+                    "agent_rank": agent_rank,
+                    "candidate_count": len(candidates),
+                    "objective_scope": objective_scope,
+                    **agent_gaps,
+                }
+            )
+    if not rows:
+        print("[ERROR][phase1_pair_self_labeling._validate_pair_policy] cause=no_validation_views")
+        raise RuntimeError("Phase 1 validation produced no resource-pool views")
     return {
         "rows": rows,
         "candidate_rows": candidate_rows,
         "agent_mean_score": _mean_score(agent_scores),
-        "agent_best_rate": agent_best_count / validation_episodes,
+        "agent_best_rate": agent_best_count / len(rows),
     }
+
+
+def _phase1_validation_views(jobs: Mapping[str, object]) -> Dict[str, Dict[str, object]]:
+    """Build ordered single-series and mixed resource-pool validation views."""
+
+    by_series: Dict[str, Dict[str, object]] = {series: {} for series in ("NP", "NC", "FN", "FL")}
+    for job_key, job in jobs.items():
+        family = str(_job_attr(job, "family") or "").strip().upper()
+        if family not in by_series:
+            print(
+                "[ERROR][phase1_pair_self_labeling._phase1_validation_views] "
+                f"cause=unsupported_series job_key={job_key} family={family}"
+            )
+            raise RuntimeError(f"unsupported Phase 1 validation series: {family}")
+        by_series[family][str(job_key)] = job
+    views: Dict[str, Dict[str, object]] = {}
+    for view in PHASE1_VALIDATION_VIEW_ORDER:
+        series_values = PHASE1_RESOURCE_POOL_SERIES.get(view, (view,))
+        view_jobs = {
+            job_key: job
+            for series in series_values
+            for job_key, job in by_series[series].items()
+        }
+        if view_jobs:
+            views[view] = view_jobs
+    return views
+
+
+def _phase1_validation_gap_breakdown(
+    bay_loads: Mapping[str, Mapping[str, int | float]],
+    jobs: Mapping[str, object],
+) -> Dict[str, float | str]:
+    """Return per-series and active-pool capacity-normalized gap diagnostics."""
+
+    present_series = {
+        str(_job_attr(job, "family") or "").strip().upper()
+        for job in jobs.values()
+    }
+    result: Dict[str, float | str] = {field: "" for field in PHASE1_VALIDATION_GAP_FIELDS}
+    metric_fields = {
+        "wo": "wo_count",
+        "cut": "cut_length_sum",
+        "bv": "bevel_quantity_sum",
+    }
+    for series in ("NP", "NC", "FN", "FL"):
+        if series not in present_series:
+            continue
+        weights = GROUP_BAY_CAPACITY_WEIGHTS[series]
+        for metric_name, load_metric in metric_fields.items():
+            values = [
+                multi_series_group_load_value(bay_loads[bay_id], series, load_metric)
+                / weights[bay_id]
+                for bay_id in weights
+            ]
+            result[f"{series.lower()}_{metric_name}_gap"] = round(max(values) - min(values), 9)
+    for pool_id in PHASE1_RESOURCE_POOL_ORDER:
+        pool_series = PHASE1_RESOURCE_POOL_SERIES[pool_id]
+        if not present_series.intersection(pool_series):
+            continue
+        pool_bays = tuple(GROUP_BAY_CAPACITY_WEIGHTS[pool_series[0]])
+        for metric_name, load_metric in metric_fields.items():
+            values = [
+                sum(
+                    multi_series_group_load_value(bay_loads[bay_id], series, load_metric)
+                    for series in pool_series
+                )
+                / _require_capacity_weight(bay_loads[bay_id], f"validation_gap:{pool_id}:{bay_id}")
+                for bay_id in pool_bays
+            ]
+            result[f"{pool_id.lower()}_{metric_name}_gap"] = round(
+                max(values) - min(values), 9
+            )
+    return result
 
 
 def _is_agent_source(source: str) -> bool:
@@ -1967,7 +2267,7 @@ def _resolve_phase1_episode_scope(
     default_bay_ids: Sequence[str],
     default_capacity_weights: Mapping[str, int | float],
 ) -> tuple[Tuple[str, ...], Dict[str, float]]:
-    """다계열 episode가 모든 W/O와 다섯 Bay를 유지하는지 검증한다."""
+    """분할 전 부모 episode가 모든 W/O와 확정 5-Bay 계약을 유지하는지 검증한다."""
 
     default_ids = _normalize_bay_ids(default_bay_ids)
     default_weights = _normalize_bay_capacity_weights(default_ids, default_capacity_weights)
@@ -2027,6 +2327,7 @@ def _candidate_summary_row(
     problem_id: str,
     block_count: int,
     problem_seed: int | str,
+    subproblem_id: str,
     candidate_index: int,
     candidate: Phase1PairCandidate,
     best: Phase1PairCandidate,
@@ -2042,6 +2343,7 @@ def _candidate_summary_row(
         "problem_id": problem_id,
         "block_count": block_count,
         "problem_seed": problem_seed,
+        "subproblem_id": subproblem_id,
         "candidate_index": candidate_index,
         "source": candidate.source,
         "is_best": int(candidate is best),
@@ -2063,7 +2365,10 @@ def _validation_candidate_summary_row(
     validation_episode: int,
     validation_source: str,
     evaluation_input_type: str,
+    parent_problem_id: str,
     problem_id: str,
+    subproblem_id: str,
+    validation_view: str,
     block_count: int,
     candidate_index: int,
     candidate: Phase1PairCandidate,
@@ -2072,6 +2377,7 @@ def _validation_candidate_summary_row(
     score: tuple,
     phase2_feedback_score: tuple | None,
     objective_scope: str,
+    gap_breakdown: Mapping[str, float | str],
 ) -> Dict:
     """Return one validation candidate audit row."""
 
@@ -2087,7 +2393,10 @@ def _validation_candidate_summary_row(
         "validation_episode": validation_episode,
         "validation_source": validation_source,
         "evaluation_input_type": evaluation_input_type,
+        "parent_problem_id": parent_problem_id,
         "problem_id": problem_id,
+        "subproblem_id": subproblem_id,
+        "validation_view": validation_view,
         "block_count": block_count,
         "candidate_index": candidate_index,
         "source": candidate.source,
@@ -2103,6 +2412,7 @@ def _validation_candidate_summary_row(
         "bay_loads_json": json.dumps(candidate.bay_loads, ensure_ascii=False, sort_keys=True),
     }
     row.update(_score_columns(score))
+    row.update(gap_breakdown)
     return row
 
 
@@ -2136,6 +2446,7 @@ def _best_action_rows(
     problem_id: str,
     block_count: int,
     problem_seed: int | str,
+    subproblem_id: str,
     best: Phase1PairCandidate,
     objective_scope: str,
 ) -> List[Dict]:
@@ -2147,6 +2458,7 @@ def _best_action_rows(
             "problem_id": problem_id,
             "block_count": block_count,
             "problem_seed": problem_seed,
+            "subproblem_id": subproblem_id,
             "step": step,
             "source": best.source,
             "objective_scope": objective_scope,
@@ -2195,6 +2507,31 @@ def _write_metrics(path: Path, rows: Sequence[Mapping]) -> None:
             "phase2_feedback_score_json",
             "learning_score_json",
             "candidate_count",
+            "subproblem_count",
+        ],
+        rows,
+    )
+
+
+def _write_subproblem_metrics(path: Path, rows: Sequence[Mapping]) -> None:
+    """Write one row for every independent resource-pool optimizer update."""
+
+    _write_csv(
+        path,
+        [
+            "episode",
+            "problem_id",
+            "subproblem_id",
+            "series",
+            "block_count",
+            "job_count",
+            "best_source",
+            "objective_scope",
+            "loss",
+            "score_json",
+            "phase2_feedback_score_json",
+            "learning_score_json",
+            "candidate_count",
         ],
         rows,
     )
@@ -2210,6 +2547,7 @@ def _write_candidate_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "problem_id",
             "block_count",
             "problem_seed",
+            "subproblem_id",
             "candidate_index",
             "source",
             "is_best",
@@ -2237,7 +2575,10 @@ def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> 
             "validation_episode",
             "validation_source",
             "evaluation_input_type",
+            "parent_problem_id",
             "problem_id",
+            "subproblem_id",
+            "validation_view",
             "block_count",
             "candidate_index",
             "source",
@@ -2249,6 +2590,7 @@ def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> 
             "phase2_feedback_score_json",
             "learning_score_json",
             *PHASE1_SCORE_FIELD_NAMES,
+            *PHASE1_VALIDATION_GAP_FIELDS,
             "assignment_count",
             "transition_count",
             "bay_loads_json",
@@ -2290,6 +2632,25 @@ def _write_validation_plots(
             score_field=score_field,
             title=title,
             ylabel=ylabel,
+        )
+        plot_paths[output_key] = str(path)
+    for gap_field in PHASE1_VALIDATION_GAP_FIELDS:
+        metric_rows = [
+            row
+            for row in latest_candidate_rows
+            if row.get(gap_field) not in (None, "")
+        ]
+        if not metric_rows:
+            continue
+        output_key = f"validation_{gap_field}_png"
+        path = output_path / f"validation_{gap_field}.png"
+        _plot_validation_metric(
+            plt=plt,
+            path=path,
+            rows=metric_rows,
+            score_field=gap_field,
+            title=gap_field.replace("_", " ").upper(),
+            ylabel="Gap",
         )
         plot_paths[output_key] = str(path)
     best_source_path = output_path / "validation_best_source_counts.png"
@@ -2534,7 +2895,10 @@ def _write_validation_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "validation_episode",
             "validation_source",
             "evaluation_input_type",
+            "parent_problem_id",
             "problem_id",
+            "subproblem_id",
+            "validation_view",
             "block_count",
             "case_type",
             "hard_case_mode",
@@ -2550,6 +2914,7 @@ def _write_validation_summary(path: Path, rows: Sequence[Mapping]) -> None:
             "agent_rank",
             "candidate_count",
             "objective_scope",
+            *PHASE1_VALIDATION_GAP_FIELDS,
         ],
         rows,
     )

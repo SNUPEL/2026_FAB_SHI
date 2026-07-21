@@ -24,16 +24,23 @@ W/O batch-to-Machine 스케줄링을 수행하는 프로젝트입니다. 공개 
 - 동일 block-series의 모든 W/O는 반드시 같은 Bay로 갑니다.
 - Bay: `22`, `23`, `24`, `25`, `trans`
 - 설비 수 기반 용량비: `4:3:4:2:2`
-- 사전식 score: 공유 설비군 전체 부하와 계열별 부하를 각각 설비 수로 정규화
-  `전체 W/O gap -> 계열별 W/O gap -> 전체 CUT_LTH gap -> 계열별 CUT_LTH gap -> 전체 BV_QTY gap -> 계열별 BV_QTY gap`
-- 평준화 그룹: `NP`, `NC`, `FN+FL`
+- 부모 episode 입력은 5개 Bay를 모두 포함하지만 학습 문제는 두 개로 분리:
+  - `NP_NC`: NP/NC block-series만 Bay 22/23/24에 배정
+  - `FN_FL`: FN/FL block-series만 Bay 25/trans에 배정
+- 평준화 계열: `NP`, `NC`, `FN`, `FL` 네 개를 서로 따로 계산
+- `series_only` teacher score:
+  - `NP_NC = (NP W/O gap + NC W/O gap, NP CUT gap + NC CUT gap, NP BV gap + NC BV gap)`
+  - `FN_FL = (FN W/O gap + FL W/O gap, FN CUT gap + FL CUT gap, FN BV gap + FL BV gap)`
+- 두 score는 서로 비교하거나 합쳐 teacher를 선정하지 않습니다. 두 서브문제가
+  있으면 하나의 부모 episode에서 같은 policy를 순서대로 2번 CE update합니다.
 - hard mask:
   - NP/NC: Bay 22/23/24
   - FN/FL: Bay 25/trans
   - NP block-series의 W/O `CUT_LTH` 합 `>= 1000`, `BTH > 4500`, CNT block: Bay 22/23
 
-Phase 1 action은 가능한 `(block-series, Bay)` edge 하나를 선택합니다. 정책 입력은
-19차원 pair feature와 8차원 환경 feature이며, 후보 수와 Bay 수에 독립적인
+Phase 1 action은 현재 서브문제에서 가능한 `(block-series, Bay)` edge 하나를
+선택합니다. 정책 입력은 NP/NC/FN/FL을 별도 flag로 표현한 20차원 pair
+feature와 8차원 환경 feature이며, 후보 수와 Bay 수에 독립적인
 pointer-style scorer입니다.
 
 ### Phase 2
@@ -178,7 +185,8 @@ python main.py phase1-train-pair-self-labeling \
   --validation-every 100 \
   --validation-episodes 20 \
   --device cuda \
-  --output-dir output/phase1_mixed
+  --objective-scope series_only \
+  --output-dir output/phase1_mixed_resource_pool_v1
 ```
 
 재개 학습은 같은 인자와 output 경로를 유지하고 아래 옵션을 추가합니다.
@@ -214,7 +222,7 @@ Phase 1 checkpoint를 upstream으로 고정할 때는 `--phase1-heuristic` 대�
 사용합니다.
 
 ```bash
---phase1-checkpoint output/phase1_mixed/phase1_pair_pointer_best.pt \
+--phase1-checkpoint output/phase1_mixed_resource_pool_v1/phase1_pair_pointer_best.pt \
 --phase1-samples 32
 ```
 
@@ -239,7 +247,7 @@ python main.py phase2-run-full-workflow \
 ```bash
 python main.py phase2-run-full-workflow \
   --config config_np_100.yaml \
-  --phase1-checkpoint output/phase1_mixed/phase1_pair_pointer_best.pt \
+  --phase1-checkpoint output/phase1_mixed_resource_pool_v1/phase1_pair_pointer_best.pt \
   --phase1-samples 64 \
   --batch-machine-checkpoint output/phase2_mixed/phase2_batch_machine_policy.pt \
   --synthetic-blocks 30 \
@@ -248,8 +256,10 @@ python main.py phase2-run-full-workflow \
 
 Checkpoint 실행은 저장된 RunSpec의 score mode, batch limit, action pool,
 heuristic bank, sampling 수, Phase 1 용량비와 제약 profile이 다르면 실패합니다.
-`joint_five_bay_v1` checkpoint는 과거 `4:4:3:2:2` 용량비일 수 있으므로 재사용하지
-않으며, 현재 공개 scope는 `joint_five_bay_v3_shared_pool`입니다.
+과거 `joint_five_bay_*` checkpoint는 19차원 pair와 단일 teacher 계약을 사용하므로
+재사용하지 않습니다. 현재 공개 scope는
+`resource_pool_subproblems_v1`, feature는 `20+8`입니다. frozen checkpoint 추론은
+각 자원군에서 best-of-K를 독립 선정한 뒤 두 assignment를 합칩니다.
 
 ## 구조
 

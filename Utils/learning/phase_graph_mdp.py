@@ -38,8 +38,9 @@ PHASE1_MULTI_SERIES_BLOCK_NODE_FEATURES = [
     "cut_length_ratio",
     "bevel_quantity_ratio",
     "balancing_group_np",
-    "balancing_group_fn_fl",
     "balancing_group_nc",
+    "balancing_group_fn",
+    "balancing_group_fl",
     "wide_plate_over_4500",
     "cnt_block",
     "long_cut_over_1000",
@@ -57,8 +58,9 @@ PHASE1_MULTI_SERIES_BLOCK_BAY_EDGE_FEATURES = [
     "block_cut_length_ratio",
     "block_bevel_quantity_ratio",
     "balancing_group_np",
-    "balancing_group_fn_fl",
     "balancing_group_nc",
+    "balancing_group_fn",
+    "balancing_group_fl",
     "wide_plate_over_4500",
     "cnt_block",
     "long_cut_over_1000",
@@ -115,7 +117,7 @@ def build_phase1_block_bay_graph(
     assigned_block_ids: Iterable[str] | None = None,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
 ) -> Dict:
-    """확정된 MIXED joint 5-Bay Phase 1 graph state를 만든다.
+    """확정된 MIXED 5-Bay 부모 입력 또는 자원군 서브문제 graph state를 만든다.
 
     Nodes:
     - block nodes: one node per unassigned block.
@@ -123,6 +125,7 @@ def build_phase1_block_bay_graph(
 
     Edges:
     - block -> Bay candidate edges after confirmed hard masks.
+    - 학습에서 jobs가 자원군별로 필터링되므로 비활성 Bay로 향하는 edge는 생성되지 않는다.
     """
 
     normalized_bay_ids = _normalize_bay_ids(bay_ids)
@@ -354,7 +357,7 @@ def _phase1_multi_series_block_bay_edge(
 
 
 def _phase1_group_flags(block: Phase1Block) -> list[float]:
-    groups = ("NP", "FN_FL", "NC")
+    groups = ("NP", "NC", "FN", "FL")
     if block.balancing_group not in groups:
         print(
             "[ERROR][phase_graph_mdp._phase1_group_flags] "

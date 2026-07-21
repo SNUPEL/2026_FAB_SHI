@@ -51,11 +51,14 @@ from Phase2.merged import (
     train_phase2_batch_machine_self_labeling,
 )
 from Phase2.run_spec import build_phase2_run_spec, require_matching_phase2_run_spec
-from Phase1.pair_self_labeling import run_phase1_pair_policy_rollout, train_phase1_pair_self_labeling
+from Phase1.pair_self_labeling import (
+    run_phase1_pair_policy_resource_pool_best_of_k,
+    train_phase1_pair_self_labeling,
+)
 from Phase1.heuristics import (
     PHASE1_HEURISTIC_BANK,
     score_phase1_bay_loads,
-    run_phase1_heuristic_candidate,
+    run_phase1_resource_pool_heuristic_candidate,
 )
 # LINE-BY-LINE: `Utils.config` 모듈에서 `load_config`를 가져옵니다. 사용: 이 파일의 타입 생성/함수 호출에 직접 씁니다.
 from Utils.config import load_config
@@ -998,40 +1001,15 @@ def _phase1_agent_assignment_builder(
     bay_ids = tuple(capacity_weights)
 
     def build(jobs: Mapping[str, object], assignment_seed: int) -> Mapping[str, str]:
-        candidates = []
-        if sample_count == 1:
-            candidates.append(
-                run_phase1_pair_policy_rollout(
-                    jobs=jobs,
-                    bay_ids=bay_ids,
-                    model=model,
-                    temperature=temperature,
-                    seed=seed + assignment_seed,
-                    source="phase1_agent_greedy",
-                    selection="greedy",
-                    bay_capacity_weights=capacity_weights,
-                )
-            )
-        else:
-            for sample_index in range(1, sample_count + 1):
-                candidates.append(
-                    run_phase1_pair_policy_rollout(
-                        jobs=jobs,
-                        bay_ids=bay_ids,
-                        model=model,
-                        temperature=temperature,
-                        seed=seed + assignment_seed * 10_000 + sample_index,
-                        source=f"phase1_agent_sample_{sample_index}",
-                        selection="sample",
-                        bay_capacity_weights=capacity_weights,
-                    )
-                )
-        best = min(
-            candidates,
-            key=lambda candidate: score_phase1_bay_loads(
-                candidate.bay_loads,
-                objective_scope=objective_scope,
-            ),
+        best = run_phase1_pair_policy_resource_pool_best_of_k(
+            jobs=jobs,
+            bay_ids=bay_ids,
+            model=model,
+            sample_count=sample_count,
+            temperature=temperature,
+            seed=seed + assignment_seed * 10_000,
+            bay_capacity_weights=capacity_weights,
+            objective_scope=objective_scope,
         )
         print(
             "[CHECK][main._phase1_agent_assignment_builder] "
@@ -1145,7 +1123,7 @@ def _load_or_build_phase1_plan_for_full_flow(
         print("[ERROR][main._load_or_build_phase1_plan_for_full_flow] cause=no_phase1_bay_ids")
         raise RuntimeError("--phase1-bay-ids is required when building a Phase 1 plan")
     if phase1_heuristic:
-        candidate = run_phase1_heuristic_candidate(
+        candidate = run_phase1_resource_pool_heuristic_candidate(
             jobs=jobs,
             bay_ids=bay_ids,
             algorithm=phase1_heuristic,
@@ -1179,47 +1157,15 @@ def _load_or_build_phase1_plan_for_full_flow(
 
     model = load_phase1_pair_pointer_checkpoint(phase1_checkpoint)
     objective_scope = model.objective_scope
-    candidates = []
-    if args.phase1_samples == 1:
-        candidates.append(
-            run_phase1_pair_policy_rollout(
-                jobs=jobs,
-                bay_ids=bay_ids,
-                model=model,
-                temperature=args.phase1_temperature,
-                seed=args.seed,
-                source="phase1_agent_greedy",
-                selection="greedy",
-                bay_capacity_weights=bay_capacity_weights,
-            )
-        )
-    else:
-        for sample_index in range(args.phase1_samples):
-            sample_number = sample_index + 1
-            if sample_number == 1 or sample_number % 64 == 0 or sample_number == args.phase1_samples:
-                print(
-                    "[CHECK][main._load_or_build_phase1_plan_for_full_flow.sample_progress] "
-                    f"sample={sample_number}/{args.phase1_samples}",
-                    flush=True,
-                )
-            candidates.append(
-                run_phase1_pair_policy_rollout(
-                    jobs=jobs,
-                    bay_ids=bay_ids,
-                    model=model,
-                    temperature=args.phase1_temperature,
-                    seed=args.seed + sample_index,
-                    source=f"phase1_agent_sample_{sample_number}",
-                    selection="sample",
-                    bay_capacity_weights=bay_capacity_weights,
-                )
-            )
-    best = min(
-        candidates,
-        key=lambda candidate: score_phase1_bay_loads(
-            candidate.bay_loads,
-            objective_scope=objective_scope,
-        ),
+    best = run_phase1_pair_policy_resource_pool_best_of_k(
+        jobs=jobs,
+        bay_ids=bay_ids,
+        model=model,
+        sample_count=args.phase1_samples,
+        temperature=args.phase1_temperature,
+        seed=args.seed,
+        bay_capacity_weights=bay_capacity_weights,
+        objective_scope=objective_scope,
     )
     plan = candidate_to_phase1_plan(
         jobs=jobs,
@@ -2474,8 +2420,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=PHASE1_OBJECTIVE_SCOPES,
         default="shared_and_series",
         help=(
-            "Phase 1 lexicographic objective: shared_and_series keeps shared-pool and "
-            "series-group gaps; series_only uses series-group W/O, CUT_LTH, BV_QTY gaps only."
+            "Phase 1 lexicographic objective evaluated independently inside NP_NC and FN_FL: "
+            "shared_and_series keeps resource-pool and per-series gaps; series_only uses only "
+            "the per-series W/O, CUT_LTH, BV_QTY gap sums."
         ),
     )
     phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")

@@ -7,6 +7,7 @@ from typing import Any, Dict, Mapping, Sequence
 from Phase1.heuristics import (
     PHASE1_HEURISTIC_BANK,
     Phase1HeuristicCandidate,
+    merge_phase1_resource_pool_heuristic_candidates,
     run_phase1_heuristic_candidate,
     score_phase1_bay_loads,
 )
@@ -15,8 +16,10 @@ from Utils.phase1.multi_series_rules import (
     MULTI_SERIES_RULE_PROFILE,
     PHASE1_MULTI_SERIES_SCOPE_VERSION,
     PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    PHASE1_RESOURCE_POOL_ORDER,
     joint_phase1_bay_capacity_weights,
     normalize_phase1_objective_scope,
+    split_phase1_jobs_by_resource_pool,
 )
 from Utils.phase1.phase1_bay_balancer import _collect_blocks, _normalize_bay_ids
 
@@ -25,45 +28,101 @@ def run_phase1_graph_workflow(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str] | None = None,
     heuristic_algorithms: Sequence[str] = PHASE1_HEURISTIC_BANK,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Dict:
-    """MIXED joint 5-Bay graph에서 휴리스틱 후보 중 최선 plan을 반환한다."""
+    """두 자원군에서 휴리스틱을 독립 비교한 뒤 하나의 plan으로 병합한다."""
 
     weights = joint_phase1_bay_capacity_weights()
     normalized_bay_ids = _joint_bay_ids(bay_ids, weights)
+    normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
     graph = build_phase1_block_bay_graph(
         jobs=jobs,
         bay_ids=normalized_bay_ids,
         bay_capacity_weights=weights,
     )
-    candidates = [
-        run_phase1_heuristic_candidate(
-            jobs=jobs,
-            bay_ids=normalized_bay_ids,
-            algorithm=algorithm,
-            bay_capacity_weights=weights,
-        )
-        for algorithm in heuristic_algorithms
-    ]
-    if not candidates:
+    algorithms = tuple(heuristic_algorithms)
+    if not algorithms:
         print("[ERROR][Phase1.orchestrator.run_phase1_graph_workflow] cause=no_candidates")
         raise RuntimeError("Phase 1 workflow requires at least one candidate")
-
-    best = min(candidates, key=lambda candidate: score_phase1_bay_loads(candidate.bay_loads))
+    subproblems = split_phase1_jobs_by_resource_pool(jobs)
+    candidate_rows = []
+    selected_candidates: Dict[str, Phase1HeuristicCandidate] = {}
+    for pool_id in PHASE1_RESOURCE_POOL_ORDER:
+        pool_jobs = subproblems.get(pool_id)
+        if not pool_jobs:
+            continue
+        candidates = [
+            run_phase1_heuristic_candidate(
+                jobs=pool_jobs,
+                bay_ids=normalized_bay_ids,
+                algorithm=algorithm,
+                bay_capacity_weights=weights,
+                objective_scope=normalized_objective_scope,
+            )
+            for algorithm in algorithms
+        ]
+        best = min(
+            candidates,
+            key=lambda candidate: score_phase1_bay_loads(
+                candidate.bay_loads,
+                objective_scope=normalized_objective_scope,
+            ),
+        )
+        selected_candidates[pool_id] = best
+        candidate_rows.extend(
+            _candidate_summary(
+                candidate,
+                objective_scope=normalized_objective_scope,
+                subproblem_id=pool_id,
+            )
+            for candidate in candidates
+        )
+    merged_best = merge_phase1_resource_pool_heuristic_candidates(
+        jobs=jobs,
+        bay_ids=normalized_bay_ids,
+        bay_capacity_weights=weights,
+        selected_candidates=selected_candidates,
+    )
     return {
         "phase": "phase1",
         "graph": graph,
-        "candidate_count": len(candidates),
-        "candidates": [_candidate_summary(candidate) for candidate in candidates],
-        "best_source": best.source,
-        "best_candidate": _candidate_summary(best),
-        "plan": _candidate_to_plan(jobs, normalized_bay_ids, best),
+        "subproblem_count": len(subproblems),
+        "candidate_count": len(candidate_rows),
+        "candidates": candidate_rows,
+        "best_source": merged_best.source,
+        "best_candidate": _candidate_summary(
+            merged_best,
+            objective_scope=normalized_objective_scope,
+            subproblem_id="MERGED",
+        ),
+        "selected_sources_by_subproblem": {
+            pool_id: candidate.source
+            for pool_id, candidate in selected_candidates.items()
+        },
+        "plan": _candidate_to_plan(
+            jobs,
+            normalized_bay_ids,
+            merged_best,
+            objective_scope=normalized_objective_scope,
+        ),
     }
 
 
-def _candidate_summary(candidate: Phase1HeuristicCandidate) -> Dict:
+def _candidate_summary(
+    candidate: Phase1HeuristicCandidate,
+    *,
+    objective_scope: str,
+    subproblem_id: str,
+) -> Dict:
     return {
+        "subproblem_id": subproblem_id,
         "source": candidate.source,
-        "score": list(score_phase1_bay_loads(candidate.bay_loads)),
+        "score": list(
+            score_phase1_bay_loads(
+                candidate.bay_loads,
+                objective_scope=objective_scope,
+            )
+        ),
         "assignment_count": len(candidate.assignments),
         "assignments": dict(candidate.assignments),
         "bay_loads": candidate.bay_loads,

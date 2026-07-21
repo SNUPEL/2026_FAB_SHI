@@ -207,7 +207,7 @@ def _validate_multi_series_plan_scope(
     bay_ids: Tuple[str, ...],
     capacity_weights: Mapping[str, float],
 ) -> None:
-    """joint problem이 세 그룹과 정확한 다섯 Bay capacity를 사용하는지 검사한다."""
+    """부모 문제가 4개 계열 그룹 부분집합과 확정 5-Bay capacity를 사용하는지 검사한다."""
 
     groups = {block.balancing_group for block in blocks}
     if not groups or not groups <= set(PHASE1_BALANCING_GROUP_ORDER):

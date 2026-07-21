@@ -20,7 +20,7 @@ class MultiSeriesPhase1PlannerTest(unittest.TestCase):
                 write_multi_series_phase1_daily_plans({}, output_dir)
             self.assertEqual(list(Path(output_dir).iterdir()), [])
 
-    def test_builds_one_joint_five_bay_problem_per_day(self) -> None:
+    def test_builds_one_parent_episode_with_resource_pool_plans_per_day(self) -> None:
         blocks = pd.DataFrame(
             [
                 self._block("P1", "NP", "BLK_1", "20260316", cut=1000, width=3000),
@@ -43,7 +43,7 @@ class MultiSeriesPhase1PlannerTest(unittest.TestCase):
         self.assertEqual(result["problem_count"], 1)
         problem = result["problems"][0]
         self.assertEqual(problem["workday"], "20260311")
-        self.assertEqual(problem["balancing_groups"], ["NP", "FN_FL"])
+        self.assertEqual(problem["balancing_groups"], ["NP", "FN", "FL"])
         self.assertEqual(
             problem["bay_capacity_weights"],
             {"22": 4.0, "23": 3.0, "24": 4.0, "25": 2.0, "trans": 2.0},

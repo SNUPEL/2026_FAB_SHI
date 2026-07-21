@@ -162,7 +162,7 @@ def _load_phase1_checkpoint_payload(
             f"cause=episode_scope_contract_mismatch path={path} "
             f"checkpoint={checkpoint_scope_version} expected={expected_scope_version}"
         )
-        raise RuntimeError("Phase 1 checkpoint episode scope contract is invalid")
+        raise RuntimeError("Phase 1 checkpoint scope version mismatch")
     feature_schema = phase1_pair_feature_schema()
     if checkpoint.get("pair_feature_names") != feature_schema["pair"]:
         print(

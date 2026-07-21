@@ -30,7 +30,7 @@ from Environment.constraints.profiles import (
     default_phase2_constraint_profile,
     evaluate_phase2_action_constraints,
 )
-from Phase1.heuristics import run_phase1_heuristic_candidate
+from Phase1.heuristics import run_phase1_resource_pool_heuristic_candidate
 from Phase2.set_pointer_policy import Phase2SetPointerPolicy
 from Phase2.run_spec import (
     build_phase2_run_spec,
@@ -1962,7 +1962,7 @@ def _phase1_assignments_for_episode(
     if not phase1_bay_ids:
         print("[ERROR][Phase2.merged._phase1_assignments_for_episode] cause=no_phase1_bay_ids")
         raise RuntimeError("phase1_bay_ids are required when phase1_heuristic is used")
-    candidate = run_phase1_heuristic_candidate(
+    candidate = run_phase1_resource_pool_heuristic_candidate(
         jobs=jobs,
         bay_ids=tuple(str(bay_id) for bay_id in phase1_bay_ids),
         algorithm=phase1_heuristic,

@@ -42,12 +42,19 @@ class PhaseOrchestratorTest(unittest.TestCase):
             ],
         }
 
-    def test_phase1_workflow_returns_one_joint_five_bay_plan(self) -> None:
+    def test_phase1_workflow_selects_heuristics_independently_per_resource_pool(self) -> None:
         plan = self.phase1["plan"]
 
-        self.assertEqual(self.phase1["candidate_count"], 3)
+        self.assertEqual(self.phase1["subproblem_count"], 2)
+        self.assertEqual(self.phase1["candidate_count"], 6)
+        self.assertEqual(
+            {row["subproblem_id"] for row in self.phase1["candidates"]},
+            {"NP_NC", "FN_FL"},
+        )
+        self.assertIn("NP_NC:", self.phase1["best_source"])
+        self.assertIn("FN_FL:", self.phase1["best_source"])
         self.assertEqual(plan["rule_profile"], "multi_series_260711")
-        self.assertEqual(plan["scope_version"], "joint_five_bay_v3_shared_pool")
+        self.assertEqual(plan["scope_version"], "resource_pool_subproblems_v1")
         self.assertEqual(set(plan["bay_loads"]), {"22", "23", "24", "25", "trans"})
         self.assertEqual(plan["summary"]["job_count"], len(self.episode["jobs"]))
         self.assertEqual(plan["summary"]["assignment_count"], self.episode["block_count"])

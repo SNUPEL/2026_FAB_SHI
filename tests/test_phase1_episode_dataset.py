@@ -55,7 +55,7 @@ class Phase1EpisodeDatasetTest(unittest.TestCase):
                 all(len(str(job.block_set_id).split("::")) == 3 for job in episode["jobs"].values())
             )
 
-    def test_episode_exposes_only_joint_five_bay_contract(self) -> None:
+    def test_episode_exposes_mixed_parent_resource_pool_contract(self) -> None:
         expected_weights = {
             "22": 4.0,
             "23": 3.0,

@@ -7,6 +7,7 @@ import unittest
 from Phase1.heuristics import (
     PHASE1_HEURISTIC_BANK,
     run_phase1_heuristic_candidate,
+    run_phase1_resource_pool_heuristic_candidate,
     score_phase1_bay_loads,
 )
 from Phase1.orchestrator import candidate_to_phase1_plan
@@ -41,6 +42,23 @@ class Phase1BayBalancerTest(unittest.TestCase):
             self.assertIn(candidate.assignments["P3::FN::BLK_3"], {"25", "trans"})
             self.assertIn(candidate.assignments["P4::FL::BLK_4"], {"25", "trans"})
             self.assertEqual(set(candidate.bay_loads), set(self.bay_ids))
+
+    def test_fixed_heuristic_execution_is_explicitly_split_and_merged(self) -> None:
+        candidate = run_phase1_resource_pool_heuristic_candidate(
+            jobs=self.jobs,
+            bay_ids=self.bay_ids,
+            algorithm="wo_first_balanced",
+            bay_capacity_weights=self.weights,
+            objective_scope="series_only",
+        )
+
+        self.assertEqual(len(candidate.assignments), 4)
+        self.assertEqual(
+            candidate.source,
+            "NP_NC:wo_first_balanced|FN_FL:wo_first_balanced",
+        )
+        self.assertIn(candidate.assignments["P1::NP::BLK_1"], {"22", "23"})
+        self.assertIn(candidate.assignments["P4::FL::BLK_4"], {"25", "trans"})
 
     def test_np_long_cut_wide_plate_and_cnt_masks_exclude_bay24(self) -> None:
         jobs = {
@@ -79,7 +97,7 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(len(np_bays), 1)
         self.assertEqual(len(next(iter(np_bays))), 1)
         self.assertEqual(plan["rule_profile"], "multi_series_260711")
-        self.assertEqual(plan["scope_version"], "joint_five_bay_v3_shared_pool")
+        self.assertEqual(plan["scope_version"], "resource_pool_subproblems_v1")
         self.assertEqual(plan["score_mode"], "wo_first")
         self.assertEqual(len(plan["score"]), 6)
 
@@ -122,6 +140,19 @@ class Phase1BayBalancerTest(unittest.TestCase):
         self.assertEqual(compensated_score, (11.0, 0.0, 0.0))
         self.assertEqual(series_balanced_score, (5.5, 0.0, 0.0))
         self.assertLess(series_balanced_score, compensated_score)
+
+    def test_series_only_score_keeps_fn_and_fl_gaps_separate(self) -> None:
+        loads = self._bay_loads(
+            np_wo={"22": 0, "23": 0, "24": 0},
+            nc_wo={"22": 0, "23": 0, "24": 0},
+            fn_wo={"25": 8, "trans": 0},
+            fl_wo={"25": 0, "trans": 8},
+        )
+
+        score = score_phase1_bay_loads(loads, objective_scope="series_only")
+
+        # FN+FL totals are 8/8 and cancel, but each series is maximally imbalanced.
+        self.assertEqual(score, (8.0, 0.0, 0.0))
 
     def test_invalid_objective_scope_is_rejected(self) -> None:
         with self.assertRaises(RuntimeError):
@@ -176,21 +207,37 @@ class Phase1BayBalancerTest(unittest.TestCase):
             "extra": {"source_wk_ord_no": job_id},
         }
 
-    def _bay_loads(self, *, np_wo: dict[str, int], nc_wo: dict[str, int]) -> dict:
+    def _bay_loads(
+        self,
+        *,
+        np_wo: dict[str, int],
+        nc_wo: dict[str, int],
+        fn_wo: dict[str, int] | None = None,
+        fl_wo: dict[str, int] | None = None,
+    ) -> dict:
+        fn_wo = fn_wo or {}
+        fl_wo = fl_wo or {}
         loads = {}
         for bay_id, capacity_weight in self.weights.items():
             row = {
                 "capacity_weight": capacity_weight,
-                "wo_count": np_wo.get(bay_id, 0) + nc_wo.get(bay_id, 0),
+                "wo_count": (
+                    np_wo.get(bay_id, 0)
+                    + nc_wo.get(bay_id, 0)
+                    + fn_wo.get(bay_id, 0)
+                    + fl_wo.get(bay_id, 0)
+                ),
                 "cut_length_sum": 0.0,
                 "bevel_quantity_sum": 0,
             }
-            for group in ("np", "fn_fl", "nc"):
+            for group in ("np", "nc", "fn", "fl"):
                 row[f"group_{group}_wo_count"] = 0
                 row[f"group_{group}_cut_length_sum"] = 0.0
                 row[f"group_{group}_bevel_quantity_sum"] = 0
             row["group_np_wo_count"] = np_wo.get(bay_id, 0)
             row["group_nc_wo_count"] = nc_wo.get(bay_id, 0)
+            row["group_fn_wo_count"] = fn_wo.get(bay_id, 0)
+            row["group_fl_wo_count"] = fl_wo.get(bay_id, 0)
             loads[bay_id] = row
         return loads
 

@@ -12,14 +12,15 @@
 - Phase 2: 환경이 설비를 dispatch하고 policy가 `SELECT_WO`만 반복하는 batch-machine scheduling
 - 공통 환경: `Environment.hierarchical.CommonHierarchicalEnvironment`
 - 실행 엔진: SimPy가 아닌 custom event-driven DES
-- Phase 1 scope: `joint_five_bay_v3_shared_pool`
+- Phase 1 parent Bay scope: `22/23/24/25/trans`
+- Phase 1 learning scope: `resource_pool_subproblems_v1`
 - Phase 1 rule profile: `multi_series_260711`
 - Phase 1 score mode: `wo_first`
-- Phase 1 score: `공유 설비군 전체 W/O gap -> 계열별 W/O gap -> 공유 설비군 전체 CUT_LTH gap -> 계열별 CUT_LTH gap -> 공유 설비군 전체 BV_QTY gap -> 계열별 BV_QTY gap`
+- Phase 1 권장 score: 자원군별 `series_only W/O gap -> CUT_LTH gap -> BV_QTY gap`
 - silent fallback: 허용하지 않음
 
 과거 NP-only pair-policy, imitation, 분리 Phase 2.1/2.2/3 실행 경로와
-`joint_five_bay_v1` checkpoint는 지원하지 않는다.
+`joint_five_bay_*` checkpoint는 지원하지 않는다.
 
 ## 2. 설비 identity와 EQP 매핑
 
@@ -244,6 +245,17 @@ FN-NC 40개처럼 희소한 실적 관계는 표본 불확실성도 크다. 사�
 
 ## 5. Phase 1 계약
 
+부모 합성 episode는 NP/FN/FL/NC와 5개 Bay를 모두 포함할 수 있다. 그러나
+학습·teacher 선정은 아래 두 자원군으로 나눠 수행한다.
+
+| subproblem | 포함 계열 | 사용 Bay |
+|---|---|---|
+| `NP_NC` | NP, NC | 22, 23, 24 |
+| `FN_FL` | FN, FL | 25, trans |
+
+두 자원군은 공유하는 설비가 없으므로 후보 bank와 score를 서로 비교하지 않는다.
+하나의 policy parameter를 공유하되 각 서브문제의 teacher로 즉시 별도 update한다.
+
 ### 5.1 Action과 hard mask
 
 한 step action은 현재 feasible한 `(block-series, Bay)` edge 하나다.
@@ -262,56 +274,87 @@ NP 장척 여부는 개별 W/O 최댓값이 아니라 동일 `PROJ_NO+GYEL+BLK_N
 `CUT_LTH` 합으로 계산한다. 합계가 1,000 이상이면 그 block-series 전체의 feasible
 Bay를 22/23으로 제한한다.
 
-### 5.2 Pair feature 19차원
+### 5.2 Pair feature 20차원
 
 1. block W/O 수 비율
 2. block CUT_LTH 비율
 3. block BV_QTY 비율
 4. NP balancing-group indicator
-5. FN+FL balancing-group indicator
-6. NC balancing-group indicator
-7. NP 광폭 indicator
-8. NP CNT indicator
-9. NP 장척 indicator
-10. 후보 Bay의 현재 W/O/설비수 부하
-11. 후보 Bay의 현재 CUT_LTH/설비수 부하
-12. 후보 Bay의 현재 BV_QTY/설비수 부하
-13. 후보 Bay 설비수 비율
-14. 선택 후 공유 설비군 전체 W/O 정규화 gap
-15. 선택 후 계열별 W/O 정규화 gap
-16. 선택 후 공유 설비군 전체 CUT_LTH 정규화 gap
-17. 선택 후 계열별 CUT_LTH 정규화 gap
-18. 선택 후 공유 설비군 전체 BV_QTY 정규화 gap
-19. 선택 후 계열별 BV_QTY 정규화 gap
+5. NC balancing-group indicator
+6. FN balancing-group indicator
+7. FL balancing-group indicator
+8. NP 광폭 indicator
+9. NP CNT indicator
+10. NP 장척 indicator
+11. 후보 Bay의 현재 W/O/설비수 부하
+12. 후보 Bay의 현재 CUT_LTH/설비수 부하
+13. 후보 Bay의 현재 BV_QTY/설비수 부하
+14. 후보 Bay 설비수 비율
+15. 선택 후 활성 자원군 전체 W/O 정규화 gap
+16. 선택 후 활성 계열별 W/O 정규화 gap 합
+17. 선택 후 활성 자원군 전체 CUT_LTH 정규화 gap
+18. 선택 후 활성 계열별 CUT_LTH 정규화 gap 합
+19. 선택 후 활성 자원군 전체 BV_QTY 정규화 gap
+20. 선택 후 활성 계열별 BV_QTY 정규화 gap 합
 
 ### 5.3 Environment feature 8차원
 
 1. 전체 진행률
 2. 남은 block-series 비율
-3. 현재 공유 설비군 전체 W/O 정규화 gap
-4. 현재 계열별 W/O 정규화 gap
-5. 현재 공유 설비군 전체 CUT_LTH 정규화 gap
-6. 현재 계열별 CUT_LTH 정규화 gap
-7. 현재 공유 설비군 전체 BV_QTY 정규화 gap
-8. 현재 계열별 BV_QTY 정규화 gap
+3. 현재 활성 자원군 전체 W/O 정규화 gap
+4. 현재 활성 계열별 W/O 정규화 gap 합
+5. 현재 활성 자원군 전체 CUT_LTH 정규화 gap
+6. 현재 활성 계열별 CUT_LTH 정규화 gap 합
+7. 현재 활성 자원군 전체 BV_QTY 정규화 gap
+8. 현재 활성 계열별 BV_QTY 정규화 gap 합
 
-### 5.4 Score
+### 5.4 Score와 update
 
-각 후보 완성 계획은 먼저 물리적으로 설비를 공유하는 `NP+NC: Bay 22/23/24`와
-`FN+FL: Bay 25/trans`의 전체 부하를 Bay별 설비 수로 나눈 max-min gap으로 계산한다.
-그다음 `NP`, `FN+FL`, `NC` 계열 그룹별 gap을 계산한다. 따라서 NP hard mask로
-Bay 24가 저부하이면 NC가 Bay 24를 보완하는 계획이 먼저 선택되고, 전체 부하가 같은
-후보 사이에서는 계열별 균형을 비교한다.
+권장 `series_only` score는 각 자원군에서만 다음과 같이 계산한다.
 
 ```text
-(shared W/O gap, series W/O gap,
- shared CUT_LTH gap, series CUT_LTH gap,
- shared BV_QTY gap, series BV_QTY gap)
+NP_NC = (
+  NP W/O gap + NC W/O gap,
+  NP CUT_LTH gap + NC CUT_LTH gap,
+  NP BV_QTY gap + NC BV_QTY gap
+)
+
+FN_FL = (
+  FN W/O gap + FL W/O gap,
+  FN CUT_LTH gap + FL CUT_LTH gap,
+  FN BV_QTY gap + FL BV_QTY gap
+)
 ```
 
-비교는 weighted sum이 아닌 사전식이다. Phase 1 policy는 pair와 environment
-feature를 MLP로 encoding한 뒤 모든 feasible edge에 pointer-style score를 준다.
-후보 수와 Bay 수가 변해도 같은 가중치를 공유한다.
+각 계열 gap은 Bay 부하를 해당 Bay 설비 수로 나눈 값의 `max-min`이다. 비교는
+weighted sum이 아닌 사전식이다. `NP_NC` 후보와 `FN_FL` 후보를 하나의
+score로 합쳐 teacher를 선정하지 않는다.
+
+```text
+parent episode
+  -> NP_NC candidate bank -> teacher -> CE update
+  -> FN_FL candidate bank -> teacher -> CE update
+  -> assignments merge (audit/Phase 2 input)
+```
+
+두 서브문제가 모두 존재하면 공유 policy parameter에 update가 2번 일어난다.
+없는 서브문제는 0 score row를 만들지 않는다. `shared_and_series`는 각
+서브문제 안에서 자원군 전체 gap을 계열별 gap 앞에 추가하는 비교용 옵션이다.
+
+Phase 1 policy는 pair와 environment feature를 MLP로 encoding한 뒤 현재
+서브문제의 feasible edge에 pointer-style score를 준다. 후보 수가 변해도 같은
+가중치를 공유한다.
+
+### 5.5 Validation·checkpoint·frozen inference
+
+- validation view: `NP`, `NC`, `NP_NC`, `FN`, `FL`, `FN_FL`
+- 계열별 gap과 자원군 전체 gap을 CSV/PNG에 모두 저장한다.
+- 해당 계열이 없는 metric은 `0`이 아니라 빈값/N/A다.
+- `series_only` rank와 teacher는 계열별 gap 합만 사용한다.
+- checkpoint scope는 `resource_pool_subproblems_v1`, feature schema는 `20+8`이다.
+- 과거 19차원/단일-teacher checkpoint는 scope mismatch로 명시적으로 거절한다.
+- frozen checkpoint와 full-flow는 각 자원군에서 best-of-K를 독립 선정한 뒤
+  assignment를 합친다.
 
 ## 6. Phase 2 계약
 

@@ -10,19 +10,34 @@ from Utils.phase1.multi_series_rules import (
     apply_phase1_series_bay_mask,
     balancing_group_for_series,
     bay_capacity_weights_for_group,
+    phase1_resource_pool_for_series,
 )
 
 
 class Phase1MultiSeriesRulesTest(unittest.TestCase):
     def test_balancing_groups_and_latest_capacity_contract(self) -> None:
         self.assertEqual(balancing_group_for_series("NP"), "NP")
-        self.assertEqual(balancing_group_for_series("FN"), "FN_FL")
-        self.assertEqual(balancing_group_for_series("FL"), "FN_FL")
+        self.assertEqual(balancing_group_for_series("FN"), "FN")
+        self.assertEqual(balancing_group_for_series("FL"), "FL")
         self.assertEqual(balancing_group_for_series("NC"), "NC")
         self.assertEqual(
             bay_capacity_weights_for_group("NP"),
             {"22": 4.0, "23": 3.0, "24": 4.0},
         )
+        self.assertEqual(
+            bay_capacity_weights_for_group("FN"),
+            {"25": 2.0, "trans": 2.0},
+        )
+        self.assertEqual(
+            bay_capacity_weights_for_group("FL"),
+            {"25": 2.0, "trans": 2.0},
+        )
+
+    def test_series_are_partitioned_into_two_independent_resource_pools(self) -> None:
+        self.assertEqual(phase1_resource_pool_for_series("NP"), "NP_NC")
+        self.assertEqual(phase1_resource_pool_for_series("NC"), "NP_NC")
+        self.assertEqual(phase1_resource_pool_for_series("FN"), "FN_FL")
+        self.assertEqual(phase1_resource_pool_for_series("FL"), "FN_FL")
 
     def test_confirmed_eqp_mapping_and_planning_machine_scope(self) -> None:
         self.assertEqual(

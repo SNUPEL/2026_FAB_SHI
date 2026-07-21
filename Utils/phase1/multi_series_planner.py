@@ -17,12 +17,15 @@ from Utils.phase1.multi_series_rules import (
     balancing_group_for_series,
     joint_phase1_bay_capacity_weights,
 )
-from Phase1.heuristics import PHASE1_HEURISTIC_BANK, run_phase1_heuristic_candidate
-from Phase1.orchestrator import candidate_to_phase1_plan
+from Phase1.heuristics import PHASE1_HEURISTIC_BANK
+from Phase1.orchestrator import run_phase1_graph_workflow
 
 
 def build_multi_series_phase1_training_problem(jobs: Mapping[str, object]) -> dict:
-    """모든 계열 W/O를 유지한 하나의 다섯-Bay joint 학습 문제를 만든다."""
+    """모든 계열 W/O를 유지한 5-Bay 부모 입력을 만든다.
+
+    실제 teacher/CE 문제 분할은 Phase 1 학습·추론 경계에서 수행한다.
+    """
 
     if not isinstance(jobs, Mapping) or not jobs:
         print(
@@ -119,13 +122,12 @@ def build_multi_series_phase1_daily_plans(
     problems = []
     for workday, jobs in sorted(grouped_jobs.items()):
         capacity_weights = joint_phase1_bay_capacity_weights()
-        candidate = run_phase1_heuristic_candidate(
+        workflow = run_phase1_graph_workflow(
             jobs=jobs,
             bay_ids=tuple(capacity_weights),
-            algorithm=algorithm,
-            bay_capacity_weights=capacity_weights,
+            heuristic_algorithms=(algorithm,),
         )
-        plan = candidate_to_phase1_plan(jobs, tuple(capacity_weights), candidate)
+        plan = workflow["plan"]
         problems.append(
             {
                 "problem_id": str(workday),

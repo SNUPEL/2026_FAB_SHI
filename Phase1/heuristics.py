@@ -7,8 +7,11 @@ from typing import Dict, List, Mapping, Sequence
 
 from Utils.phase1.multi_series_rules import (
     PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    PHASE1_RESOURCE_POOL_ORDER,
     joint_phase1_bay_capacity_weights,
     normalize_phase1_objective_scope,
+    phase1_resource_pool_for_series,
+    split_phase1_jobs_by_resource_pool,
 )
 from Utils.phase1.phase1_bay_balancer import (
     Phase1Block,
@@ -39,6 +42,102 @@ class Phase1HeuristicCandidate:
     transitions: List[object]
 
 
+def run_phase1_resource_pool_heuristic_candidate(
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    algorithm: str,
+    bay_capacity_weights: Mapping[str, int | float] | None = None,
+    objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+) -> Phase1HeuristicCandidate:
+    """동일 휴리스틱을 두 자원군에 독립 적용한 뒤 완전 배정으로 병합한다."""
+
+    subproblems = split_phase1_jobs_by_resource_pool(jobs)
+    selected = {
+        pool_id: run_phase1_heuristic_candidate(
+            jobs=pool_jobs,
+            bay_ids=bay_ids,
+            algorithm=algorithm,
+            bay_capacity_weights=bay_capacity_weights,
+            objective_scope=objective_scope,
+        )
+        for pool_id, pool_jobs in subproblems.items()
+    }
+    return merge_phase1_resource_pool_heuristic_candidates(
+        jobs=jobs,
+        bay_ids=bay_ids,
+        bay_capacity_weights=bay_capacity_weights,
+        selected_candidates=selected,
+    )
+
+
+def merge_phase1_resource_pool_heuristic_candidates(
+    *,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    bay_capacity_weights: Mapping[str, int | float] | None,
+    selected_candidates: Mapping[str, Phase1HeuristicCandidate],
+) -> Phase1HeuristicCandidate:
+    """자원군별 휴리스틱 해를 누락·중복·mask 위반 없이 병합한다."""
+
+    subproblems = split_phase1_jobs_by_resource_pool(jobs)
+    if set(selected_candidates) != set(subproblems):
+        print(
+            "[ERROR][phase1_heuristics.merge_phase1_resource_pool_heuristic_candidates] "
+            f"cause=subproblem_scope_mismatch expected={sorted(subproblems)} "
+            f"actual={sorted(selected_candidates)}"
+        )
+        raise RuntimeError("Phase 1 heuristic subproblem selections are incomplete")
+    normalized_bay_ids = _normalize_bay_ids(bay_ids)
+    required_weights = joint_phase1_bay_capacity_weights()
+    weights = _normalize_bay_capacity_weights(
+        normalized_bay_ids,
+        required_weights if bay_capacity_weights is None else bay_capacity_weights,
+    )
+    blocks = _collect_blocks(jobs=jobs, bay_ids=normalized_bay_ids)
+    expected_blocks_by_pool = {
+        pool_id: {
+            block.block_set_id
+            for block in blocks
+            if phase1_resource_pool_for_series(block.family) == pool_id
+        }
+        for pool_id in subproblems
+    }
+    for pool_id, candidate in selected_candidates.items():
+        if set(candidate.assignments) != expected_blocks_by_pool[pool_id]:
+            print(
+                "[ERROR][phase1_heuristics.merge_phase1_resource_pool_heuristic_candidates] "
+                f"cause=assignment_scope_mismatch subproblem_id={pool_id} "
+                f"expected={sorted(expected_blocks_by_pool[pool_id])} "
+                f"actual={sorted(candidate.assignments)}"
+            )
+            raise RuntimeError(f"invalid Phase 1 heuristic assignments: {pool_id}")
+    bay_loads = _empty_phase1_bay_loads(normalized_bay_ids, weights)
+    assignments: Dict[str, str] = {}
+    for block in blocks:
+        pool_id = phase1_resource_pool_for_series(block.family)
+        selected_bay = selected_candidates[pool_id].assignments[block.block_set_id]
+        if selected_bay not in block.allowed_bay_ids:
+            print(
+                "[ERROR][phase1_heuristics.merge_phase1_resource_pool_heuristic_candidates] "
+                f"cause=masked_assignment block_set_id={block.block_set_id} "
+                f"bay_id={selected_bay} allowed={list(block.allowed_bay_ids)}"
+            )
+            raise RuntimeError(f"masked Phase 1 heuristic assignment: {block.block_set_id}")
+        assignments[block.block_set_id] = selected_bay
+        _add_block_load(bay_loads[selected_bay], selected_bay, block)
+    source = "|".join(
+        f"{pool_id}:{selected_candidates[pool_id].source}"
+        for pool_id in PHASE1_RESOURCE_POOL_ORDER
+        if pool_id in selected_candidates
+    )
+    return Phase1HeuristicCandidate(
+        source=source,
+        assignments=assignments,
+        bay_loads={bay_id: dict(loads) for bay_id, loads in bay_loads.items()},
+        transitions=[],
+    )
+
+
 def run_phase1_heuristic_candidate(
     jobs: Mapping[str, object],
     bay_ids: Sequence[str],
@@ -46,7 +145,7 @@ def run_phase1_heuristic_candidate(
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
 ) -> Phase1HeuristicCandidate:
-    """확정된 MIXED mask와 공유 설비군 우선 W/O-first score로 한 후보를 만든다."""
+    """한 자원군에 확정 mask와 선택한 사전식 score를 적용한다."""
 
     normalized_objective_scope = normalize_phase1_objective_scope(objective_scope)
     if algorithm not in PHASE1_HEURISTIC_BANK:

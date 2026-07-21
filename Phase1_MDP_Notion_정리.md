@@ -17,11 +17,22 @@
 
 | 구성 | Phase 1에서의 의미 |
 |---|---|
-| State | 남은 블록-계열, Bay별 누적 부하, 현재 부하 편차 |
+| State | 현재 자원군의 남은 블록-계열, Bay별 누적 부하, 현재 부하 편차 |
 | Action | `(block-series, Bay)` pair 하나 선택 |
 | Transition | 선택 블록의 부하를 Bay에 더하고 남은 후보에서 제거 |
-| Objective | Bay별 W/O 수, CUT_LTH, BV_QTY 부하평준화 |
-| Termination | 모든 블록-계열이 한 Bay에 배정됨 |
+| Objective | 자원군 내 계열별 W/O 수, CUT_LTH, BV_QTY 부하평준화 |
+| Termination | 현재 자원군의 모든 블록-계열이 배정됨 |
+
+한 물리 episode는 설비를 공유하는 두 서브문제로 나뉜다.
+
+| 서브문제 | 계열 | Bay |
+|---|---|---|
+| `NP_NC` | NP, NC | 22, 23, 24 |
+| `FN_FL` | FN, FL | 25, trans |
+
+같은 policy parameter를 사용하지만 후보 bank, teacher, CE update는 서브문제별로
+독립한다. 한쪽 자원군이 episode에 없으면 그 서브문제는 `0`으로 채우지
+않고 아예 생성하지 않는다.
 
 ## 3. Action
 
@@ -64,10 +75,12 @@ block-series CUT_LTH = sum(W/O CUT_LTH)
 
 | 구분 | 차원 | 내용 |
 |---|---:|---|
-| Pair feature | 19 | 블록 부하, 계열 그룹, 제약 여부, Bay 현재 부하, 배정 후 예상 gap |
+| Pair feature | 20 | 블록 부하, NP/NC/FN/FL flag, 제약 여부, Bay 현재 부하, 배정 후 예상 gap |
 | Environment feature | 8 | 진행률, 남은 블록 비율, 현재 W/O·CUT·BV gap |
 
-현재 정책은 graph의 feasible edge를 19차원 pair로 표현하는 **MLP 기반 Pointer Policy**다. GNN message passing은 사용하지 않는다.
+현재 정책은 graph의 feasible edge를 20차원 pair로 표현하는 **MLP 기반 Pointer
+Policy**다. GNN message passing은 사용하지 않는다. 현재 서브문제와 관계없는
+Bay edge는 hard mask 다음 후보 matrix에 들어오지 않는다.
 
 ## 6. 설비 수 반영
 
@@ -81,31 +94,56 @@ block-series CUT_LTH = sum(W/O CUT_LTH)
 
 평준화는 Bay 총량이 아니라 `Bay 부하 / 설비 수`를 기준으로 계산한다. 따라서 Bay 22/23/24의 W/O가 `40/30/40`이면 설비당 W/O는 모두 10으로 gap은 0이다.
 
-## 7. 사전식 목적함수
+## 7. 자원군별 사전식 목적함수
 
 ```text
-1. 공유 설비군 전체 W/O gap
-2. 계열별 W/O gap
-3. 공유 설비군 전체 CUT_LTH gap
-4. 계열별 CUT_LTH gap
-5. 공유 설비군 전체 BV_QTY gap
-6. 계열별 BV_QTY gap
+NP_NC score = (
+  NP W/O gap + NC W/O gap,
+  NP CUT_LTH gap + NC CUT_LTH gap,
+  NP BV_QTY gap + NC BV_QTY gap
+)
+
+FN_FL score = (
+  FN W/O gap + FL W/O gap,
+  FN CUT_LTH gap + FL CUT_LTH gap,
+  FN BV_QTY gap + FL BV_QTY gap
+)
 ```
 
-공유 설비군은 `22+23+24`와 `25+trans`이며, 계열 평준화 그룹은 `NP`, `FN+FL`, `NC`다. 앞의 항목이 다르면 뒤의 항목은 비교하지 않는다.
+각 gap은 해당 계열의 Bay별 부하를 Bay 설비 수로 나눈 뒤 `max-min`으로
+계산한다. 예를 들어 `NP_NC` teacher 비교에 FN/FL gap은 사용하지 않는다.
+두 score의 합은 parent report에 기록할 수 있지만 teacher 선정에는 사용하지 않는다.
+
+`shared_and_series`를 선택하면 각 서브문제 안에서만 공유 자원군 전체 gap을
+계열별 gap 앞에 추가한다. 기본 권장 학습은 `--objective-scope series_only`다.
 
 ## 8. Self-labeling 학습
 
 ```text
-합성 episode 생성
-→ Agent greedy/sampling + 휴리스틱 후보 생성
-→ 완성된 배정안의 사전식 score 비교
-→ 최적 후보의 action sequence를 pseudo-label로 선택
-→ Cross Entropy로 정책 학습
+부모 합성 episode 생성
+→ NP_NC / FN_FL로 분할
+→ NP_NC Agent greedy/sampling + 휴리스틱 비교
+→ NP_NC teacher sequence로 CE update
+→ FN_FL Agent greedy/sampling + 휴리스틱 비교
+→ FN_FL teacher sequence로 CE update
+→ 두 assignment를 하나의 parent plan으로 병합
 ```
 
-`--rollout-samples 64`는 `greedy 1개 + sampling 63개`를 의미한다. 여기에 W/O-first, CUT-first, Bevel-first 휴리스틱 3개를 추가해 가장 좋은 완성 해를 학습한다.
+`--rollout-samples 64`는 **각 서브문제당** `greedy 1개 + sampling 63개`를
+의미한다. 여기에 W/O-first, CUT-first, Bevel-first 휴리스틱 3개를 각각
+추가한다. 하나의 자원군만 있는 episode는 update 1번, 두 자원군이 모두 있는
+episode는 같은 policy에 update 2번을 수행한다.
 
-## 9. Phase 2 연결
+## 9. Validation
 
-Phase 1이 `block-series -> Bay`를 결정하면 해당 블록-계열의 모든 W/O가 같은 Bay를 상속한다. Phase 2는 이 W/O들을 Bay 내부 설비와 batch에 배정한다.
+하나의 holdout parent를 `NP`, `NC`, `NP+NC`, `FN`, `FL`, `FN+FL` view로
+나눠 평가한다. 없는 계열의 gap은 `0`으로 저장하지 않고 CSV에서 빈값/N/A로
+남긴다. 계열별 gap과 자원군 전체 gap은 진단용으로 모두 저장하지만,
+`series_only` teacher/rank는 위 3개 계열별 gap 합만 사용한다.
+
+## 10. Phase 2 연결
+
+Phase 1이 두 자원군의 assignment를 합쳐 `block-series -> Bay`를 확정하면 해당
+블록-계열의 모든 W/O가 같은 Bay를 상속한다. Phase 2는 이 W/O들을 Bay
+내부 설비와 batch에 배정한다. frozen Phase 1 checkpoint도 각 자원군에서
+best-of-K를 별도로 선정한 뒤 병합한다.

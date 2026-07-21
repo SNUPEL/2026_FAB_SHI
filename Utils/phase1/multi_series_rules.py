@@ -10,13 +10,28 @@ from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_B
 
 
 MULTI_SERIES_RULE_PROFILE = "multi_series_260711"
-PHASE1_MULTI_SERIES_SCOPE_VERSION = "joint_five_bay_v3_shared_pool"
+PHASE1_MULTI_SERIES_SCOPE_VERSION = "resource_pool_subproblems_v1"
 
 SERIES_BALANCING_GROUP = {
     "NP": "NP",
-    "FN": "FN_FL",
-    "FL": "FN_FL",
+    "FN": "FN",
+    "FL": "FL",
     "NC": "NC",
+}
+
+PHASE1_RESOURCE_POOL_ORDER = ("NP_NC", "FN_FL")
+PHASE1_RESOURCE_POOL_SERIES = {
+    "NP_NC": ("NP", "NC"),
+    "FN_FL": ("FN", "FL"),
+}
+PHASE1_RESOURCE_POOL_BAYS = {
+    "NP_NC": ("22", "23", "24"),
+    "FN_FL": ("25", "trans"),
+}
+PHASE1_RESOURCE_POOL_BY_SERIES = {
+    series: pool_id
+    for pool_id, series_values in PHASE1_RESOURCE_POOL_SERIES.items()
+    for series in series_values
 }
 
 SERIES_ALLOWED_BAYS = {
@@ -36,13 +51,17 @@ GROUP_BAY_CAPACITY_WEIGHTS = {
         bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
         for bay_id in ("22", "23", "24")
     },
-    "FN_FL": {
+    "FN": {
+        bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
+        for bay_id in ("25", "trans")
+    },
+    "FL": {
         bay_id: float(len(MIXED_PLANNING_MACHINE_IDS_BY_BAY[bay_id]))
         for bay_id in ("25", "trans")
     },
 }
 
-PHASE1_BALANCING_GROUP_ORDER = ("NP", "FN_FL", "NC")
+PHASE1_BALANCING_GROUP_ORDER = ("NP", "NC", "FN", "FL")
 JOINT_PHASE1_BAY_CAPACITY_WEIGHTS = {
     bay_id: float(len(machine_ids))
     for bay_id, machine_ids in MIXED_PLANNING_MACHINE_IDS_BY_BAY.items()
@@ -108,10 +127,46 @@ def phase1_objective_field_names(objective_scope: object) -> tuple[str, ...]:
 
 
 def balancing_group_for_series(series: object) -> str:
-    """NP, FN+FL, NC 평준화 그룹을 반환한다."""
+    """NP, NC, FN, FL 계열별 평준화 그룹을 반환한다."""
 
     normalized = _normalize_series(series)
     return SERIES_BALANCING_GROUP[normalized]
+
+
+def phase1_resource_pool_for_series(series: object) -> str:
+    """Phase 1 계열이 공유하는 절단 Bay 자원군을 반환한다."""
+
+    normalized = _normalize_series(series)
+    return PHASE1_RESOURCE_POOL_BY_SERIES[normalized]
+
+
+def split_phase1_jobs_by_resource_pool(
+    jobs: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    """W/O를 설비를 공유하는 `NP_NC`와 `FN_FL` 문제로 엄격히 분리한다."""
+
+    if not jobs:
+        print("[ERROR][multi_series_rules.split_phase1_jobs_by_resource_pool] cause=no_jobs")
+        raise RuntimeError("Phase 1 resource-pool split requires at least one W/O")
+    partitioned: dict[str, dict[str, object]] = {
+        pool_id: {} for pool_id in PHASE1_RESOURCE_POOL_ORDER
+    }
+    for job_key, job in jobs.items():
+        family = job.get("family") if isinstance(job, Mapping) else getattr(job, "family", None)
+        try:
+            pool_id = phase1_resource_pool_for_series(family)
+        except RuntimeError as exc:
+            print(
+                "[ERROR][multi_series_rules.split_phase1_jobs_by_resource_pool] "
+                f"cause=unsupported_series job_key={job_key} family={family}"
+            )
+            raise RuntimeError(f"unsupported Phase 1 series: {family}") from exc
+        partitioned[pool_id][str(job_key)] = job
+    return {
+        pool_id: partitioned[pool_id]
+        for pool_id in PHASE1_RESOURCE_POOL_ORDER
+        if partitioned[pool_id]
+    }
 
 
 def bay_capacity_weights_for_group(group: object) -> dict[str, float]:
