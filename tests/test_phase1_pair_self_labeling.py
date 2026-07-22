@@ -135,6 +135,9 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
                 .splitlines()
                 if line.strip()
             ]
+            checkpoint_solution = (
+                Path(temp_dir) / "checkpoints" / "solutions" / "episode_00001"
+            )
 
             self.assertTrue(checkpoint.is_file())
             self.assertTrue((Path(temp_dir) / "metrics.csv").is_file())
@@ -150,6 +153,27 @@ class Phase1PairSelfLabelingTest(unittest.TestCase):
             self.assertEqual(loaded.pair_feature_dim, 20)
             self.assertEqual(loaded.env_feature_dim, 8)
             self.assertEqual(loaded.objective_scope, "shared_and_series")
+            for role in ("teacher_best", "agent_best"):
+                role_dir = checkpoint_solution / role
+                self.assertTrue((role_dir / "phase1_block_bay_plan.json").is_file())
+                self.assertTrue((role_dir / "phase1_block_assignments.csv").is_file())
+                self.assertTrue((role_dir / "phase1_bay_loads.csv").is_file())
+                plan = json.loads(
+                    (role_dir / "phase1_block_bay_plan.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(plan["checkpoint_episode"], 1)
+                self.assertEqual(plan["solution_role"], role)
+                self.assertEqual(plan["summary"]["assignment_count"], 4)
+            agent_plan = json.loads(
+                (checkpoint_solution / "agent_best" / "phase1_block_bay_plan.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertTrue(
+                all(
+                    source_part.split(":", 1)[1].startswith("agent_")
+                    for source_part in agent_plan["algorithm"].split("|")
+                )
+            )
             expected_bays = {
                 "NP_NC": {"22", "23", "24"},
                 "FN_FL": {"25", "trans"},

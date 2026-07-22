@@ -481,6 +481,19 @@ def train_phase2_batch_machine_self_labeling(
                 "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
                 f"checkpoint_saved={checkpoint_file}"
             )
+            agent_best = _combine_agent_subproblem_bests(
+                candidates=candidates,
+                machines=machines,
+                max_wo_count=max_wo_count,
+                max_length_sum=max_length_sum,
+                score_mode=score_mode,
+            )
+            _write_phase2_checkpoint_solutions(
+                checkpoint_dir=checkpoint_dir,
+                episode=episode,
+                teacher_best=best,
+                agent_best=agent_best,
+            )
 
     if last_best is None:
         print("[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] cause=no_best_candidate")
@@ -533,6 +546,7 @@ def train_phase2_batch_machine_self_labeling(
         "best_assignment_csv": str(best_assignment_csv),
         "checkpoint_path": str(checkpoint_path),
         "checkpoint_dir": str(checkpoint_dir) if checkpoint_every > 0 else "",
+        "checkpoint_solution_dir": str(checkpoint_dir / "solutions") if checkpoint_every > 0 else "",
         "checkpoint_every": checkpoint_every,
         "summary_json": str(summary_json),
         "heuristic_algorithms": list(heuristic_algorithms),
@@ -1104,6 +1118,46 @@ def _combine_subproblem_bests(
         constraint_audit_rows=constraint_audit_rows,
         score_tuple=score_tuple,
         score_details=score_details,
+    )
+
+
+def _combine_agent_subproblem_bests(
+    *,
+    candidates: Sequence[Phase2BatchMachineCandidate],
+    machines: Mapping[str, object],
+    max_wo_count: int,
+    max_length_sum: float,
+    score_mode: str,
+) -> Phase2BatchMachineCandidate:
+    """Bay별 agent 후보 중 최고를 골라 하나의 전체 해로 병합한다."""
+
+    bay_ids = sorted({candidate.subproblem_bay_id for candidate in candidates})
+    if not bay_ids or "" in bay_ids:
+        print(
+            "[ERROR][Phase2.merged._combine_agent_subproblem_bests] "
+            f"cause=missing_subproblem_bay candidate_count={len(candidates)}"
+        )
+        raise RuntimeError("Phase 2 agent checkpoint solution requires Bay-tagged candidates")
+    agent_bests: List[Phase2BatchMachineCandidate] = []
+    for bay_id in bay_ids:
+        agent_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.subproblem_bay_id == bay_id and _is_agent_source(candidate.source)
+        ]
+        if not agent_candidates:
+            print(
+                "[ERROR][Phase2.merged._combine_agent_subproblem_bests] "
+                f"cause=no_agent_candidate bay_id={bay_id}"
+            )
+            raise RuntimeError(f"Phase 2 Bay has no agent candidate: {bay_id}")
+        agent_bests.append(min(agent_candidates, key=_candidate_sort_key))
+    return _combine_subproblem_bests(
+        bay_bests=agent_bests,
+        machines=machines,
+        max_wo_count=max_wo_count,
+        max_length_sum=max_length_sum,
+        score_mode=score_mode,
     )
 
 
@@ -2776,6 +2830,46 @@ def _write_assignments(path: Path, candidate: Phase2BatchMachineCandidate) -> No
         for job_id, machine_id in sorted(candidate.machine_assignments.items())
     ]
     _write_rows(path, rows, ["source", "job_id", "machine_id"])
+
+
+def _write_phase2_checkpoint_solutions(
+    *,
+    checkpoint_dir: Path,
+    episode: int,
+    teacher_best: Phase2BatchMachineCandidate,
+    agent_best: Phase2BatchMachineCandidate,
+) -> None:
+    """Checkpoint episode의 teacher/agent 전체 설비·batch 해를 저장한다."""
+
+    solution_root = checkpoint_dir / "solutions" / f"episode_{episode:05d}"
+    for role, candidate in (("teacher_best", teacher_best), ("agent_best", agent_best)):
+        role_dir = solution_root / role
+        role_dir.mkdir(parents=True, exist_ok=True)
+        _write_assignments(role_dir / "machine_assignment.csv", candidate)
+        _write_dict_rows(role_dir / "batches.csv", candidate.batches)
+        _write_dict_rows(role_dir / "timeline.csv", candidate.timeline)
+        solution = {
+            "phase": "phase2_batch_machine",
+            "checkpoint_episode": episode,
+            "solution_role": role,
+            "source": candidate.source,
+            "score": list(candidate.score_tuple),
+            "score_details": candidate.score_details,
+            "machine_assignments": candidate.machine_assignments,
+            "machine_loads": candidate.machine_loads,
+            "batches": candidate.batches,
+            "timeline": candidate.timeline,
+        }
+        solution_path = role_dir / "solution.json"
+        solution_path.write_text(
+            json.dumps(solution, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(
+            "[CHECK][Phase2.merged._write_phase2_checkpoint_solutions] "
+            f"episode={episode} role={role} source={candidate.source} "
+            f"solution_json={solution_path}"
+        )
 
 
 def _write_dict_rows(path: Path, rows: Sequence[Mapping]) -> None:

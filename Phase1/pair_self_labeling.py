@@ -36,6 +36,7 @@ from Environment.hierarchical import (
 )
 # LINE-BY-LINE: 직접 pair action을 scoring하는 pointer network입니다. 입력: pair feature matrix + env feature vector.
 from Phase1.pointer_policy import Phase1PairPointerPolicy
+from Phase1.orchestrator import candidate_to_phase1_plan
 # LINE-BY-LINE: Phase 1 Bay 부하 계산과 목적함수 점수 계산에 필요한 기존 balancer 함수/타입입니다.
 from Utils.phase1.phase1_bay_balancer import (
     Phase1Block,
@@ -47,6 +48,7 @@ from Utils.phase1.phase1_bay_balancer import (
     _normalize_bay_ids,
     _require_capacity_weight,
     _validate_multi_series_plan_scope,
+    write_phase1_bay_plan,
 )
 # LINE-BY-LINE: 가변 Bay 수를 지원하는 graph edge feature schema와 graph builder입니다. 고정 `bay_22_flag`를 대체합니다.
 from Utils.learning.phase_graph_mdp import (
@@ -641,8 +643,10 @@ def train_phase1_pair_self_labeling(
         hard_case_corr_before = metadata.get("hard_case_corr_steel_cut_before", "")
         # LINE-BY-LINE: hard-case 적용 후 corr(STL_QTY,CUT_LTH)입니다. 일반 episode는 빈 값입니다.
         hard_case_corr_after = metadata.get("hard_case_corr_steel_cut_after", "")
+        checkpoint_due = episode % checkpoint_every == 0
         subproblems = split_phase1_jobs_by_resource_pool(jobs)
         selected_subproblems: List[tuple[str, Phase1PairCandidate]] = []
+        selected_agent_subproblems: List[tuple[str, Phase1PairCandidate]] = []
         subproblem_losses: List[float] = []
         total_candidate_count = 0
         for pool_index, pool_id in enumerate(PHASE1_RESOURCE_POOL_ORDER):
@@ -686,6 +690,21 @@ def train_phase1_pair_self_labeling(
                 for candidate in candidates
             }
             best = min(candidates, key=lambda candidate: candidate_scores[id(candidate)][2])
+            if checkpoint_due:
+                agent_candidates = [
+                    candidate for candidate in candidates if _is_agent_source(candidate.source)
+                ]
+                if not agent_candidates:
+                    print(
+                        "[ERROR][phase1_pair_self_labeling.train] "
+                        f"cause=no_agent_candidate episode={episode} subproblem_id={pool_id}"
+                    )
+                    raise RuntimeError("Phase 1 checkpoint solution requires an agent candidate")
+                agent_best = min(
+                    agent_candidates,
+                    key=lambda candidate: candidate_scores[id(candidate)][2],
+                )
+                selected_agent_subproblems.append((pool_id, agent_best))
             loss = _teacher_forcing_update(model, optimizer, best.transitions)
             score, phase2_feedback_score, learning_score = candidate_scores[id(best)]
             selected_subproblems.append((pool_id, best))
@@ -747,6 +766,16 @@ def train_phase1_pair_self_labeling(
             bay_capacity_weights=episode_capacity_weights,
             selected=selected_subproblems,
         )
+        combined_agent_best = (
+            _merge_phase1_resource_pool_candidates(
+                jobs=jobs,
+                bay_ids=episode_bay_ids,
+                bay_capacity_weights=episode_capacity_weights,
+                selected=selected_agent_subproblems,
+            )
+            if checkpoint_due
+            else None
+        )
         loss = sum(subproblem_losses) / len(subproblem_losses)
         score = _score_bay_loads(combined_best.bay_loads, normalized_objective_scope)
         phase2_feedback_score = _candidate_phase2_feedback_score(
@@ -794,7 +823,7 @@ def train_phase1_pair_self_labeling(
             f"learning_score={learning_score} phase1_score={score}"
         )
         # LINE-BY-LINE: checkpoint interval에 도달하면 주기 checkpoint를 저장합니다.
-        if episode % checkpoint_every == 0:
+        if checkpoint_due:
             _save_pair_checkpoint(
                 model=model,
                 optimizer=optimizer,
@@ -804,6 +833,21 @@ def train_phase1_pair_self_labeling(
                 validation_score=None,
                 phase2_feedback_contract=normalized_feedback_contract,
                 feature_schema=feature_schema,
+            )
+            if combined_agent_best is None:
+                print(
+                    "[ERROR][phase1_pair_self_labeling.train] "
+                    f"cause=missing_checkpoint_agent_solution episode={episode}"
+                )
+                raise RuntimeError("Phase 1 checkpoint agent solution was not built")
+            _write_phase1_checkpoint_solutions(
+                checkpoint_dir=checkpoint_dir,
+                episode=episode,
+                jobs=jobs,
+                bay_ids=episode_bay_ids,
+                objective_scope=normalized_objective_scope,
+                teacher_best=combined_best,
+                agent_best=combined_agent_best,
             )
         # LINE-BY-LINE: validation factory가 있고 validation interval에 도달하면 holdout 검증을 실행합니다.
         if validation_episode_factory is not None and episode % validation_every == 0:
@@ -893,6 +937,7 @@ def train_phase1_pair_self_labeling(
         "subproblem_metrics_csv": str(output_path / "subproblem_metrics.csv"),
         "candidate_summary_csv": str(output_path / "candidate_summary.csv"),
         "best_action_table_jsonl": str(output_path / "best_action_table.jsonl"),
+        "checkpoint_solution_dir": str(checkpoint_dir / "solutions"),
         "validation_summary_csv": str(output_path / "validation_summary.csv") if validation_rows else "",
         "validation_candidate_summary_csv": str(output_path / "validation_candidate_summary.csv") if validation_candidate_rows else "",
         **validation_plot_paths,
@@ -1462,6 +1507,36 @@ def _is_agent_source(source: str) -> bool:
     """Return True for policy-generated validation candidates."""
 
     return source == "agent_greedy" or source.startswith("agent_sample_")
+
+
+def _write_phase1_checkpoint_solutions(
+    *,
+    checkpoint_dir: Path,
+    episode: int,
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    objective_scope: str,
+    teacher_best: Phase1PairCandidate,
+    agent_best: Phase1PairCandidate,
+) -> None:
+    """Checkpoint episode의 teacher/agent 전체 Bay 배정 해를 저장한다."""
+
+    solution_root = checkpoint_dir / "solutions" / f"episode_{episode:05d}"
+    for role, candidate in (("teacher_best", teacher_best), ("agent_best", agent_best)):
+        plan = candidate_to_phase1_plan(
+            jobs=jobs,
+            bay_ids=bay_ids,
+            candidate=candidate,
+            objective_scope=objective_scope,
+        )
+        plan["checkpoint_episode"] = episode
+        plan["solution_role"] = role
+        paths = write_phase1_bay_plan(plan, solution_root / role)
+        print(
+            "[CHECK][phase1_pair_self_labeling._write_phase1_checkpoint_solutions] "
+            f"episode={episode} role={role} source={candidate.source} "
+            f"plan_json={paths['json']}"
+        )
 
 
 def _save_pair_checkpoint(

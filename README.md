@@ -189,6 +189,15 @@ python main.py phase1-train-pair-self-labeling \
   --output-dir output/phase1_mixed_resource_pool_v1
 ```
 
+기본 명령에 포함된 `--checkpoint-every 100`은 100 episode마다 모델과 해를 함께
+저장합니다. `teacher_best`는
+휴리스틱+에이전트 전체 후보 중 최고이고, `agent_best`는 greedy+sampling
+에이전트 후보만 비교한 최고 해입니다.
+
+```text
+output/phase1_mixed_resource_pool_v1/checkpoints/solutions/episode_00100/{teacher_best,agent_best}/
+```
+
 재개 학습은 같은 인자와 output 경로를 유지하고 아래 옵션을 추가합니다.
 
 ```bash
@@ -217,6 +226,11 @@ python main.py phase2-train-batch-machine-self-labeling \
   --device cuda \
   --output-dir output/phase2_mixed
 ```
+
+Phase 2 기본 명령의 `--checkpoint-every 100`도 같은 간격에
+`output/phase2_mixed/checkpoints/solutions/episode_00100/{teacher_best,agent_best}/`
+아래로 `machine_assignment.csv`, `batches.csv`, `timeline.csv`, `solution.json`을
+저장합니다.
 
 Phase 1 checkpoint를 upstream으로 고정할 때는 `--phase1-heuristic` 대신 다음을
 사용합니다.

@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import csv
+import json
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
-from Phase2.merged import _lookahead_makespan_lower_bound, run_phase2_batch_machine_candidate
+from Phase2.merged import (
+    _lookahead_makespan_lower_bound,
+    build_mixed_phase2_training_machines,
+    run_phase2_batch_machine_candidate,
+    train_phase2_batch_machine_self_labeling,
+)
 from Phase2.state import PHASE2_BAY_CONTEXT_FEATURE_NAMES
 
 
@@ -138,6 +147,85 @@ class Phase2WoOnlyPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(lower_bound, 37.5)
+
+    def test_checkpoint_interval_writes_teacher_and_agent_solutions(self) -> None:
+        checkpoint_jobs = {
+            f"WO_{index}": SimpleNamespace(
+                job_id=f"WO_{index}",
+                block_set_id=f"P1::NP::BLK_{index}",
+                family="NP",
+                plate_length=10_000.0,
+                thickness=13.0,
+                cut_length=100.0 * index,
+                bevel_quantity=index,
+                cut_bay=None,
+                allowed_bay_ids=(),
+                allowed_machine_ids=(),
+                prohibited_machine_ids=(),
+                base_stage_minutes={"cut": 10.0 * index},
+            )
+            for index in range(1, 21)
+        }
+        checkpoint_assignments = {
+            job.block_set_id: "22" for job in checkpoint_jobs.values()
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            train_phase2_batch_machine_self_labeling(
+                jobs=checkpoint_jobs,
+                machines=build_mixed_phase2_training_machines(),
+                phase1_assignments=checkpoint_assignments,
+                output_dir=temp_dir,
+                episodes=1,
+                hidden_dim=8,
+                heuristic_algorithms=("lpt_batch",),
+                rollout_samples=1,
+                validation_episodes=0,
+                checkpoint_every=1,
+                device="cpu",
+            )
+            solution_root = (
+                Path(temp_dir) / "checkpoints" / "solutions" / "episode_00001"
+            )
+            for role in ("teacher_best", "agent_best"):
+                role_dir = solution_root / role
+                for name in (
+                    "solution.json",
+                    "machine_assignment.csv",
+                    "batches.csv",
+                    "timeline.csv",
+                ):
+                    self.assertTrue((role_dir / name).is_file())
+                solution = json.loads(
+                    (role_dir / "solution.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(solution["checkpoint_episode"], 1)
+                self.assertEqual(solution["solution_role"], role)
+                self.assertEqual(
+                    len(solution["machine_assignments"]), len(checkpoint_jobs)
+                )
+                with (role_dir / "machine_assignment.csv").open(
+                    "r", encoding="utf-8", newline=""
+                ) as file:
+                    self.assertEqual(
+                        len(list(csv.DictReader(file))), len(checkpoint_jobs)
+                    )
+            teacher_solution = json.loads(
+                (solution_root / "teacher_best" / "solution.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            agent_solution = json.loads(
+                (solution_root / "agent_best" / "solution.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(teacher_solution["source"], "22:lpt_batch")
+            self.assertTrue(
+                all(
+                    source_part.split(":", 1)[1].startswith("agent_")
+                    for source_part in agent_solution["source"].split("|")
+                )
+            )
 
     def _candidate(self):
         return run_phase2_batch_machine_candidate(

@@ -156,6 +156,15 @@ W/O·CUT·BV gap 18개 column이 있다. 해당 계열이 없는 값은 0이 아
 parent loss는 해당 episode에서 수행한 1~2개 subproblem loss의 평균이며, teacher를
 다시 통합 비교한 값이 아니다.
 
+위의 처음/재개 기본 명령에 포함된 `--checkpoint-every 100`은 모델 저장과 해 저장을
+동시에 제어한다. 별도 해 저장 옵션은 필요 없다. 예를 들어
+`--output-dir output/phase1_mixed_resource_pool_v1`이면
+`output/phase1_mixed_resource_pool_v1/checkpoints/solutions/episode_00100/` 아래에
+`teacher_best`와 `agent_best`를 각각 저장한다. teacher는 자원군별 전체
+후보 bank의 최고 해를 병합하고, agent는 같은 bank의 `agent_greedy`+
+`agent_sample_*`만 비교해 병합한다. 각 디렉터리에 plan JSON, block
+assignment CSV, Bay load CSV가 있다.
+
 ## 5. Phase 2 비교 실험 설계
 
 Phase 2는 매 episode마다 MIXED 문제를 생성하고 Phase 1 결과로 block-series를 Bay에
@@ -206,6 +215,12 @@ spt_batch
 lpt_batch
 agent_greedy + agent_sample_*
 ```
+
+아래 Phase 2 기본 명령에 포함된 `--checkpoint-every 100`은 모델과 해를 100
+episode마다 함께 저장한다. Bay별 teacher best와 agent-only best를 각각 병합하며,
+예를 들어 `--output-dir output/phase2_upstream_wo`이면 각 해는
+`output/phase2_upstream_wo/checkpoints/solutions/episode_00100/{teacher_best,agent_best}/`의
+`solution.json`, `machine_assignment.csv`, `batches.csv`, `timeline.csv`로 저장된다.
 
 ### 5.1 W/O 우선 Phase 1 휴리스틱 고정
 
