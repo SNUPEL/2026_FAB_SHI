@@ -1,0 +1,35 @@
+# MIXED(NP/FN/FL/NC) Phase 1/2 학습 전용 config.
+#
+# 이 파일이 제공하는 것은 Phase 2 제약 profile 하나뿐이다.
+# 학습 입력 데이터는 config가 아니라 Utils/data/multi_series_generation_profile.json
+# (실적 원천: input/260724_절단WO_데이터_None.xlsx, input/260724_절단블록_데이터_None.xlsx)에서 온다.
+#
+# 공장 topology 역시 config가 아니라 코드에 있다:
+#   Utils/data/multi_series_cutting_data.py  MIXED_PLANNING_MACHINE_IDS_BY_BAY (5 Bay / 15대)
+#   Phase2/merged.py                         build_mixed_phase2_training_machines
+
+paths: {}
+
+constraints:
+  profiles:
+    phase2:
+      categories:
+        machine: true
+        capacity: true
+        downstream: false
+        priority: false
+        preference: false
+        layout: true
+        calendar: false
+      hard_enabled:
+        machine_enabled: true
+        machine_bay_consistency: true
+        block_set_same_bay: true
+        machine_single_processing: true
+        batch_wo_count_limit: true
+        batch_length_sum_limit: true
+        family_eligibility: true
+        thickness_range: false
+        table_length_limit: false
+      soft_enabled: {}
+      soft_penalty_weights: {}

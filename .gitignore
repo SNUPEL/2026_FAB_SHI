@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor / local tooling
+.idea/
+.vscode/
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Generated outputs
+/output/
+/tmp/
+/notebooks/*.png
+/codex-local-skills.tar.gz
+/phase1_4method_comparison.csv
