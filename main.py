@@ -39,6 +39,7 @@ from Phase2.feedback import (
 from Phase2.merged import (
     PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK,
     build_mixed_phase2_training_machines,
+    create_phase2_candidate_executor,
     phase2_score_field_names,
     train_phase2_batch_machine_self_labeling,
 )
@@ -400,38 +401,46 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
         _validation_episode_jobs if args.validation_episodes > 0 else None
     )
 
-    summary = train_phase2_batch_machine_self_labeling(
-        jobs=training_jobs,
-        machines=training_machines,
-        phase1_assignments={},
-        output_dir=args.output_dir,
-        episodes=args.episodes,
-        lr=args.lr,
-        hidden_dim=args.hidden_dim,
-        seed=args.seed,
-        heuristic_algorithms=tuple(parse_csv_argument(args.heuristic_algorithms, default=())),
-        rollout_samples=args.rollout_samples,
-        validation_rollout_samples=validation_rollout_samples,
-        validation_every=args.validation_every,
-        validation_episodes=args.validation_episodes,
-        checkpoint_every=args.checkpoint_every,
-        max_wo_count=args.max_wo_count,
-        max_length_sum=args.max_length_sum,
-        action_pool_limit=args.action_pool_limit,
-        episode_jobs=None,
-        episode_job_factory=episode_job_factory,
-        validation_episode_jobs=None,
-        validation_episode_job_factory=validation_episode_job_factory,
-        phase1_heuristic=phase1_heuristic,
-        phase1_bay_ids=phase1_bay_ids,
-        phase1_assignment_builder=phase1_assignment_builder,
-        phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-        device=args.device,
-        write_candidate_summary=args.write_candidate_summary,
-        score_mode=args.phase2_score_mode,
-        resume_checkpoint=args.resume_checkpoint,
-        constraint_profile=phase2_constraint_profile,
-    )
+    print(f"- candidate_workers: {args.candidate_workers}")
+    candidate_executor = create_phase2_candidate_executor(args.candidate_workers)
+    try:
+        summary = train_phase2_batch_machine_self_labeling(
+            jobs=training_jobs,
+            machines=training_machines,
+            phase1_assignments={},
+            output_dir=args.output_dir,
+            episodes=args.episodes,
+            lr=args.lr,
+            hidden_dim=args.hidden_dim,
+            seed=args.seed,
+            heuristic_algorithms=tuple(parse_csv_argument(args.heuristic_algorithms, default=())),
+            rollout_samples=args.rollout_samples,
+            validation_rollout_samples=validation_rollout_samples,
+            validation_every=args.validation_every,
+            validation_episodes=args.validation_episodes,
+            checkpoint_every=args.checkpoint_every,
+            max_wo_count=args.max_wo_count,
+            max_length_sum=args.max_length_sum,
+            action_pool_limit=args.action_pool_limit,
+            episode_jobs=None,
+            episode_job_factory=episode_job_factory,
+            validation_episode_jobs=None,
+            validation_episode_job_factory=validation_episode_job_factory,
+            phase1_heuristic=phase1_heuristic,
+            phase1_bay_ids=phase1_bay_ids,
+            phase1_assignment_builder=phase1_assignment_builder,
+            phase1_bay_capacity_weights=phase1_bay_capacity_weights,
+            device=args.device,
+            write_candidate_summary=args.write_candidate_summary,
+            score_mode=args.phase2_score_mode,
+            resume_checkpoint=args.resume_checkpoint,
+            constraint_profile=phase2_constraint_profile,
+            candidate_workers=args.candidate_workers,
+            candidate_executor=candidate_executor,
+        )
+    finally:
+        if candidate_executor is not None:
+            candidate_executor.shutdown(wait=True, cancel_futures=True)
     print(f"- job_count: {summary['job_count']}")
     print(f"- machine_count: {summary['machine_count']}")
     print(f"- feature_schema_version: {summary['feature_schema_version']}")
@@ -1268,6 +1277,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Number of stochastic agent assignment candidates per episode.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--candidate-workers",
+        type=int,
+        default=1,
+        help="Spawn processes for parallel Phase 2 candidate generation. 1 preserves the sequential baseline.",
     )
     phase2_train_graph_parser.add_argument(
         "--rollout-samples_validation",
