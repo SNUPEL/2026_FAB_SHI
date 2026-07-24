@@ -94,6 +94,17 @@ STL_LOCAL_WEIGHT = 0.75
 EMPIRICAL_SERIES = ('FN', 'FL', 'NC')
 EMPIRICAL_GENERATION_PROFILE_SCHEMA = 'shipyard_empirical_generation_profile_v1'
 
+# FL 계열 MARK_LTH 생성 방법 선택지(다른 계열엔 영향 없음).
+#   'chain'     : 블록 사슬을 길이→CUT→MARK로 두고 MARK를 CUT에서 뽑는다.
+#                 (구 shipyard_data_generator_fl.py 로직. 블록 MARK~CUT 상관 보존)
+#   'dirichlet' : 실적 (블록 MARK 총량, W/O 수) 쌍을 재추출(±jitter)하고 블록 총량을
+#                 대칭 Dirichlet(alpha(n))로 W/O에 배분한다. (구 fl_mark_lth.py 로직.
+#                 합계 계약이 구조적으로 보장되고 블록 내 분산을 실적에서 역산)
+FL_MARK_METHODS = ('chain', 'dirichlet')
+DEFAULT_FL_MARK_METHOD = 'chain'
+# Dirichlet 총량 재추출 시 총량에 곱하는 승법 로그정규 노이즈 표준편차.
+FL_DIRICHLET_TOTAL_JITTER = 0.10
+
 
 def _profile_json_value(value):
     """numpy 값을 손실 없이 JSON 기본형으로 변환한다."""
@@ -274,9 +285,20 @@ def _resolve_mark_aggregation(work_orders, blocks, block_keys):
     return contract
 
 
-def _fit_block_chain_parameters(blocks):
-    """공통 블록 생성식의 계수와 정규 잔차를 선택 계열에서 적합한다."""
+def _fit_block_chain_parameters(blocks, chain_order='mark_first'):
+    """공통 블록 생성식의 계수와 정규 잔차를 선택 계열에서 적합한다.
 
+    chain_order='mark_first'(기본): 길이→MARK→CUT (MARK=a·길이, CUT=c·MARK).
+    chain_order='cut_first'       : 길이→CUT→MARK (CUT=c·길이, MARK=a·CUT).
+        FL 'chain' 방법에서 MARK를 CUT에서 뽑기 위해 쓴다. 반환 key는 동일하다.
+    """
+
+    if chain_order not in ('mark_first', 'cut_first'):
+        print(
+            "[ERROR][shipyard_data_generator._fit_block_chain_parameters] "
+            f"cause=unsupported_chain_order chain_order={chain_order}"
+        )
+        raise RuntimeError(f"unsupported_chain_order: {chain_order}")
     required = {'LTH', 'MARK_LTH', 'CUT_LTH', 'WO_QTY'}
     missing = sorted(required - set(blocks.columns))
     if missing:
@@ -314,8 +336,14 @@ def _fit_block_chain_parameters(blocks):
         residual_sd = float(np.std(y - (slope * x + intercept), ddof=0))
         return float(slope), float(intercept), residual_sd
 
-    mark_a, mark_b, mark_sd = fit_linear('MARK_LTH', 'LTH')
-    cut_a, cut_b, cut_sd = fit_linear('CUT_LTH', 'MARK_LTH')
+    if chain_order == 'cut_first':
+        # 길이→CUT→MARK: CUT을 길이에서, MARK를 CUT에서 뽑는다.
+        cut_a, cut_b, cut_sd = fit_linear('CUT_LTH', 'LTH')
+        mark_a, mark_b, mark_sd = fit_linear('MARK_LTH', 'CUT_LTH')
+    else:
+        # 길이→MARK→CUT (기본): MARK를 길이에서, CUT을 MARK에서 뽑는다.
+        mark_a, mark_b, mark_sd = fit_linear('MARK_LTH', 'LTH')
+        cut_a, cut_b, cut_sd = fit_linear('CUT_LTH', 'MARK_LTH')
     count_a, count_b, count_sd = fit_linear('WO_QTY', 'CUT_LTH')
     return {
         'length_mean': float(values['LTH'].mean()),
@@ -656,13 +684,21 @@ def _fit_thickness_ratio_profiles(centers, means, standard_deviations):
 
 
 class ShipyardGenerator:
-    def __init__(self, wo_xlsx, blk_xlsx, mode='spearman', series=None):
+    def __init__(self, wo_xlsx, blk_xlsx, mode='spearman', series=None,
+                 fl_mark_method=DEFAULT_FL_MARK_METHOD):
         if mode not in ('spearman', 'pearson'):
             print(
                 "[ERROR][shipyard_data_generator.ShipyardGenerator.__init__] "
                 f"cause=unsupported_mode mode={mode}"
             )
             raise RuntimeError(f"unsupported_mode: {mode}")
+        if fl_mark_method not in FL_MARK_METHODS:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator.__init__] "
+                f"cause=unsupported_fl_mark_method method={fl_mark_method} allowed={FL_MARK_METHODS}"
+            )
+            raise RuntimeError(f"unsupported_fl_mark_method: {fl_mark_method}")
+        self.fl_mark_method = fl_mark_method
         normalized_series = str(series or '').strip().upper()
         if normalized_series == 'NP':
             print(
@@ -687,7 +723,13 @@ class ShipyardGenerator:
         self.block_keys = ['PROJ_NO', 'BLK_NO']
         if 'GYEL' in self.wo.columns:
             self.block_keys.insert(1, 'GYEL')
-        self.mark_aggregation = _resolve_mark_aggregation(self.wo, self.blk, self.block_keys)
+        # MARK_LTH은 전 계열에서 W/O 최댓값이 아닌 합계로 정의한다(블록 마킹 총량 = Σ W/O).
+        self.mark_aggregation = 'sum'
+        if self.series == 'FL':
+            print(
+                "[CHECK][shipyard_data_generator.ShipyardGenerator.__init__] "
+                f"series=FL mark_aggregation=sum fl_mark_method={self.fl_mark_method}"
+            )
         g = self.wo.groupby(self.block_keys)
         self.wo['n_wo'] = g['LTH'].transform('size')
         self.woF = self.wo[self.wo['n_wo'] >= 2].copy()
@@ -705,8 +747,13 @@ class ShipyardGenerator:
             CUT_LTH=('CUT_LTH', 'sum'),
             WO_QTY=('LTH', 'size'),
         ).reset_index()
-        self.block_chain = _fit_block_chain_parameters(block_chain)
+        # FL 'chain' 방법은 MARK를 CUT에서 뽑으므로 블록 사슬을 길이→CUT→MARK로 둔다.
+        chain_order = 'cut_first' if self.series == 'FL' else 'mark_first'
+        self.block_chain = _fit_block_chain_parameters(block_chain, chain_order=chain_order)
         self.conditional_bth_stl = _fit_conditional_bth_stl_model(self.wo)
+        # FL은 두 MARK 방법을 모두 쓸 수 있도록 Dirichlet 파라미터(총량 풀 + 농도)를 함께 적합한다.
+        if self.series == 'FL':
+            self._fit_fl_dirichlet_marking()
         print(
             "[CHECK][shipyard_data_generator.fit] "
             f"series={self.series} block_chain_rows={len(block_chain)} "
@@ -902,6 +949,11 @@ class ShipyardGenerator:
             else ('cBlin', 'sBlin', 'cQlin', 'sQlin', 'cPlin', 'sPlin')
         )
         required_attributes = common_parameters + mode_parameters
+        if self.series == 'FL':
+            # FL은 두 MARK 방법을 모두 재현할 수 있도록 Dirichlet 파라미터도 함께 싣는다.
+            required_attributes = required_attributes + (
+                'fl_mark_total_pool', 'fl_mark_count_pool', 'fl_dirichlet_alpha_coef',
+            )
         missing = [name for name in required_attributes if not hasattr(self, name)]
         if missing:
             print(
@@ -922,6 +974,7 @@ class ShipyardGenerator:
             'series': self.series,
             'mode': self.mode,
             'mark_aggregation': self.mark_aggregation,
+            'fl_mark_method': self.fl_mark_method,
             'block_chain': _profile_json_value(self.block_chain),
             'parameters': {
                 name: _profile_json_value(getattr(self, name))
@@ -971,10 +1024,17 @@ class ShipyardGenerator:
         series = str(profile['series']).strip().upper()
         mode = str(profile['mode']).strip().lower()
         mark_aggregation = str(profile['mark_aggregation']).strip().lower()
-        if series not in EMPIRICAL_SERIES or mode not in ('spearman', 'pearson') or mark_aggregation not in ('max', 'sum'):
+        fl_mark_method = str(profile.get('fl_mark_method', DEFAULT_FL_MARK_METHOD)).strip().lower()
+        if (
+            series not in EMPIRICAL_SERIES
+            or mode not in ('spearman', 'pearson')
+            or mark_aggregation not in ('max', 'sum')
+            or fl_mark_method not in FL_MARK_METHODS
+        ):
             print(
                 "[ERROR][shipyard_data_generator.ShipyardGenerator.from_generation_profile] "
-                f"cause=invalid_contract series={series} mode={mode} mark={mark_aggregation}"
+                f"cause=invalid_contract series={series} mode={mode} mark={mark_aggregation} "
+                f"fl_mark_method={fl_mark_method}"
             )
             raise RuntimeError("invalid empirical generation profile contract")
 
@@ -988,6 +1048,10 @@ class ShipyardGenerator:
         mode_arrays = ('cB', 'cQ', 'cP') if mode == 'spearman' else ('cBlin', 'cQlin', 'cPlin')
         mode_floats = ('sB', 'sQ', 'sP') if mode == 'spearman' else ('sBlin', 'sQlin', 'sPlin')
         required_parameters = common_arrays + common_tuples + common_floats + common_ints + mode_arrays + mode_floats
+        if series == 'FL':
+            required_parameters = required_parameters + (
+                'fl_mark_total_pool', 'fl_mark_count_pool', 'fl_dirichlet_alpha_coef',
+            )
         parameters = profile['parameters']
         if not isinstance(parameters, dict):
             print(
@@ -998,10 +1062,18 @@ class ShipyardGenerator:
         _require_profile_keys(parameters, required_parameters, 'parameters')
 
         instance = cls.__new__(cls)
+        instance.fl_mark_method = fl_mark_method
         instance.series = series
         instance.mode = mode
         instance.mark_aggregation = mark_aggregation
         instance.block_chain = {str(key): value for key, value in profile['block_chain'].items()}
+        if series == 'FL':
+            instance.fl_mark_total_pool = np.asarray(parameters['fl_mark_total_pool'], dtype=float)
+            instance.fl_mark_count_pool = np.asarray(parameters['fl_mark_count_pool'], dtype=int)
+            coef = parameters['fl_dirichlet_alpha_coef']
+            instance.fl_dirichlet_alpha_coef = (
+                None if coef is None else (float(coef[0]), float(coef[1]))
+            )
         for name in common_arrays + mode_arrays:
             setattr(instance, name, np.asarray(parameters[name], dtype=float))
         for name in common_tuples:
@@ -1163,25 +1235,134 @@ class ShipyardGenerator:
             raise RuntimeError("invalid_thickness_weights")
         return float(rng.choice(cand, p=weights / weights.sum()))
 
+    # ================= FL Dirichlet(구 fl_mark_lth.py) 마킹 =================
+    def _fit_fl_dirichlet_marking(self):
+        """fl_mark_lth.py 'Dirichlet 2단계' 파라미터를 적합한다.
+
+        · 총량 풀 : 실제 블록의 (MARK 총량 Σ, W/O 수) 쌍. 생성 때 쌍을 통째로 재추출한다.
+        · 농도 alpha(n) : 블록 내 share의 변동계수에서 CV²=(n-1)/(n·alpha+1)로 블록크기
+          n별 alpha를 역산하고, 로그-로그 회귀 alpha(n)=exp(b)·n^a 로 적합한다(빈도 가중).
+          관측이 3개 미만이면 상수 alpha=2.5로 폴백한다.
+        """
+
+        totals, counts = [], []
+        size_shares = {}
+        for _, block in self.wo.groupby(self.block_keys):
+            mark = block['MARK_LTH'].to_numpy(dtype=float)
+            total = float(mark.sum())
+            n = int(len(mark))
+            if not np.isfinite(total) or total <= 0.0 or n < 1:
+                continue
+            totals.append(total)
+            counts.append(n)
+            if n >= 2:
+                size_shares.setdefault(n, []).extend((mark / total).tolist())
+        if len(totals) < 3:
+            print(
+                "[ERROR][shipyard_data_generator.ShipyardGenerator._fit_fl_dirichlet_marking] "
+                f"cause=insufficient_fl_marking_blocks totals={len(totals)}"
+            )
+            raise RuntimeError("insufficient_fl_dirichlet_marking_data")
+        self.fl_mark_total_pool = np.asarray(totals, dtype=float)
+        self.fl_mark_count_pool = np.asarray(counts, dtype=int)
+
+        rows = []  # (n, 표본수, alpha)
+        for n, shares in size_shares.items():
+            shares = np.asarray(shares, dtype=float)
+            if len(shares) < 20:
+                continue
+            cv = float(shares.std() / shares.mean())
+            if cv <= 0.0:
+                continue
+            alpha = (n - 1) / (n * cv ** 2) - 1.0 / n
+            if np.isfinite(alpha) and alpha > 0.0:
+                rows.append((float(n), float(len(shares)), float(alpha)))
+        if len(rows) >= 3:
+            ns = np.array([row[0] for row in rows], dtype=float)
+            weights = np.array([row[1] for row in rows], dtype=float)
+            alphas = np.array([row[2] for row in rows], dtype=float)
+            coef = np.polyfit(np.log(ns), np.log(alphas), 1, w=np.sqrt(weights))
+            self.fl_dirichlet_alpha_coef = (float(coef[0]), float(coef[1]))
+        else:
+            self.fl_dirichlet_alpha_coef = None  # 상수 폴백
+        print(
+            "[CHECK][shipyard_data_generator.ShipyardGenerator._fit_fl_dirichlet_marking] "
+            f"series=FL pool_blocks={len(totals)} alpha_coef={self.fl_dirichlet_alpha_coef} "
+            f"alpha(2)={self._fl_alpha_of(2):.2f} alpha(7)={self._fl_alpha_of(7):.2f}"
+        )
+
+    def _fl_alpha_of(self, n):
+        """블록 크기 n의 대칭 Dirichlet 농도. 계수가 없으면 상수 2.5."""
+        coef = getattr(self, 'fl_dirichlet_alpha_coef', None)
+        if coef is None:
+            return 2.5
+        value = np.exp(coef[0] * np.log(max(float(n), 2.0)) + coef[1])
+        return float(np.clip(value, 0.3, 50.0))
+
+    def _sample_fl_dirichlet_total(self, rng, n):
+        """count≈n인 실제 블록에서 MARK 총량을 뽑아 ±jitter(승법 로그정규)를 준다."""
+        counts = self.fl_mark_count_pool
+        totals = self.fl_mark_total_pool
+        candidates = np.flatnonzero(counts == int(n))
+        if candidates.size == 0:
+            unique_counts = np.unique(counts)
+            nearest = int(unique_counts[np.abs(unique_counts - int(n)).argmin()])
+            candidates = np.flatnonzero(counts == nearest)
+        index = int(rng.choice(candidates))
+        total = float(totals[index]) * float(np.exp(rng.normal(0.0, FL_DIRICHLET_TOTAL_JITTER)))
+        return max(total, self.mk_lo)
+
+    def _allocate_fl_dirichlet(self, rng, total, n):
+        """블록 MARK 총량을 대칭 Dirichlet(alpha(n))로 W/O에 배분한다(합계 정확 보존)."""
+        if n <= 1:
+            return np.array([float(total)], dtype=float)
+        weights = rng.gamma(self._fl_alpha_of(n), 1.0, n)
+        weight_sum = float(weights.sum())
+        if weight_sum <= 0.0:
+            weights, weight_sum = np.ones(n), float(n)
+        return float(total) * weights / weight_sum
+
     # ================= 생성 =================
     def _gen_one(self, rng, wo_count=None):
         # 1) 블록 속성: 식의 형태는 공통이고 모든 값은 선택 계열의 실적 적합값이다.
         p = self.block_chain
         ML = float(np.clip(rng.normal(p['length_mean'], p['length_sd']), p['length_min'], p['length_max']))
-        bMARK = max(p['mark_a'] * ML + p['mark_b'] + rng.normal(0, p['mark_residual_sd']), p['mark_min'])
-        bMARK = _apply_zero_inflated_floor(bMARK, self.mk_lo)
-        bCUT = max(p['cut_a'] * bMARK + p['cut_b'] + rng.normal(0, p['cut_residual_sd']), p['cut_min'])
-        n = (
-            int(wo_count)
-            if wo_count is not None
-            else _sample_wo_count(
-                expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
-                residual_sd=p['wo_count_residual_sd'],
-                minimum=self.n_min,
-                maximum=self.n_max,
-                rng=rng,
+        if self.series == 'FL':
+            # FL 공통 사슬: 길이→CUT→W/O 수. 블록 MARK 총량만 방법에 따라 다르게 만든다.
+            bCUT = max(p['cut_a'] * ML + p['cut_b'] + rng.normal(0, p['cut_residual_sd']), p['cut_min'])
+            n = (
+                int(wo_count)
+                if wo_count is not None
+                else _sample_wo_count(
+                    expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
+                    residual_sd=p['wo_count_residual_sd'],
+                    minimum=self.n_min,
+                    maximum=self.n_max,
+                    rng=rng,
+                )
             )
-        )
+            if self.fl_mark_method == 'dirichlet':
+                # fl_mark_lth: 실적 (총량, W/O 수) 쌍을 재추출(±jitter)해 블록 MARK 총량을 뽑는다.
+                bMARK = self._sample_fl_dirichlet_total(rng, n)
+            else:
+                # chain: 블록 MARK를 CUT에서 뽑는다(블록 MARK~CUT 상관 보존).
+                bMARK = max(p['mark_a'] * bCUT + p['mark_b'] + rng.normal(0, p['mark_residual_sd']), p['mark_min'])
+                bMARK = _apply_zero_inflated_floor(bMARK, self.mk_lo)
+        else:
+            bMARK = max(p['mark_a'] * ML + p['mark_b'] + rng.normal(0, p['mark_residual_sd']), p['mark_min'])
+            bMARK = _apply_zero_inflated_floor(bMARK, self.mk_lo)
+            bCUT = max(p['cut_a'] * bMARK + p['cut_b'] + rng.normal(0, p['cut_residual_sd']), p['cut_min'])
+            n = (
+                int(wo_count)
+                if wo_count is not None
+                else _sample_wo_count(
+                    expected_count=p['wo_count_a'] * bCUT + p['wo_count_b'],
+                    residual_sd=p['wo_count_residual_sd'],
+                    minimum=self.n_min,
+                    maximum=self.n_max,
+                    rng=rng,
+                )
+            )
         # 외부 count는 물리 블록 수식에서 먼저 확정한 값이므로 실적 지원범위로
         # 자르지 않는다. 생성기 자체가 count를 뽑을 때만 적합 지원범위를 강제한다.
         if n <= 0 or (wo_count is None and (n < self.n_min or n > self.n_max)):
@@ -1248,23 +1429,32 @@ class ShipyardGenerator:
             THK[np.argmax(THK)] = MT
 
         # 4) WO 마킹·절단: WO 길이로 자유 생성한 뒤 입력 실적의 block 집계 계약을 보존한다.
+        #    FL 'dirichlet' 방법만 MARK를 Dirichlet 배분으로 대체하고, 그 외(FL 'chain'·타
+        #    계열)는 기존 길이-회귀 + 합계 스케일을 쓴다. CUT은 전 계열 공통이다.
+        fl_dirichlet = self.series == 'FL' and self.fl_mark_method == 'dirichlet'
         if self.mode == 'pearson':
-            MARK = self.mkA * L + self.mkB + rng.normal(0, self.mkS, n)
+            if fl_dirichlet:
+                MARK = self._allocate_fl_dirichlet(rng, bMARK, n)
+            else:
+                MARK = self.mkA * L + self.mkB + rng.normal(0, self.mkS, n)
+                MARK = (
+                    _scale_to_max(MARK, bMARK, self.mk_lo)
+                    if self.mark_aggregation == 'max'
+                    else self._scale_to_sum(MARK, bMARK, L, self.mk_lo)
+                )
             CUT = self.ctA * L + self.ctB + rng.normal(0, self.ctS, n)
-            MARK = (
-                _scale_to_max(MARK, bMARK, self.mk_lo)
-                if self.mark_aggregation == 'max'
-                else self._scale_to_sum(MARK, bMARK, L, self.mk_lo)
-            )
             CUT = self._scale_to_sum(CUT, bCUT, L, self.ct_lo)
         else:
-            MARK = np.exp(self.mkA * np.log(L) + self.mkB + rng.normal(0, self.mkS, n))
+            if fl_dirichlet:
+                MARK = self._allocate_fl_dirichlet(rng, bMARK, n)
+            else:
+                MARK = np.exp(self.mkA * np.log(L) + self.mkB + rng.normal(0, self.mkS, n))
+                MARK = (
+                    _scale_to_max(MARK, bMARK, self.mk_lo)
+                    if self.mark_aggregation == 'max'
+                    else self._scale_to_sum(MARK * bMARK / MARK.sum(), bMARK, L, self.mk_lo)
+                )
             CUT = np.exp(self.ctA * np.log(L) + self.ctB + rng.normal(0, self.ctS, n))
-            MARK = (
-                _scale_to_max(MARK, bMARK, self.mk_lo)
-                if self.mark_aggregation == 'max'
-                else self._scale_to_sum(MARK * bMARK / MARK.sum(), bMARK, L, self.mk_lo)
-            )
             CUT = self._scale_to_sum(CUT * bCUT / CUT.sum(), bCUT, L, self.ct_lo)
 
         # 5) WO 베벨·부재 (WO 직접 생성)
@@ -1401,6 +1591,9 @@ def main():
     ap.add_argument('--mode', choices=['spearman', 'pearson'], default='spearman',
                     help="생성 모드: spearman(길이직접,기본) / pearson(선형식)")
     ap.add_argument('--series', help='적합할 계열: NP, FN, FL, NC. 다계열 입력에서는 필수')
+    ap.add_argument('--fl-mark-method', dest='fl_mark_method',
+                    choices=list(FL_MARK_METHODS), default=DEFAULT_FL_MARK_METHOD,
+                    help="FL MARK_LTH 생성 방법: chain(CUT→MARK) / dirichlet(fl_mark_lth 2단계). FL에만 적용")
     ap.add_argument('--n', type=int, default=800, help='생성 블록 수 (기본 800)')
     ap.add_argument('--seed', type=int, default=2026)
     ap.add_argument('--out', default='generated', help='출력 파일 접두사')
@@ -1449,7 +1642,10 @@ def main():
             f"cause=missing_empirical_source series={normalized_series}"
         )
         raise RuntimeError("FN/FL/NC generation requires --wo_xlsx and --blk_xlsx")
-    gen = ShipyardGenerator(args.wo_xlsx, args.blk_xlsx, mode=args.mode, series=args.series).fit()
+    gen = ShipyardGenerator(
+        args.wo_xlsx, args.blk_xlsx, mode=args.mode, series=args.series,
+        fl_mark_method=args.fl_mark_method,
+    ).fit()
     wo_df, blk_df = gen.generate(n_blocks=args.n, seed=args.seed)
     wo_df.to_csv(f'{args.out}_wo.csv', index=False, encoding='utf-8-sig')
     blk_df.to_csv(f'{args.out}_blk.csv', index=False, encoding='utf-8-sig')
@@ -1466,6 +1662,7 @@ def main():
                 ),
                 'tact_formula_scope': TACT_FORMULA_SCOPE,
                 'mark_aggregation': gen.mark_aggregation,
+                'fl_mark_method': gen.fl_mark_method,
                 'tact_formula_coefficients': {
                     'CUT_LTH': TACT_CUT,
                     'MARK_LTH': TACT_MARK,

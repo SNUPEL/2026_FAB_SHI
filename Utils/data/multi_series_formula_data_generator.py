@@ -756,8 +756,13 @@ def _apportion_empirical_count_vector(
 def build_multi_series_generation_profile(
     wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
     block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+    fl_mark_method: str = "chain",
 ) -> dict:
-    """실적 Excel을 한 번 적합해 재현 가능한 고정 JSON payload를 만든다."""
+    """실적 Excel을 한 번 적합해 재현 가능한 고정 JSON payload를 만든다.
+
+    fl_mark_method: FL 계열 MARK_LTH 생성 방법('chain' 또는 'dirichlet').
+        다른 계열엔 영향이 없다. 자세한 내용은 shipyard_data_generator.FL_MARK_METHODS.
+    """
 
     wo_path = Path(wo_source_path).resolve()
     block_path = Path(block_source_path).resolve()
@@ -778,11 +783,13 @@ def build_multi_series_generation_profile(
 
     empirical = {}
     for series in sorted(SUPPORTED_SERIES - {"NP"}):
+        # fl_mark_method는 FL에만 영향을 준다(다른 계열은 무시).
         empirical[series] = ShipyardGenerator(
             wo_path,
             block_path,
-            mode="spearman",
+            mode="pearson",
             series=series,
+            fl_mark_method=fl_mark_method,
         ).fit().to_generation_profile()
     payload = {
         "schema": MULTI_SERIES_GENERATION_PROFILE_SCHEMA,
@@ -810,12 +817,18 @@ def write_multi_series_generation_profile(
     output_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
     wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
     block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
+    fl_mark_method: str = "chain",
 ) -> Path:
-    """오프라인 적합 결과를 표준 JSON으로 원자적으로 저장한다."""
+    """오프라인 적합 결과를 표준 JSON으로 원자적으로 저장한다.
+
+    fl_mark_method: FL 계열 MARK_LTH 생성 방법('chain' 또는 'dirichlet').
+    """
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = build_multi_series_generation_profile(wo_source_path, block_source_path)
+    payload = build_multi_series_generation_profile(
+        wo_source_path, block_source_path, fl_mark_method=fl_mark_method
+    )
     serialized = json.dumps(
         payload,
         ensure_ascii=False,

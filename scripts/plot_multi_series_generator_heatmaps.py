@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import sys
 from itertools import combinations
 from pathlib import Path
 from types import ModuleType
@@ -19,13 +20,16 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from Utils.data.multi_series_formula_data_generator import (
     fit_physical_block_joint_profile,
     generate_multi_series_formula_data,
 )
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 SERIES = ("NP", "FN", "FL", "NC")
 BLOCK_KEYS = ("PROJ_NO", "GYEL", "BLK_NO")
 W_O_FEATURES = (
