@@ -2749,13 +2749,14 @@ def _write_validation_plots(output_path: Path, candidate_rows: Sequence[Mapping]
         "bay_internal_occupancy_gap",
         "bay_internal_normalized_occupancy_gap",
     )
+    # 파일명 앞 번호 = 사전식(lexicographic) 우선순위 (파일 정렬 시 목적함수 순서 유지)
     plot_specs = [
-        ("validation_hard_violation_png", "validation_hard_violation.png", "hard_violation_count", "Hard violation count", "Count"),
-        ("validation_makespan_png", "validation_makespan.png", "makespan", "Makespan", "Minutes"),
-        ("validation_wo_gap_png", "validation_wo_gap.png", wo_gap_field, "Bay-internal W/O count gap", "Gap"),
-        ("validation_cut_gap_png", "validation_cut_gap.png", cut_gap_field, "Bay-internal cut length gap", "Gap"),
-        ("validation_bevel_gap_png", "validation_bevel_gap.png", bevel_gap_field, "Bay-internal bevel quantity gap", "Gap"),
-        ("validation_occupancy_gap_png", "validation_occupancy_gap.png", occupancy_gap_field, "Bay-internal occupancy gap", "Gap"),
+        ("validation_hard_violation_png", "1_validation_hard_violation.png", "hard_violation_count", "Hard violation count", "Count"),
+        ("validation_makespan_png", "2_validation_makespan.png", "makespan", "Makespan", "Minutes"),
+        ("validation_cut_gap_png", "3_validation_cut_gap.png", cut_gap_field, "Bay-internal cut length gap", "Gap"),
+        ("validation_wo_gap_png", "4_validation_wo_gap.png", wo_gap_field, "Bay-internal W/O count gap", "Gap"),
+        ("validation_bevel_gap_png", "5_validation_bevel_gap.png", bevel_gap_field, "Bay-internal bevel quantity gap", "Gap"),
+        ("validation_occupancy_gap_png", "6_validation_occupancy_gap.png", occupancy_gap_field, "Bay-internal occupancy gap", "Gap"),
     ]
     for output_key, filename, score_field, title, ylabel in plot_specs:
         path = output_path / filename

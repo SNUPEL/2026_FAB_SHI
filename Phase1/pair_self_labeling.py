@@ -2668,19 +2668,20 @@ def _validation_plot_specs(
     """Return score-column mapping for validation plots."""
 
     normalized_scope = normalize_phase1_objective_scope(objective_scope)
+    # 파일명 앞 번호 = 사전식(lexicographic) 우선순위 (파일 정렬 시 목적함수 순서 유지)
     if normalized_scope == PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES:
         return [
-            ("validation_wo_gap_png", "validation_wo_gap.png", "score_0", "Shared-pool W/O load gap", "Gap"),
-            ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_1", "Series-group W/O load gap", "Gap"),
-            ("validation_cut_gap_png", "validation_cut_gap.png", "score_2", "Shared-pool cut length gap", "Gap"),
-            ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_3", "Series-group cut length gap", "Gap"),
-            ("validation_bevel_gap_png", "validation_bevel_gap.png", "score_4", "Shared-pool bevel quantity gap", "Gap"),
-            ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_5", "Series-group bevel quantity gap", "Gap"),
+            ("validation_wo_gap_png", "1_validation_wo_gap.png", "score_0", "Shared-pool W/O load gap", "Gap"),
+            ("validation_series_wo_gap_png", "2_validation_series_wo_gap.png", "score_1", "Series-group W/O load gap", "Gap"),
+            ("validation_cut_gap_png", "3_validation_cut_gap.png", "score_2", "Shared-pool cut length gap", "Gap"),
+            ("validation_series_cut_gap_png", "4_validation_series_cut_gap.png", "score_3", "Series-group cut length gap", "Gap"),
+            ("validation_bevel_gap_png", "5_validation_bevel_gap.png", "score_4", "Shared-pool bevel quantity gap", "Gap"),
+            ("validation_series_bevel_gap_png", "6_validation_series_bevel_gap.png", "score_5", "Series-group bevel quantity gap", "Gap"),
         ]
     return [
-        ("validation_series_wo_gap_png", "validation_series_wo_gap.png", "score_0", "Series-group W/O load gap", "Gap"),
-        ("validation_series_cut_gap_png", "validation_series_cut_gap.png", "score_1", "Series-group cut length gap", "Gap"),
-        ("validation_series_bevel_gap_png", "validation_series_bevel_gap.png", "score_2", "Series-group bevel quantity gap", "Gap"),
+        ("validation_series_wo_gap_png", "1_validation_series_wo_gap.png", "score_0", "Series-group W/O load gap", "Gap"),
+        ("validation_series_cut_gap_png", "2_validation_series_cut_gap.png", "score_1", "Series-group cut length gap", "Gap"),
+        ("validation_series_bevel_gap_png", "3_validation_series_bevel_gap.png", "score_2", "Series-group bevel quantity gap", "Gap"),
     ]
 
 
