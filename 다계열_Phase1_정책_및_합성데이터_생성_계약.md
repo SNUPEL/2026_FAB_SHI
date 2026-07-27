@@ -156,6 +156,16 @@ vector의 조건부 구조만 제공하고, W/O 물리값은 계열별 생성식
 
 ### 4.3 계열별 수식 계약
 
+> **변경 반영(FN/FL/NC 생성기 승격):** FN/FL/NC W/O 생성은 학습 시 실적을 다시
+> 적합하지 않고 `데이터분석/shipyard_data_generator.py`의 고정 산출식 생성기
+> (`블록_산출식_정리.md`/`W_O_산출식_정리.md` 계수, `ShipyardGenerator` 어댑터,
+> profile schema `shipyard_formula_generation_profile_v2`)로 생성한다. 새 산출식에서
+> **FN/FL/NC의 W/O `STL_QTY`는 1로 고정되어 블록 `STL_QTY` = `WO_QTY`가 된다.** NP는
+> 아래 설명대로 canonical 발표자료 고정식(`report_formula_data_generator.py`)을 유지하며
+> `STL_QTY`가 `WO_QTY`와 별개다. 아래 표·본문의 FN/FL/NC empirical 적합 설명(BTH
+> 로그선형 R², STL 조건부 이웃확률 등)은 승격 이전 접근이며, 새 산출식 상세는 원천
+> 산출식 문서를 기준으로 별도 갱신 대상이다.
+
 “모든 계열이 NP 수식에서 절편만 바꾼다”는 설명은 정확하지 않다. NP는 발표자료
 고정식과 고정 오차분포를 보존하고, FN/FL/NC 세 계열은 서로 같은 empirical 생성
 코드와 식 종류를 공유하되 계열별 실적에서 계수·절편·잔차분포·지원범위를 각각
@@ -187,9 +197,10 @@ epsilon ~ Normal(0, series_residual_std^2)
 실적 적합 설명력은 NP `R²=0.665831`, FN `0.617106`, FL `0.252072`, NC
 `0.356277`이며, 낮은 설명력을 숨기기 위해 잔차를 줄이거나 값을 조작하지 않는다.
 
-`STL_QTY`는 `WO_QTY`와 별개다. 같은 계열 실적에서 핵심 가공특성이 가까운 이웃의
-범주확률 75%와 계열 전체 주변확률 25%를 결합해 정수값을 생성한다. 블록
-`STL_QTY`는 W/O 값의 합이고, `WO_QTY`는 W/O 행 수다.
+NP는 `STL_QTY`가 `WO_QTY`와 별개다. 같은 계열 실적에서 핵심 가공특성이 가까운
+이웃의 범주확률 75%와 계열 전체 주변확률 25%를 결합해 정수값을 생성한다. 블록
+`STL_QTY`는 W/O 값의 합이고, `WO_QTY`는 W/O 행 수다. FN/FL/NC는 승격된 고정 산출식에서
+W/O `STL_QTY`를 1로 두므로 블록 `STL_QTY`가 `WO_QTY`와 같다(위 변경 반영 참고).
 
 ### 4.4 TACT_TIME 공통식
 

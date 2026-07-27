@@ -110,8 +110,10 @@ N_NP + N_FN + N_FL + N_NC = WO_QTY
 매칭·임의 비율 보정을 수행하지 않습니다. 배분이나 집계가 불가능하면 다른 값으로
 대체하지 않고 원인을 출력한 뒤 실패합니다.
 
-NP component는 발표자료의 고정 수식을 사용합니다. FN/FL/NC는 동일한 계층 생성
-흐름과 계열별 empirical profile을 사용합니다. 전 계열 `TACT_TIME`은 현재 확정된
+NP component는 발표자료의 고정 수식을 사용합니다. FN/FL/NC는
+`데이터분석/shipyard_data_generator.py`의 고정 산출식 생성기
+(`ShipyardGenerator` 어댑터, `블록_산출식_정리.md`/`W_O_산출식_정리.md` 계수)로
+생성하며, 학습 중 실적을 다시 적합하지 않습니다. 전 계열 `TACT_TIME`은 현재 확정된
 Case 6 식을 공통 적용합니다.
 
 ```text
@@ -119,7 +121,9 @@ TACT_TIME = 0.3037*CUT_LTH + 0.1325*MARK_LTH
             + 0.4790*THK + 0.3840*PTLST_QTY
 ```
 
-`WO_QTY`와 `STL_QTY`는 서로 다른 변수이며 대체하지 않습니다.
+NP는 `WO_QTY`와 `STL_QTY`가 서로 다른 변수이며 대체하지 않습니다. FN/FL/NC는
+`데이터분석/shipyard_data_generator.py`의 고정 산출식 생성기로 승격되어 W/O `STL_QTY`가
+1로 고정되므로 블록 `STL_QTY`가 `WO_QTY`와 같습니다.
 
 ### 고정 generation profile
 
@@ -130,9 +134,10 @@ MIXED Phase 1/2 학습은 원천 Excel을 실행 중 다시 적합하지 않고 
 Utils/data/multi_series_generation_profile.json
 ```
 
-이 파일에는 NP 고정식 계약, NP BTH/STL profile, FN/FL/NC 계수·입력분포·잔차분포,
-물리 블록 계열 조합과 조건부 W/O 수 분포, 원천 파일 SHA256이 포함됩니다.
-profile 누락, schema 불일치, 계열 누락은 Excel fallback 없이 실패합니다.
+이 파일에는 NP 고정식 계약, NP BTH/STL profile, FN/FL/NC 고정 산출식 계수
+(`shipyard_formula_generation_profile_v2`), 물리 블록 계열 조합과 조건부 W/O 수 분포,
+원천 파일 SHA256이 포함됩니다. profile 누락, schema 불일치, 계열 누락은 Excel
+fallback 없이 실패합니다.
 
 원천 Excel 또는 적합 방법이 변경된 경우에만 profile을 명시적으로 재생성합니다.
 

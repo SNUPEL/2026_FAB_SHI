@@ -1435,31 +1435,33 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
         "sum": ["CUT_LTH", "BVL_LTH", "STL_QTY", "BV_QTY", "PTLST_QTY"],
         "WO_QTY": "W/O row count",
     }
-    formula_series = ("NP", "FN", "FL", "NC")
     fixed_profile = load_multi_series_generation_profile()
-    fixed_bth_profiles = {
-        "NP": fixed_profile.np_bth,
-        **{
-            series: fixed_profile.empirical_generators[series].conditional_bth_stl[
-                "bth_formula"
-            ]
-            for series in formula_series
-            if series != "NP"
+    # NP는 발표자료 log-linear BTH profile을 유지하고, FN/FL/NC는 승격된 shipyard
+    # 고정 산출식의 W/O BTH 감쇠식 파라미터를 보고한다(두 표현을 섞지 않는다).
+    np_bth = fixed_profile.np_bth
+    bth_profiles = {
+        "NP": {
+            "source": "np_ppt_log_linear",
+            "equation": "ln(BTH)=b0+sum(bk*ln(1+xk))+epsilon",
+            "coefficients": {
+                "intercept": np_bth.coefficients[0],
+                **dict(zip(BTH_FORMULA_FEATURES, np_bth.coefficients[1:])),
+            },
+            "residual_std": np_bth.residual_std,
+            "r_squared": np_bth.r_squared,
+            "observed_spec_count": len(np_bth.observed_specs),
+            "observed_spec_min": min(np_bth.observed_specs),
+            "observed_spec_max": max(np_bth.observed_specs),
         },
     }
-    bth_profiles = {}
-    for series in formula_series:
-        profile = fixed_bth_profiles[series]
+    for series in ("FN", "FL", "NC"):
+        wo_bth = fixed_profile.empirical_generators[series].wo_params["BTH"]
         bth_profiles[series] = {
-            "coefficients": {
-                "intercept": profile.coefficients[0],
-                **dict(zip(BTH_FORMULA_FEATURES, profile.coefficients[1:])),
+            "source": "shipyard_formula_decay",
+            "equation": "BTH=block_BTH*(1-(a-b/n)*u^p)*exp(N(0,sigma))",
+            "parameters": {
+                key: wo_bth[key] for key in ("a", "b", "p", "sigma", "lo", "hi")
             },
-            "residual_std": profile.residual_std,
-            "r_squared": profile.r_squared,
-            "observed_spec_count": len(profile.observed_specs),
-            "observed_spec_min": min(profile.observed_specs),
-            "observed_spec_max": max(profile.observed_specs),
         }
     summary = {
         "synthetic_source": synthetic_source,
@@ -1478,8 +1480,8 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
         },
         "aggregation": aggregation,
         "bth_formula": {
-            "equation": "ln(BTH)=b0+sum(bk*ln(1+xk))+epsilon",
-            "features": list(BTH_FORMULA_FEATURES),
+            "note": "NP는 발표자료 log-linear, FN/FL/NC는 승격된 shipyard 고정 산출식 감쇠식",
+            "np_features": list(BTH_FORMULA_FEATURES),
             "rounding": "nearest_observed_series_spec",
             "profiles": bth_profiles,
         },
