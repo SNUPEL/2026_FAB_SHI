@@ -19,6 +19,7 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
                     cut=30.0,
                     steel=1,
                     bevel=3,
+                    mark=10.0,
                     bevel_length=4.0,
                     part_quantity=8,
                 ),
@@ -41,7 +42,7 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
         blocks = prepared.blocks.set_index("BLOCK_SET_ID")
         self.assertEqual(int(blocks.loc[np_key, "WO_QTY"]), 2)
         self.assertEqual(int(blocks.loc[np_key, "STL_QTY"]), 1)
-        self.assertEqual(float(blocks.loc[np_key, "MARK_LTH"]), 5.0)
+        self.assertEqual(float(blocks.loc[np_key, "MARK_LTH"]), 10.0)
         self.assertNotIn("RET_QTY", prepared.work_orders.columns)
         self.assertEqual(set(prepared.work_orders["MAPPED_MACHINE_ID"]), {"PLS51"})
         self.assertEqual(set(prepared.work_orders["MACHINE_HOME_BAY"]), {"25"})
@@ -87,7 +88,9 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "block_wo_aggregate_mismatch"):
             prepare_multi_series_cutting_data(block_rows, wo_rows)
 
-    def test_rejects_mark_sum_when_new_contract_requires_wo_maximum(self) -> None:
+    def test_rejects_mark_maximum_when_new_contract_requires_wo_sum(self) -> None:
+        # 블록 MARK_LTH는 W/O MARK_LTH의 합이어야 한다. W/O 최댓값(5.0)을 블록값으로
+        # 넣으면 합(10.0)과 달라 검증에서 거부되어야 한다.
         block_rows = pd.DataFrame(
             [
                 self._block_row(
@@ -95,7 +98,7 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
                     cut=30.0,
                     steel=1,
                     bevel=3,
-                    mark=10.0,
+                    mark=5.0,
                     bevel_length=4.0,
                     part_quantity=8,
                 )

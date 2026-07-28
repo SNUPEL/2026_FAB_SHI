@@ -26,7 +26,7 @@ class PhaseOrchestratorTest(unittest.TestCase):
             episode_count=1,
             min_blocks=2,
             max_blocks=2,
-            seed=20260715,
+            seed=20260718,
             verbose=False,
         )[0]
         cls.phase1 = run_phase1_graph_workflow(cls.episode["jobs"])

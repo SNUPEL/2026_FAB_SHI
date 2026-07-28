@@ -624,7 +624,7 @@ CUT_raw  = exp(cut_a  * ln(LTH) + cut_b  + Normal(0, cut_sd^2))
 생성한 상대값은 다음 block-series 계약에 맞게 조정한다.
 
 ```text
-max_i MARK_LTH_i = 생성 block MARK_LTH
+sum_i MARK_LTH_i = 생성 block MARK_LTH
 sum_i CUT_LTH_i  = 생성 block CUT_LTH
 ```
 

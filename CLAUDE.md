@@ -86,8 +86,10 @@ are gone.
   the pipeline's `generate(n_blocks, seed, wo_counts, block_seeds)` contract, emits a `BLK_ID` group
   key + Case-6 `TACT_TIME`, and serializes its coefficients into the fixed profile
   (`shipyard_formula_generation_profile_v2`). NP is **not** served by this adapter — it stays on
-  `report_formula_data_generator.py`. For FN/FL/NC the per-W/O `STL_QTY` is fixed at 1, so block
-  `STL_QTY == WO_QTY` (unlike NP, where they differ). The `fit_blocks_params.py` / `fit_wo_params.py`
+  `report_formula_data_generator.py`. The fitting/generation source is `input/260724_절단*_None.xlsx`
+  (`DEFAULT_MULTI_SERIES_WO_SOURCE` / `DEFAULT_MULTI_SERIES_BLOCK_SOURCE`), which has block
+  `MARK_LTH = sum` (not max) and **per-W/O `STL_QTY = 1` for all series** — so block `STL_QTY == WO_QTY`
+  everywhere (the code still sums the `STL_QTY` column, not the row count). The `fit_blocks_params.py` / `fit_wo_params.py`
   fitters here produce `block_params.json` (`block_formula_params_v3`) and `wo_params.json`
   (`wo_formula_params_v3`) plus the `bth*.py` fitters and `heatmap_*` dirs — those JSONs are still
   **analysis outputs, not consumed by the training path**. Tests: `tests/test_shipyard_data_generator.py`.

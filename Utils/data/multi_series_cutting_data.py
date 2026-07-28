@@ -98,13 +98,14 @@ NON_NEGATIVE_NUMERIC_COLUMNS = tuple(
 # block 파일의 값이 W/O 집계와 같아야 하는 산출 계약이다.
 AGGREGATE_SUM_COLUMNS = (
     "CUT_LTH",
+    "MARK_LTH",
     "BVL_LTH",
     "PTLST_QTY",
     "STL_QTY",
     "BV_QTY",
     "CURVE_QTY",
 )
-AGGREGATE_MAX_COLUMNS = ("LTH", "BTH", "THK", "WGT", "MARK_LTH")
+AGGREGATE_MAX_COLUMNS = ("LTH", "BTH", "THK", "WGT")
 
 
 @dataclass(frozen=True)

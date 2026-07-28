@@ -75,11 +75,11 @@ Phase 1 용량비와 Phase 2 machine 수는 이 표를 별도 숫자로 복사�
 
 ### 3.2 신규 block-W/O 집계
 
-- 최댓값: `LTH`, `BTH`, `THK`, `MARK_LTH`, `TACT_TIME`
-- 합계: `CUT_LTH`, `BVL_LTH`, `PTLST_QTY`, `STL_QTY`, `BV_QTY`, `CURVE_QTY`
+- 최댓값: `LTH`, `BTH`, `THK`, `TACT_TIME`
+- 합계: `CUT_LTH`, `MARK_LTH`, `BVL_LTH`, `PTLST_QTY`, `STL_QTY`, `BV_QTY`, `CURVE_QTY`
 - `WO_QTY`: 해당 block-series의 W/O 행 수
 - `STL_QTY`: W/O `STL_QTY` 합
-- `WO_QTY`와 `STL_QTY`는 서로 대체하지 않는다.
+- `WO_QTY`와 `STL_QTY`는 코드상 서로 대체하지 않는다(전자는 행 수, 후자는 `STL_QTY` 컬럼 합). 현재 260724 원천은 전 계열 W/O `STL_QTY`=1이라 두 값이 수치상 같다.
 
 필수 컬럼 누락, block-W/O FK 불일치, 집계 identity 불일치는 원인을 출력하고
 실패한다. `RET_QTY`는 모델 입력, 목적, 제약에서 사용하지 않는다.
@@ -159,10 +159,12 @@ vector의 조건부 구조만 제공하고, W/O 물리값은 계열별 생성식
 > **변경 반영(FN/FL/NC 생성기 승격):** FN/FL/NC W/O 생성은 학습 시 실적을 다시
 > 적합하지 않고 `데이터분석/shipyard_data_generator.py`의 고정 산출식 생성기
 > (`블록_산출식_정리.md`/`W_O_산출식_정리.md` 계수, `ShipyardGenerator` 어댑터,
-> profile schema `shipyard_formula_generation_profile_v2`)로 생성한다. 새 산출식에서
-> **FN/FL/NC의 W/O `STL_QTY`는 1로 고정되어 블록 `STL_QTY` = `WO_QTY`가 된다.** NP는
-> 아래 설명대로 canonical 발표자료 고정식(`report_formula_data_generator.py`)을 유지하며
-> `STL_QTY`가 `WO_QTY`와 별개다. 아래 표·본문의 FN/FL/NC empirical 적합 설명(BTH
+> profile schema `shipyard_formula_generation_profile_v2`)로 생성한다. 어댑터에서
+> **FN/FL/NC의 W/O `STL_QTY`는 1로 고정**된다. NP는 canonical 발표자료 고정식
+> (`report_formula_data_generator.py`)을 유지하지만, 현재 원천
+> `input/260724_절단*_None.xlsx`은 **NP도 W/O `STL_QTY`=1**이라 결과적으로 전 계열
+> 블록 `STL_QTY` = `WO_QTY`가 된다. 또한 이 원천은 **블록 MARK_LTH=sum**(옛
+> `변경사항` 원천은 max)이다. 아래 표·본문의 FN/FL/NC empirical 적합 설명(BTH
 > 로그선형 R², STL 조건부 이웃확률 등)은 승격 이전 접근이며, 새 산출식 상세는 원천
 > 산출식 문서를 기준으로 별도 갱신 대상이다.
 
@@ -197,10 +199,10 @@ epsilon ~ Normal(0, series_residual_std^2)
 실적 적합 설명력은 NP `R²=0.665831`, FN `0.617106`, FL `0.252072`, NC
 `0.356277`이며, 낮은 설명력을 숨기기 위해 잔차를 줄이거나 값을 조작하지 않는다.
 
-NP는 `STL_QTY`가 `WO_QTY`와 별개다. 같은 계열 실적에서 핵심 가공특성이 가까운
-이웃의 범주확률 75%와 계열 전체 주변확률 25%를 결합해 정수값을 생성한다. 블록
-`STL_QTY`는 W/O 값의 합이고, `WO_QTY`는 W/O 행 수다. FN/FL/NC는 승격된 고정 산출식에서
-W/O `STL_QTY`를 1로 두므로 블록 `STL_QTY`가 `WO_QTY`와 같다(위 변경 반영 참고).
+`STL_QTY`는 코드상 `WO_QTY`(W/O 행 수)와 별도로 `STL_QTY` 컬럼 합으로 계산하는
+별개 변수다. 다만 현재 원천 `input/260724_절단*_None.xlsx`은 **전 계열(NP 포함)
+W/O `STL_QTY`=1**이므로 블록 `STL_QTY`가 `WO_QTY`와 수치상 같아진다. NP의
+조건부 이웃확률 STL 생성기는 이 원천에서 단일 클래스(=1)로 적합된다.
 
 ### 4.4 TACT_TIME 공통식
 

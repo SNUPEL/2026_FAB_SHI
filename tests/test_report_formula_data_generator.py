@@ -101,16 +101,18 @@ class ReportFormulaDataGeneratorTest(unittest.TestCase):
             self.assertAlmostEqual(block.CUT_LTH, float(rows["CUT_LTH"].sum()), places=6)
             self.assertAlmostEqual(block.MARK_LTH, float(rows["MARK_LTH"].sum()), places=6)
 
-    def test_wo_count_and_stl_quantity_are_not_aliased(self) -> None:
+    def test_stl_quantity_is_one_per_wo_and_block_sum_equals_wo_count(self) -> None:
+        # 260724 실적은 W/O STL_QTY=1이므로 블록 STL_QTY(=W/O STL_QTY 합)는 W/O 행 수와
+        # 같아진다. block STL_QTY는 W/O count가 아니라 STL_QTY 컬럼의 합으로 계산된다.
         generated = generate_report_formula_data(n_blocks=100, seed=20260715)
 
-        self.assertGreater(generated.wo_df["STL_QTY"].nunique(), 1)
-        self.assertNotEqual(len(generated.wo_df), int(generated.block_df["STL_QTY"].sum()))
+        self.assertTrue((generated.wo_df["STL_QTY"] == 1).all())
+        self.assertEqual(len(generated.wo_df), int(generated.block_df["STL_QTY"].sum()))
         wo_counts = generated.wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"]).size()
         block_stl = generated.block_df.set_index(["PROJ_NO", "GYEL", "BLK_NO"])["STL_QTY"]
-        self.assertTrue((wo_counts != block_stl).any())
+        self.assertTrue((wo_counts == block_stl).all())
 
-    def test_prescribed_wo_counts_control_rows_without_aliasing_stl_quantity(self) -> None:
+    def test_prescribed_wo_counts_control_rows_and_block_stl_sums_wo_column(self) -> None:
         generated = generate_report_formula_data(
             n_blocks=3,
             seed=20260716,
@@ -122,10 +124,12 @@ class ReportFormulaDataGeneratorTest(unittest.TestCase):
             ["PROJ_NO", "GYEL", "BLK_NO"], sort=True
         ).size()
         self.assertEqual(actual_counts.tolist(), [1, 4, 2])
+        # W/O STL_QTY=1이므로 블록 STL_QTY(=STL_QTY 컬럼 합)는 지정된 W/O 수와 같다.
+        self.assertTrue((generated.wo_df["STL_QTY"] == 1).all())
         block_stl = generated.block_df.set_index(
             ["PROJ_NO", "GYEL", "BLK_NO"]
         )["STL_QTY"]
-        self.assertTrue((actual_counts != block_stl).any())
+        self.assertEqual(block_stl.tolist(), [1, 4, 2])
 
     def test_prescribed_wo_counts_reject_fractional_values(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "invalid wo_counts"):

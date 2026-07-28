@@ -121,9 +121,9 @@ TACT_TIME = 0.3037*CUT_LTH + 0.1325*MARK_LTH
             + 0.4790*THK + 0.3840*PTLST_QTY
 ```
 
-NP는 `WO_QTY`와 `STL_QTY`가 서로 다른 변수이며 대체하지 않습니다. FN/FL/NC는
-`데이터분석/shipyard_data_generator.py`의 고정 산출식 생성기로 승격되어 W/O `STL_QTY`가
-1로 고정되므로 블록 `STL_QTY`가 `WO_QTY`와 같습니다.
+현재 원천(`input/260724_절단*_None.xlsx`)은 전 계열 W/O `STL_QTY`=1이므로 블록
+`STL_QTY`(=W/O `STL_QTY` 합)가 `WO_QTY`와 같습니다. 다만 코드는 `STL_QTY`를 W/O
+count가 아니라 `STL_QTY` 컬럼 합으로 계산하므로 개념상 별도 변수로 유지합니다.
 
 ### 고정 generation profile
 
@@ -160,8 +160,8 @@ Windows conda 환경에서는 아래 명령의 `python`을 그대로 사용합�
 ```bash
 python -m pip install holidays
 python main.py phase1-plan-multi-series \
-  --block-xlsx "변경사항/절단블록_데이터.xlsx" \
-  --wo-xlsx "변경사항/절단WO_데이터.xlsx" \
+  --block-xlsx "input/260724_절단블록_데이터_None.xlsx" \
+  --wo-xlsx "input/260724_절단WO_데이터_None.xlsx" \
   --output-dir output/generated/multi_series_260711
 ```
 

@@ -31,7 +31,7 @@ PHYSICAL_CONDITION_FEATURES = ("LTH", "THK", "CUT_LTH")
 CONDITIONAL_NEIGHBOR_COUNT = 8
 SERIES_RANDOM_STREAM_INDEX = {"FL": 1, "FN": 2, "NC": 3, "NP": 4}
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MULTI_SERIES_BLOCK_SOURCE = REPO_ROOT / "변경사항" / "절단블록_데이터.xlsx"
+DEFAULT_MULTI_SERIES_BLOCK_SOURCE = REPO_ROOT / "input" / "260724_절단블록_데이터_None.xlsx"
 MULTI_SERIES_GENERATION_PROFILE_SCHEMA = "multi_series_generation_profile_v1"
 DEFAULT_MULTI_SERIES_GENERATION_PROFILE = Path(__file__).with_name(
     "multi_series_generation_profile.json"
@@ -1195,7 +1195,7 @@ def _aggregate_multi_series_blocks(work_orders: pd.DataFrame) -> pd.DataFrame:
         BTH=("BTH", "max"),
         THK=("THK", "max"),
         CUT_LTH=("CUT_LTH", "sum"),
-        MARK_LTH=("MARK_LTH", "max"),
+        MARK_LTH=("MARK_LTH", "sum"),
         BVL_LTH=("BVL_LTH", "sum"),
         STL_QTY=("STL_QTY", "sum"),
         WO_QTY=("WK_ORD_NO", "size"),

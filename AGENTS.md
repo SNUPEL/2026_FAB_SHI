@@ -110,7 +110,7 @@
 - `input/`은 사용하지 않는 생성 산출물 보관소로 두지 않는다. 필요 산출물은 `output/generated/` 아래에 만든다.
 - 전체 NP는 100건 회귀검증이 통과한 뒤 스케일 확인과 데이터 품질 audit 용도로만 실행한다.
 - 동일 장비/동일 실적 착수/종료 timestamp 다중 W/O는 제약 위반 근거가 아니라 현업 확인된 데이터 오류 후보로 분리한다.
-- MIXED 학습은 `변경사항/절단블록_데이터.xlsx`와 `변경사항/절단WO_데이터.xlsx`의 NP/FN/FL/NC 계약을 사용한다.
+- MIXED 학습·피팅은 `input/260724_절단블록_데이터_None.xlsx`와 `input/260724_절단WO_데이터_None.xlsx`의 NP/FN/FL/NC 계약을 사용한다. 이 원천은 블록 MARK=sum, 전 계열 W/O STL_QTY=1이다.
 - NP100 DES/replay 회귀와 MIXED Phase 1/2 학습을 같은 입력 계약으로 혼동하지 않는다.
 - 지원하지 않는 계열, duration 이상치, 파싱 실패 row는 삭제하지 않고 제외 로그에 남긴다.
 - `TACT_TIME`은 기계가 아크로 절단하는 시간이며 단위는 분이다.

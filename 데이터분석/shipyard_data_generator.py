@@ -711,7 +711,7 @@ class ShipyardGenerator:
             BTH=('BTH', 'max'),
             THK=('THK', 'max'),
             CUT_LTH=('CUT_LTH', 'sum'),
-            MARK_LTH=('MARK_LTH', 'max'),
+            MARK_LTH=('MARK_LTH', 'sum'),
             BVL_LTH=('BVL_LTH', 'sum'),
             STL_QTY=('STL_QTY', 'sum'),
             WO_QTY=('LTH', 'size'),
