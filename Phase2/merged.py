@@ -10,6 +10,8 @@ from __future__ import annotations
 import csv
 import json
 import math
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Sequence
@@ -220,9 +222,18 @@ def train_phase2_batch_machine_self_labeling(
     score_mode: str = "raw",
     resume_checkpoint: str | Path | None = None,
     constraint_profile: PhaseConstraintProfile | None = None,
+    candidate_workers: int = 1,
+    candidate_executor: ProcessPoolExecutor | None = None,
 ) -> Dict:
     """Self-labeling으로 통합 Phase 2 batch-machine policy를 학습한다."""
 
+    _validate_candidate_workers(candidate_workers)
+    if candidate_workers == 1 and candidate_executor is not None:
+        print(
+            "[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+            "cause=executor_with_single_worker"
+        )
+        raise RuntimeError("candidate_executor requires candidate_workers greater than 1")
     resolved_validation_rollout_samples = rollout_samples if validation_rollout_samples is None else validation_rollout_samples
     resolved_constraint_profile = constraint_profile or default_phase2_constraint_profile()
     score_field_names = _score_field_names(score_mode)
@@ -358,6 +369,7 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- checkpoint_every: {checkpoint_every}")
     print(f"- write_candidate_summary: {write_candidate_summary}")
     print(f"- device: {torch_device}")
+    print(f"- candidate_workers: {candidate_workers}")
 
     for episode in range(start_episode, episodes + 1):
         current_jobs = _episode_jobs(episode, jobs, episode_jobs, episode_job_factory)
@@ -385,6 +397,8 @@ def train_phase2_batch_machine_self_labeling(
             seed=seed + episode * 100_000,
             score_mode=score_mode,
             constraint_profile=resolved_constraint_profile,
+            candidate_workers=candidate_workers,
+            candidate_executor=candidate_executor,
         )
         last_best = best
         row = {
@@ -442,6 +456,8 @@ def train_phase2_batch_machine_self_labeling(
                     seed=seed + episode * 1_000_000 + validation_episode,
                     score_mode=score_mode,
                     constraint_profile=resolved_constraint_profile,
+                    candidate_workers=candidate_workers,
+                    candidate_executor=candidate_executor,
                 )
                 ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
                 best_validation = ranked_candidates[0]
@@ -556,11 +572,102 @@ def train_phase2_batch_machine_self_labeling(
         "validation_episodes": validation_episodes,
         "action_pool_limit": action_pool_limit,
         "write_candidate_summary": write_candidate_summary,
+        "candidate_workers": candidate_workers,
         "device": str(torch_device),
         "run_spec": run_spec,
     }
     summary_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
+
+
+@dataclass(frozen=True)
+class _Phase2CandidateWorkerPayload:
+    """한 worker가 동일 model snapshot으로 처리할 candidate 묶음이다."""
+
+    indexed_sources: tuple[tuple[int, str, int], ...]
+    jobs: Mapping[str, object]
+    machines: Mapping[str, object]
+    phase1_assignments: Mapping[str, str]
+    model_state_dict: Dict[str, torch.Tensor] | None
+    hidden_dim: int
+    device: str
+    max_wo_count: int
+    max_length_sum: float
+    action_pool_limit: int | None
+    score_mode: str
+    constraint_profile: PhaseConstraintProfile
+
+
+def create_phase2_candidate_executor(candidate_workers: int) -> ProcessPoolExecutor | None:
+    """CUDA-safe spawn worker pool을 만든다. 1은 기존 순차 경로다."""
+
+    _validate_candidate_workers(candidate_workers)
+    if candidate_workers == 1:
+        return None
+    return ProcessPoolExecutor(
+        max_workers=candidate_workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_initialize_phase2_candidate_worker,
+    )
+
+
+def _validate_candidate_workers(candidate_workers: int) -> None:
+    if isinstance(candidate_workers, bool) or not isinstance(candidate_workers, int) or candidate_workers <= 0:
+        print(
+            "[ERROR][Phase2.merged._validate_candidate_workers] "
+            f"cause=invalid_candidate_workers value={candidate_workers}"
+        )
+        raise ValueError("candidate_workers must be a positive integer")
+
+
+def _initialize_phase2_candidate_worker() -> None:
+    """각 candidate process가 CPU thread를 중첩 생성하지 않게 한다."""
+
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+
+
+def _run_phase2_candidate_worker(
+    payload: _Phase2CandidateWorkerPayload,
+) -> List[tuple[int, Phase2BatchMachineCandidate]]:
+    """동일 episode/model snapshot의 candidate 묶음을 한 process에서 실행한다."""
+
+    model: Phase2SetPointerPolicy | None = None
+    if payload.model_state_dict is not None:
+        model = Phase2SetPointerPolicy(hidden_dim=payload.hidden_dim)
+        model.load_state_dict(payload.model_state_dict)
+        model.to(_resolve_torch_device(payload.device))
+        model.eval()
+    base_environment = _build_phase2_common_environment(
+        jobs=payload.jobs,
+        machines=payload.machines,
+        phase1_assignments=payload.phase1_assignments,
+        constraint_profile=payload.constraint_profile,
+        max_wo_count=payload.max_wo_count,
+        max_length_sum=payload.max_length_sum,
+    )
+    results: List[tuple[int, Phase2BatchMachineCandidate]] = []
+    for candidate_index, source, candidate_seed in payload.indexed_sources:
+        results.append(
+            (
+                candidate_index,
+                run_phase2_batch_machine_candidate(
+                    jobs=payload.jobs,
+                    machines=payload.machines,
+                    phase1_assignments=payload.phase1_assignments,
+                    source=source,
+                    model=model,
+                    max_wo_count=payload.max_wo_count,
+                    max_length_sum=payload.max_length_sum,
+                    action_pool_limit=payload.action_pool_limit,
+                    seed=candidate_seed,
+                    score_mode=payload.score_mode,
+                    constraint_profile=payload.constraint_profile,
+                    common_environment=base_environment,
+                ),
+            )
+        )
+    return results
 
 
 def build_phase2_batch_machine_candidate_bank(
@@ -577,10 +684,19 @@ def build_phase2_batch_machine_candidate_bank(
     score_mode: str = "raw",
     constraint_profile: PhaseConstraintProfile | None = None,
     common_environment: CommonHierarchicalEnvironment | None = None,
+    candidate_workers: int = 1,
+    candidate_executor: ProcessPoolExecutor | None = None,
 ) -> List[Phase2BatchMachineCandidate]:
     """통합 Phase 2 후보 bank를 만든다. 휴리스틱 후보와 agent 후보를 함께 비교한다."""
 
     _score_field_names(score_mode)
+    _validate_candidate_workers(candidate_workers)
+    if candidate_workers == 1 and candidate_executor is not None:
+        print(
+            "[ERROR][Phase2.merged.build_phase2_batch_machine_candidate_bank] "
+            "cause=executor_with_single_worker"
+        )
+        raise RuntimeError("candidate_executor requires candidate_workers greater than 1")
     resolved_constraint_profile = constraint_profile or default_phase2_constraint_profile()
     if model is None and rollout_samples != 0:
         print("[ERROR][Phase2.merged.build_phase2_batch_machine_candidate_bank] cause=missing_model")
@@ -611,59 +727,101 @@ def build_phase2_batch_machine_candidate_bank(
         max_wo_count=max_wo_count,
         max_length_sum=max_length_sum,
     )
-    candidates = [
-        run_phase2_batch_machine_candidate(
-            jobs=jobs,
-            machines=machines,
-            phase1_assignments=phase1_assignments,
-            source=algorithm,
-            model=model,
-            max_wo_count=max_wo_count,
-            max_length_sum=max_length_sum,
-            action_pool_limit=action_pool_limit,
-            seed=seed,
-            score_mode=score_mode,
-            constraint_profile=resolved_constraint_profile,
-            common_environment=base_environment,
-        )
-        for algorithm in heuristic_algorithms
-    ]
-    if model is None:
-        return candidates
-    candidates.append(
-        run_phase2_batch_machine_candidate(
-            jobs=jobs,
-            machines=machines,
-            phase1_assignments=phase1_assignments,
-            source="agent_greedy",
-            model=model,
-            max_wo_count=max_wo_count,
-            max_length_sum=max_length_sum,
-            action_pool_limit=action_pool_limit,
-            seed=seed,
-            score_mode=score_mode,
-            constraint_profile=resolved_constraint_profile,
-            common_environment=base_environment,
-        )
-    )
-    for sample_index in range(1, rollout_samples + 1):
-        candidates.append(
+    indexed_sources: list[tuple[int, str, int]] = []
+    for algorithm in heuristic_algorithms:
+        indexed_sources.append((len(indexed_sources), algorithm, seed))
+    if model is not None:
+        indexed_sources.append((len(indexed_sources), "agent_greedy", seed))
+        for sample_index in range(1, rollout_samples + 1):
+            indexed_sources.append(
+                (len(indexed_sources), f"agent_sample_{sample_index}", seed + sample_index)
+            )
+    if candidate_workers == 1:
+        return [
             run_phase2_batch_machine_candidate(
                 jobs=jobs,
                 machines=machines,
                 phase1_assignments=phase1_assignments,
-                source=f"agent_sample_{sample_index}",
+                source=source,
                 model=model,
                 max_wo_count=max_wo_count,
                 max_length_sum=max_length_sum,
                 action_pool_limit=action_pool_limit,
-                seed=seed + sample_index,
+                seed=candidate_seed,
                 score_mode=score_mode,
                 constraint_profile=resolved_constraint_profile,
                 common_environment=base_environment,
             )
+            for _, source, candidate_seed in indexed_sources
+        ]
+
+    worker_count = min(candidate_workers, len(indexed_sources))
+    source_chunks = tuple(
+        tuple(indexed_sources[worker_index::worker_count])
+        for worker_index in range(worker_count)
+    )
+    model_state_dict = None
+    hidden_dim = 1
+    worker_device = "cpu"
+    if model is not None:
+        model_state_dict = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in model.state_dict().items()
+        }
+        hidden_dim = model.hidden_dim
+        worker_device = str(next(model.parameters()).device)
+    payloads = [
+        _Phase2CandidateWorkerPayload(
+            indexed_sources=source_chunk,
+            jobs=jobs,
+            machines=machines,
+            phase1_assignments=phase1_assignments,
+            model_state_dict=model_state_dict,
+            hidden_dim=hidden_dim,
+            device=worker_device,
+            max_wo_count=max_wo_count,
+            max_length_sum=max_length_sum,
+            action_pool_limit=action_pool_limit,
+            score_mode=score_mode,
+            constraint_profile=resolved_constraint_profile,
         )
-    return candidates
+        for source_chunk in source_chunks
+    ]
+    owned_executor = candidate_executor is None
+    executor = candidate_executor or create_phase2_candidate_executor(candidate_workers)
+    if executor is None:
+        print(
+            "[ERROR][Phase2.merged.build_phase2_batch_machine_candidate_bank] "
+            "cause=missing_parallel_executor"
+        )
+        raise RuntimeError("parallel Phase 2 candidate bank requires an executor")
+    futures = {
+        executor.submit(_run_phase2_candidate_worker, payload): payload
+        for payload in payloads
+    }
+    indexed_candidates: list[tuple[int, Phase2BatchMachineCandidate]] = []
+    try:
+        for future, payload in futures.items():
+            try:
+                indexed_candidates.extend(future.result())
+            except Exception as exc:
+                sources = [source for _, source, _ in payload.indexed_sources]
+                print(
+                    "[ERROR][Phase2.merged.build_phase2_batch_machine_candidate_bank] "
+                    f"cause=candidate_worker_failed sources={sources} error={exc}"
+                )
+                raise RuntimeError("Phase 2 candidate worker failed") from exc
+    finally:
+        if owned_executor:
+            executor.shutdown(wait=True, cancel_futures=True)
+    indexed_candidates.sort(key=lambda item: item[0])
+    if len(indexed_candidates) != len(indexed_sources):
+        print(
+            "[ERROR][Phase2.merged.build_phase2_batch_machine_candidate_bank] "
+            f"cause=candidate_count_mismatch expected={len(indexed_sources)} actual={len(indexed_candidates)}"
+        )
+        raise RuntimeError("parallel Phase 2 candidate count mismatch")
+    return [candidate for _, candidate in indexed_candidates]
 
 
 def run_phase2_batch_machine_candidate(
@@ -947,6 +1105,8 @@ def _train_one_episode(
     seed: int,
     score_mode: str,
     constraint_profile: PhaseConstraintProfile,
+    candidate_workers: int,
+    candidate_executor: ProcessPoolExecutor | None,
 ) -> tuple[float, Phase2BatchMachineCandidate, List[Phase2BatchMachineCandidate], List[Dict]]:
     machine_bay_ids = _machine_bay_ids(machines)
     jobs_by_bay = _jobs_by_phase1_bay(jobs, phase1_assignments)
@@ -977,6 +1137,8 @@ def _train_one_episode(
                 seed=seed + bay_index * 10_000,
                 score_mode=score_mode,
                 constraint_profile=constraint_profile,
+                candidate_workers=candidate_workers,
+                candidate_executor=candidate_executor,
             )
         ]
         best = min(bay_candidates, key=_candidate_sort_key)
