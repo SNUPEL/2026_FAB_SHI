@@ -2485,84 +2485,79 @@ def _source_counts(rows: Sequence[Mapping]) -> Dict[str, int]:
     return counts
 
 
+_METRICS_FIELDS: tuple[str, ...] = (
+    "episode",
+    "problem_id",
+    "block_count",
+    "problem_seed",
+    "case_type",
+    "hard_case_mode",
+    "hard_case_corr_steel_cut_before",
+    "hard_case_corr_steel_cut_after",
+    "best_source",
+    "score_mode",
+    "objective_scope",
+    "loss",
+    "score_json",
+    "phase2_feedback_score_json",
+    "learning_score_json",
+    "candidate_count",
+    "subproblem_count",
+)
+
+_SUBPROBLEM_METRICS_FIELDS: tuple[str, ...] = (
+    "episode",
+    "problem_id",
+    "subproblem_id",
+    "series",
+    "block_count",
+    "job_count",
+    "best_source",
+    "objective_scope",
+    "loss",
+    "score_json",
+    "phase2_feedback_score_json",
+    "learning_score_json",
+    "candidate_count",
+)
+
+_CANDIDATE_SUMMARY_FIELDS: tuple[str, ...] = (
+    "episode",
+    "problem_id",
+    "block_count",
+    "problem_seed",
+    "subproblem_id",
+    "candidate_index",
+    "source",
+    "is_best",
+    "score_mode",
+    "objective_scope",
+    "score_json",
+    "phase2_feedback_score_json",
+    "learning_score_json",
+    *PHASE1_SCORE_FIELD_NAMES,
+    "assignment_count",
+    "transition_count",
+    "bay_loads_json",
+)
+
+
 def _write_metrics(path: Path, rows: Sequence[Mapping]) -> None:
     """Write per-episode train metrics."""
 
-    _write_csv(
-        path,
-        [
-            "episode",
-            "problem_id",
-            "block_count",
-            "problem_seed",
-            "case_type",
-            "hard_case_mode",
-            "hard_case_corr_steel_cut_before",
-            "hard_case_corr_steel_cut_after",
-            "best_source",
-            "score_mode",
-            "objective_scope",
-            "loss",
-            "score_json",
-            "phase2_feedback_score_json",
-            "learning_score_json",
-            "candidate_count",
-            "subproblem_count",
-        ],
-        rows,
-    )
+    _write_csv(path, _METRICS_FIELDS, rows)
 
 
 def _write_subproblem_metrics(path: Path, rows: Sequence[Mapping]) -> None:
     """Write one row for every independent resource-pool optimizer update."""
 
-    _write_csv(
-        path,
-        [
-            "episode",
-            "problem_id",
-            "subproblem_id",
-            "series",
-            "block_count",
-            "job_count",
-            "best_source",
-            "objective_scope",
-            "loss",
-            "score_json",
-            "phase2_feedback_score_json",
-            "learning_score_json",
-            "candidate_count",
-        ],
-        rows,
-    )
+    _write_csv(path, _SUBPROBLEM_METRICS_FIELDS, rows)
 
 
 def _write_candidate_summary(path: Path, rows: Sequence[Mapping]) -> None:
     """Write all complete candidates for audit."""
 
-    _write_csv(
-        path,
-        [
-            "episode",
-            "problem_id",
-            "block_count",
-            "problem_seed",
-            "subproblem_id",
-            "candidate_index",
-            "source",
-            "is_best",
-            "score_mode",
-            "objective_scope",
-            "score_json",
-            "phase2_feedback_score_json",
-            "learning_score_json",
-            *PHASE1_SCORE_FIELD_NAMES,
-            "assignment_count",
-            "transition_count",
-            "bay_loads_json",
-        ],
-        rows,
-    )
+    _write_csv(path, _CANDIDATE_SUMMARY_FIELDS, rows)
 
 
 def _write_validation_candidate_summary(path: Path, rows: Sequence[Mapping]) -> None:
@@ -2934,5 +2929,31 @@ def _write_jsonl(path: Path, rows: Sequence[Mapping]) -> None:
     """Write JSONL rows."""
 
     with path.open("w", encoding="utf-8") as file:
+        for row in rows:
+            file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _append_csv_rows(path: Path, fields: Sequence[str], rows: Sequence[Mapping]) -> None:
+    """Append rows without rewriting the accumulated training history."""
+
+    if not rows:
+        print(f"[ERROR][phase1_pair_self_labeling._append_csv_rows] cause=no_rows path={path}")
+        raise RuntimeError(f"no rows to append: {path}")
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(fields))
+        if write_header:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields})
+
+
+def _append_jsonl_rows(path: Path, rows: Sequence[Mapping]) -> None:
+    """Append JSONL rows without rewriting the accumulated table."""
+
+    if not rows:
+        print(f"[ERROR][phase1_pair_self_labeling._append_jsonl_rows] cause=no_rows path={path}")
+        raise RuntimeError(f"no rows to append: {path}")
+    with path.open("a", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
