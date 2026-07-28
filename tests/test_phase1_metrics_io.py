@@ -140,5 +140,32 @@ class TruncateHistoryFilesTests(unittest.TestCase):
             self.assertEqual(subproblem_rows, [])
 
 
+class Phase1CliFlagTests(unittest.TestCase):
+    def test_write_candidate_summary_defaults_to_false(self) -> None:
+        from main import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "phase1-train-pair-self-labeling",
+                "--config", "config_mixed.yaml",
+                "--output-dir", "output/tmp",
+            ]
+        )
+        self.assertFalse(args.write_candidate_summary)
+
+    def test_write_candidate_summary_can_be_enabled(self) -> None:
+        from main import build_parser
+
+        args = build_parser().parse_args(
+            [
+                "phase1-train-pair-self-labeling",
+                "--config", "config_mixed.yaml",
+                "--output-dir", "output/tmp",
+                "--write-candidate-summary",
+            ]
+        )
+        self.assertTrue(args.write_candidate_summary)
+
+
 if __name__ == "__main__":
     unittest.main()

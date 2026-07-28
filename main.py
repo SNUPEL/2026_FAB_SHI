@@ -253,6 +253,7 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
     print(f"- phase2_feedback_enabled: {phase2_feedback_scorer is not None}")
     print(f"- phase2_feedback_checkpoint: {feedback_checkpoint or ''}")
+    print(f"- write_candidate_summary: {args.write_candidate_summary}")
     print(f"- device: {args.device}")
     print(f"- output_dir: {args.output_dir}")
 
@@ -305,6 +306,7 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         bay_capacity_weights=capacity_weights,
         device=args.device,
         objective_scope=args.objective_scope,
+        write_candidate_summary=args.write_candidate_summary,
     )
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
@@ -1226,6 +1228,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-checkpoint",
         default="",
         help="Resume pair self-labeling from explicit checkpoint path or 'latest' in output-dir/checkpoints",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--write-candidate-summary",
+        action="store_true",
+        help="Write per-training-candidate audit rows. Disabled by default for long training speed.",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--enable-phase2-feedback-score",

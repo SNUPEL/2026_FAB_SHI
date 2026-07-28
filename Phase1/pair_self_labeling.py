@@ -902,7 +902,7 @@ def train_phase1_pair_self_labeling(
         "best_checkpoint_path": str(best_checkpoint_path) if best_validation_score is not None else "",
         "metrics_csv": str(output_path / "metrics.csv"),
         "subproblem_metrics_csv": str(output_path / "subproblem_metrics.csv"),
-        "candidate_summary_csv": str(output_path / "candidate_summary.csv"),
+        "candidate_summary_csv": str(output_path / "candidate_summary.csv") if write_candidate_summary else "",
         "best_action_table_jsonl": str(output_path / "best_action_table.jsonl"),
         "validation_summary_csv": str(output_path / "validation_summary.csv") if validation_rows else "",
         "validation_candidate_summary_csv": str(output_path / "validation_candidate_summary.csv") if validation_candidate_rows else "",
