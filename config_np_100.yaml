@@ -1,0 +1,202 @@
+paths:
+  scenario_path:
+  source_data_path: input/절단03~04_NP물량_마스킹_WO_수정_260618.xlsx
+  source_sheet_name: Sheet1
+  output_dir: output
+data:
+  target_series:
+  - NP
+  max_records: 100
+  process_time_source: tact_time
+factory:
+  bays:
+  - bay_id: '22'
+    name: Bay 22
+    position:
+    - 0
+    - 0
+    equipment:
+      PLS:
+        count: 4
+        machine_ids:
+        - PLS21
+        - PLS22
+        - PLS23
+        - PLS24
+  - bay_id: '23'
+    name: Bay 23
+    position:
+    - 0
+    - 1
+    equipment:
+      PLS:
+        count: 3
+        machine_ids:
+        - PLS31
+        - PLS32
+        - PLS33
+  - bay_id: '24'
+    name: Bay 24
+    position:
+    - 0
+    - 2
+    equipment:
+      PLS:
+        count: 4
+        machine_ids:
+        - PLS41
+        - PLS42
+        - PLS43
+        - PLS44
+  - bay_id: '25'
+    name: Bay 25
+    position:
+    - 0
+    - 3
+    equipment:
+      PLP:
+        count: 1
+        machine_ids:
+        - PLP02
+        machine_type: plasma
+        enabled: true
+        eligible_families:
+        - NP
+        min_thickness: 0
+        max_thickness: 100
+        table_length_limit: 55000
+        cut_speed_factor: 1.0
+        daily_capacity_minutes: 1440
+        parallel_capacity: 1
+        required_resource_ids: []
+      PLS:
+        count: 1
+        machine_ids:
+        - PLS52
+simulation:
+  start_date: '2026-03-03'
+  minutes_per_day: 1440
+  horizon_minutes: 20160
+  auto_advance_time: true
+  decision_mode: decision_epoch
+  stage_names:
+  - setup
+  - cut
+  - finish
+calendar:
+  enable_holidays_off: false
+  holidays_off: []
+  enable_half_day_off: false
+  half_day_off: []
+  half_day_off_window: 12:00-24:00
+  enable_lunch_break: false
+  lunch_break: 12:00-13:00
+  lunch_break_dates: []
+  enable_global_shutdown_windows: false
+  global_shutdown_windows: {}
+  enable_machine_operating_windows: false
+  machine_operating_windows: {}
+  enable_machine_shutdown_windows: false
+  machine_shutdown_windows: {}
+  enable_machine_breakdowns: false
+  machine_breakdowns: {}
+  enable_operation_time_adjustment: true
+  operation_time_adjustment_limit_minutes: 10080
+setup:
+  enable_family_changeover: false
+  default_family_changeover_minutes: 0
+  machine_type_changeover_minutes:
+    plasma: 0
+action_space:
+  mode: batch_open
+  allow_single_slot_baseline: false
+batch:
+  processing_time_rule: max_individual
+agent:
+  default_heuristic: batch_fill_spt
+constraints:
+  profiles:
+    phase2:
+      categories:
+        machine: true
+        capacity: true
+        downstream: false
+        priority: false
+        preference: false
+        layout: true
+        calendar: false
+      hard_enabled:
+        machine_enabled: true
+        machine_bay_consistency: true
+        block_set_same_bay: true
+        machine_single_processing: true
+        batch_wo_count_limit: true
+        batch_length_sum_limit: true
+        family_eligibility: true
+        thickness_range: false
+        table_length_limit: false
+      soft_enabled: {}
+      soft_penalty_weights: {}
+  categories:
+    machine: true
+    capacity: true
+    downstream: false
+    priority: true
+    preference: true
+    layout: true
+    calendar: true
+  hard_enabled:
+    calendar_open: true
+    machine_calendar_open: true
+    machine_breakdown: true
+    machine_enabled: true
+    family_eligibility: true
+    thickness_range: true
+    table_length_limit: true
+    machine_single_processing: true
+    machine_bay_consistency: true
+    block_set_same_bay: true
+    auxiliary_resources_available: true
+    daily_capacity_limit: false
+    daily_job_cap_limit: false
+    machine_day_wo_count_limit: false
+    machine_day_length_sum_limit: false
+    downstream_capacity: false
+    batch_wo_count_limit: true
+    batch_length_sum_limit: true
+    allowed_machine_ids: false
+    prohibited_machine_ids: false
+    allowed_bay_ids: false
+    table_type_eligibility: false
+    plate_width_range: false
+    machine_priority_tier_policy: false
+    bay_priority_tier_policy: false
+    downstream_due_date: false
+    downstream_required_start: false
+  soft_enabled:
+    downstream_priority: false
+    due_date_urgency: true
+    preferred_machine_type: false
+    downstream_buffer_warning: false
+    load_balance_preference: true
+  soft_penalty_weights:
+    downstream_priority: 3.0
+    due_date_urgency: 2.0
+    preferred_machine_type: 1.0
+    downstream_buffer_warning: 1.5
+    load_balance_preference: 0.5
+  overrides:
+    enable_daily_machine_capacity_overrides: false
+    enable_daily_machine_enable_overrides: false
+    enable_daily_job_cap_overrides: false
+    daily_machine_capacity_overrides: {}
+    daily_machine_enable_overrides: {}
+    daily_job_cap_overrides: {}
+  machine_day_limits:
+    max_wo_count: 3
+    max_length_sum: 55000
+reward:
+  makespan_weight: 1.0
+  load_balance_weight: 0.1
+  priority_bonus_weight: 0.02
+  soft_penalty_weight: 1.0
