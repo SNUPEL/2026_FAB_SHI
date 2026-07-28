@@ -13,10 +13,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Environment & commands
 
-This is a **Windows / PowerShell** repo with a conda-style env. The docs write `python3`, but
-locally use **`python`**. A `.venv` exists at the repo root.
+The docs write `python3`, but use the conda env **`accord_env`** — that is where `torch` lives
+(`~/anaconda3/envs/accord_env/bin/python` on Linux). The conda *base* `python` has no `torch`, so
+plain `python` will fail on any import of the training path. There is no `.venv` at the repo root.
 
-```powershell
+```bash
 # Compile check (fast smoke)
 python -m py_compile main.py Agent/*.py Phase1/*.py Phase2/*.py Environment/*.py Environment/constraints/*.py Utils/data/*.py Utils/learning/*.py Utils/phase1/*.py Utils/reporting/*.py Train/network/*.py scripts/*.py
 
@@ -39,14 +40,11 @@ Regression pass criteria: SPT and load_balance each `scheduled=100, unscheduled=
 actual-replay identity error `=0`. `holidays` is required for `phase1-plan-multi-series`
 (Korean legal/substitute holidays) and must not fall back to a default calendar.
 
-`main.py` is a single ~227KB argparse CLI (`main()` at the bottom, `add_subparsers`). Every line
-carries an auto-generated Korean `# LINE-BY-LINE:` comment — these are machine-written noise, not
-design intent; do not treat them as authoritative and do not replicate the style in new code.
-
-Key subcommands: `simulate`, `playback`, `actual-replay` / `factory-replay`, `factory-summary`,
-`generate-phase1-blocks`, `phase1-train-pair-self-labeling`,
-`phase2-train-batch-machine-self-labeling`, `phase2-run-full-workflow`, `phase1-plan-multi-series`,
-`build-scenario`, `analyze-tact`, `analyze-tact-gap`.
+`main.py` is a single argparse CLI (`main()` at the bottom, `add_subparsers`); run
+`python main.py --help` for the subcommand list. Some lines carry an auto-generated Korean
+`# LINE-BY-LINE:` comment — these are machine-written noise, not design intent; do not treat them
+as authoritative and do not replicate the style in new code. Note the `master` branch still holds
+the old ~227KB fully-annotated `main.py`; the working branches carry the trimmed version.
 
 ## Architecture
 
