@@ -18,6 +18,21 @@ if os.name == "nt" and "KMP_DUPLICATE_LIB_OK" not in os.environ:
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
     print("[CHECK][main.openmp_guard] KMP_DUPLICATE_LIB_OK=TRUE")
 
+# LINE-BY-LINE: Windows conda의 MKL은 numpy.linalg.lstsq(LAPACK gelsd)의 내부 멀티스레딩에서
+# 간헐적 native crash(faulthandler C-stack dump)를 냅니다. 원인은 앱 코드가 아니라 MKL 스레딩 경합입니다.
+# 사용: MKL을 단일 스레드/sequential로 고정해 이 경합 자체를 제거합니다. torch intra-op 병렬성(OMP_NUM_THREADS)은
+# 건드리지 않아 학습 성능에 영향이 없습니다. 반드시 numpy/torch import보다 먼저 설정해야 합니다. 사용자 지정값은 존중합니다.
+if os.name == "nt":
+    _mkl_guarded = False
+    if "MKL_NUM_THREADS" not in os.environ:
+        os.environ["MKL_NUM_THREADS"] = "1"
+        _mkl_guarded = True
+    if "MKL_THREADING_LAYER" not in os.environ:
+        os.environ["MKL_THREADING_LAYER"] = "SEQUENTIAL"
+        _mkl_guarded = True
+    if _mkl_guarded:
+        print("[CHECK][main.openmp_guard] MKL_NUM_THREADS=1 MKL_THREADING_LAYER=SEQUENTIAL")
+
 # LINE-BY-LINE: `argparse` 모듈을 가져옵니다. 사용: 이 파일 안에서 해당 라이브러리 기능을 호출합니다.
 import argparse
 # LINE-BY-LINE: `json` 모듈을 가져옵니다. 사용: 이 파일 안에서 해당 라이브러리 기능을 호출합니다.

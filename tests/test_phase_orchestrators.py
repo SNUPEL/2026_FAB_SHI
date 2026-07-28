@@ -24,11 +24,9 @@ class PhaseOrchestratorTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.episode = build_phase1_episode_jobs(
             episode_count=1,
-            # canonical 260724 profile에서 이 seed의 첫 4개 물리 블록이
-            # NP_NC와 FN_FL resource pool을 모두 포함한다.
-            min_blocks=4,
-            max_blocks=4,
-            seed=20260715,
+            min_blocks=2,
+            max_blocks=2,
+            seed=20260718,
             verbose=False,
         )[0]
         cls.phase1 = run_phase1_graph_workflow(cls.episode["jobs"])

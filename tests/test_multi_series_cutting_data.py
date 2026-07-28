@@ -89,6 +89,8 @@ class MultiSeriesCuttingDataTest(unittest.TestCase):
             prepare_multi_series_cutting_data(block_rows, wo_rows)
 
     def test_rejects_mark_maximum_when_new_contract_requires_wo_sum(self) -> None:
+        # 블록 MARK_LTH는 W/O MARK_LTH의 합이어야 한다. W/O 최댓값(5.0)을 블록값으로
+        # 넣으면 합(10.0)과 달라 검증에서 거부되어야 한다.
         block_rows = pd.DataFrame(
             [
                 self._block_row(

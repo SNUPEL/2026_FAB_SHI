@@ -345,12 +345,10 @@ def _source_metadata(path: Path) -> dict:
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
-    # audit 경로는 POSIX 구분자로 고정한다. `str(Path)`를 쓰면 Windows에서 역슬래시가
-    # 나와, 같은 원천으로 재생성해도 profile JSON이 byte 단위로 달라진다.
     try:
-        display_path = path.resolve().relative_to(REPO_ROOT).as_posix()
+        display_path = str(path.resolve().relative_to(REPO_ROOT))
     except ValueError:
-        display_path = path.resolve().as_posix()
+        display_path = str(path.resolve())
     return {
         "path": display_path,
         "sha256": digest.hexdigest(),
@@ -758,13 +756,8 @@ def _apportion_empirical_count_vector(
 def build_multi_series_generation_profile(
     wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
     block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
-    fl_mark_method: str = "chain",
 ) -> dict:
-    """실적 Excel을 한 번 적합해 재현 가능한 고정 JSON payload를 만든다.
-
-    fl_mark_method: FL 계열 MARK_LTH 생성 방법('chain' 또는 'dirichlet').
-        다른 계열엔 영향이 없다. 자세한 내용은 shipyard_data_generator.FL_MARK_METHODS.
-    """
+    """실적 Excel을 한 번 적합해 재현 가능한 고정 JSON payload를 만든다."""
 
     wo_path = Path(wo_source_path).resolve()
     block_path = Path(block_source_path).resolve()
@@ -785,13 +778,11 @@ def build_multi_series_generation_profile(
 
     empirical = {}
     for series in sorted(SUPPORTED_SERIES - {"NP"}):
-        # fl_mark_method는 FL에만 영향을 준다(다른 계열은 무시).
         empirical[series] = ShipyardGenerator(
             wo_path,
             block_path,
-            mode="pearson",
+            mode="spearman",
             series=series,
-            fl_mark_method=fl_mark_method,
         ).fit().to_generation_profile()
     payload = {
         "schema": MULTI_SERIES_GENERATION_PROFILE_SCHEMA,
@@ -819,18 +810,12 @@ def write_multi_series_generation_profile(
     output_path: str | Path = DEFAULT_MULTI_SERIES_GENERATION_PROFILE,
     wo_source_path: str | Path = DEFAULT_MULTI_SERIES_WO_SOURCE,
     block_source_path: str | Path = DEFAULT_MULTI_SERIES_BLOCK_SOURCE,
-    fl_mark_method: str = "chain",
 ) -> Path:
-    """오프라인 적합 결과를 표준 JSON으로 원자적으로 저장한다.
-
-    fl_mark_method: FL 계열 MARK_LTH 생성 방법('chain' 또는 'dirichlet').
-    """
+    """오프라인 적합 결과를 표준 JSON으로 원자적으로 저장한다."""
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = build_multi_series_generation_profile(
-        wo_source_path, block_source_path, fl_mark_method=fl_mark_method
-    )
+    payload = build_multi_series_generation_profile(wo_source_path, block_source_path)
     serialized = json.dumps(
         payload,
         ensure_ascii=False,

@@ -70,6 +70,10 @@ PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK = (
     "best_fit_lth",
     "spt_batch",
     "lpt_batch",
+    "long_cut_batch",      # 절단 길이 긴 W/O 우선
+    "short_cut_batch",     # 절단 길이 짧은 W/O 우선
+    "long_bevel_batch",    # 베벨 길이(BVL_LTH) 긴 W/O 우선
+    "short_bevel_batch",   # 베벨 길이 짧은 W/O 우선
 )
 PHASE2_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
 
@@ -182,6 +186,7 @@ class _Phase2DispatchCache:
     plate_length_by_job: Dict[str, float]
     cut_length_by_job: Dict[str, float]
     bevel_quantity_by_job: Dict[str, float]
+    bevel_length_by_job: Dict[str, float]
 
 
 def train_phase2_batch_machine_self_labeling(
@@ -1214,6 +1219,7 @@ def _wo_select_actions(
         processing_time = _processing_time_for_job(job, job_id, dispatch_cache)
         cut_length = _cut_length_for_job(job, job_id, dispatch_cache)
         bevel_quantity = _bevel_quantity_for_job(job, job_id, dispatch_cache)
+        bevel_length = _bevel_length_for_job(job, job_id, dispatch_cache)
         projected_length = open_length_sum + _job_length(job, job_id, dispatch_cache)
         projected_duration = max(open_batch_duration, processing_time)
         duration_increment = projected_duration - open_batch_duration
@@ -1255,6 +1261,7 @@ def _wo_select_actions(
                 "candidate_processing_time": round(processing_time, 6),
                 "candidate_cut_length": round(cut_length, 6),
                 "candidate_bevel_quantity": round(bevel_quantity, 6),
+                "candidate_bevel_length": round(bevel_length, 6),
                 "machine_clock": round(selected_machine_start_time, 6),
                 "projected_finish_time": round(projected_finish, 6),
                 "projected_makespan": round(projected_makespan, 6),
@@ -1420,10 +1427,23 @@ def _heuristic_key(source: str, action: Mapping) -> tuple:
         )
     if source == "best_fit_lth":
         return (-int(action["wo_count"]), -float(action["length_sum"]), float(action["projected_makespan"]), *common)
+    if source == "balanced_tact_load":
+        return (float(action["projected_finish_time"]), float(action["machine_clock"]), -int(action["wo_count"]), *common)
     if source == "spt_batch":
         return (float(action["candidate_processing_time"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
     if source == "lpt_batch":
         return (-float(action["candidate_processing_time"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
+    if source == "long_cut_batch":
+        return (-float(action["candidate_cut_length"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
+    if source == "short_cut_batch":
+        return (float(action["candidate_cut_length"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
+    if source == "long_bevel_batch":
+        return (-float(action["candidate_bevel_length"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
+    if source == "short_bevel_batch":
+        return (float(action["candidate_bevel_length"]), float(action["projected_makespan"]), -int(action["wo_count"]), *common)
+    if source == "worst_fit_lth":
+        # best_fit_lth의 반대: batch 길이합을 최소화 → 슬롯에서 가장 짧은 LTH W/O 우선.
+        return (-int(action["wo_count"]), float(action["length_sum"]), float(action["projected_makespan"]), *common)
     print(f"[ERROR][Phase2.merged._heuristic_key] cause=unknown_source source={source}")
     raise RuntimeError(f"unknown merged Phase 2 candidate source: {source}")
 
@@ -1573,6 +1593,7 @@ def _build_dispatch_cache(
         plate_length_by_job={str(job_id): _job_length(job, str(job_id)) for job_id, job in jobs.items()},
         cut_length_by_job={str(job_id): _required_non_negative(job, "cut_length") for job_id, job in jobs.items()},
         bevel_quantity_by_job={str(job_id): _required_non_negative(job, "bevel_quantity") for job_id, job in jobs.items()},
+        bevel_length_by_job={str(job_id): _optional_bevel_length(job) for job_id, job in jobs.items()},
     )
 
 
@@ -1901,6 +1922,23 @@ def _bevel_quantity_for_job(job: object, job_id: str, dispatch_cache: _Phase2Dis
     if dispatch_cache is not None and str(job_id) in dispatch_cache.bevel_quantity_by_job:
         return float(dispatch_cache.bevel_quantity_by_job[str(job_id)])
     return float(_required_non_negative(job, "bevel_quantity"))
+
+
+def _optional_bevel_length(job: object) -> float:
+    """job의 베벨 길이(BVL_LTH). 최소 fixture처럼 필드가 없으면 0.0으로 관대하게 읽는다.
+    (실적 job은 bevel_length가 항상 존재하며, 이 값이 long/short bevel 휴리스틱의 기준이 된다.)"""
+
+    value = job.get("bevel_length") if isinstance(job, Mapping) else getattr(job, "bevel_length", None)
+    if value is None:
+        return 0.0
+    length = float(value)
+    return length if length >= 0.0 else 0.0
+
+
+def _bevel_length_for_job(job: object, job_id: str, dispatch_cache: _Phase2DispatchCache | None = None) -> float:
+    if dispatch_cache is not None and str(job_id) in dispatch_cache.bevel_length_by_job:
+        return float(dispatch_cache.bevel_length_by_job[str(job_id)])
+    return _optional_bevel_length(job)
 
 
 def _job_length(job: object, job_id: str, dispatch_cache: _Phase2DispatchCache | None = None) -> float:
@@ -2762,8 +2800,14 @@ def _display_source_name(source: str) -> str:
         "min_makespan": "MinMakespan",
         "lookahead_min_makespan": "LookaheadMinMakespan",
         "best_fit_lth": "BestFitLTH",
+        "balanced_tact_load": "BalancedTact",
         "spt_batch": "SPTBatch",
         "lpt_batch": "LPTBatch",
+        "long_cut_batch": "LongCutBatch",
+        "short_cut_batch": "ShortCutBatch",
+        "long_bevel_batch": "LongBevelBatch",
+        "short_bevel_batch": "ShortBevelBatch",
+        "worst_fit_lth": "WorstFitLTH",
     }
     return names.get(source, source)
 

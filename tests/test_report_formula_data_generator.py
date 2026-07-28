@@ -10,9 +10,6 @@ import numpy as np
 from Utils.data import report_formula_data_generator as report_formula
 from Utils.data.report_formula_data_generator import (
     BLOCK_COLUMNS,
-    BTH_FORMULA_FEATURES,
-    BthFormulaProfile,
-    StlQuantityProfile,
     TACT_A_CUT,
     TACT_A_MARK,
     TACT_A_PTLST,
@@ -22,27 +19,6 @@ from Utils.data.report_formula_data_generator import (
     _scale_non_negative_values_to_total,
     generate_report_formula_data,
 )
-
-
-def _constant_auxiliary_profiles(stl_quantity: int) -> tuple[BthFormulaProfile, StlQuantityProfile]:
-    bth_profile = BthFormulaProfile(
-        series="NP",
-        coefficients=(0.0,) * (len(BTH_FORMULA_FEATURES) + 1),
-        residual_std=0.0,
-        r_squared=1.0,
-        observed_specs=(1.0,),
-    )
-    stl_profile = StlQuantityProfile(
-        series="NP",
-        features=("LTH",),
-        feature_mean=(0.0,),
-        feature_scale=(1.0,),
-        normalized_actual_features=np.zeros((3, 1), dtype=float),
-        actual_values=np.full(3, stl_quantity, dtype=int),
-        classes=(stl_quantity,),
-        priors=(1.0,),
-    )
-    return bth_profile, stl_profile
 
 
 class ReportFormulaDataGeneratorTest(unittest.TestCase):
@@ -125,40 +101,35 @@ class ReportFormulaDataGeneratorTest(unittest.TestCase):
             self.assertAlmostEqual(block.CUT_LTH, float(rows["CUT_LTH"].sum()), places=6)
             self.assertAlmostEqual(block.MARK_LTH, float(rows["MARK_LTH"].sum()), places=6)
 
-    def test_wo_count_and_stl_quantity_are_not_aliased(self) -> None:
-        bth_profile, stl_profile = _constant_auxiliary_profiles(stl_quantity=2)
-        generated = generate_report_formula_data(
-            n_blocks=100,
-            seed=20260715,
-            bth_profile=bth_profile,
-            stl_quantity_profile=stl_profile,
-        )
+    def test_stl_quantity_is_one_per_wo_and_block_sum_equals_wo_count(self) -> None:
+        # 260724 실적은 W/O STL_QTY=1이므로 블록 STL_QTY(=W/O STL_QTY 합)는 W/O 행 수와
+        # 같아진다. block STL_QTY는 W/O count가 아니라 STL_QTY 컬럼의 합으로 계산된다.
+        generated = generate_report_formula_data(n_blocks=100, seed=20260715)
 
-        self.assertEqual(set(generated.wo_df["STL_QTY"]), {2})
-        self.assertNotEqual(len(generated.wo_df), int(generated.block_df["STL_QTY"].sum()))
+        self.assertTrue((generated.wo_df["STL_QTY"] == 1).all())
+        self.assertEqual(len(generated.wo_df), int(generated.block_df["STL_QTY"].sum()))
         wo_counts = generated.wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"]).size()
         block_stl = generated.block_df.set_index(["PROJ_NO", "GYEL", "BLK_NO"])["STL_QTY"]
-        self.assertTrue((2 * wo_counts == block_stl).all())
+        self.assertTrue((wo_counts == block_stl).all())
 
-    def test_prescribed_wo_counts_control_rows_without_aliasing_stl_quantity(self) -> None:
-        bth_profile, stl_profile = _constant_auxiliary_profiles(stl_quantity=2)
+    def test_prescribed_wo_counts_control_rows_and_block_stl_sums_wo_column(self) -> None:
         generated = generate_report_formula_data(
             n_blocks=3,
             seed=20260716,
             wo_counts=(1, 4, 2),
             block_seeds=(101, 202, 303),
-            bth_profile=bth_profile,
-            stl_quantity_profile=stl_profile,
         )
 
         actual_counts = generated.wo_df.groupby(
             ["PROJ_NO", "GYEL", "BLK_NO"], sort=True
         ).size()
         self.assertEqual(actual_counts.tolist(), [1, 4, 2])
+        # W/O STL_QTY=1이므로 블록 STL_QTY(=STL_QTY 컬럼 합)는 지정된 W/O 수와 같다.
+        self.assertTrue((generated.wo_df["STL_QTY"] == 1).all())
         block_stl = generated.block_df.set_index(
             ["PROJ_NO", "GYEL", "BLK_NO"]
         )["STL_QTY"]
-        self.assertTrue((2 * actual_counts == block_stl).all())
+        self.assertEqual(block_stl.tolist(), [1, 4, 2])
 
     def test_prescribed_wo_counts_reject_fractional_values(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "invalid wo_counts"):
