@@ -53,7 +53,15 @@ def main() -> None:
             row for row in candidate_rows
             if _row_objective_scope(row) == objective_scope
         ]
-    proposed_rows = _best_agent_rows_by_episode(candidate_rows)
+    if candidate_rows:
+        proposed_rows = _best_agent_rows_by_episode(candidate_rows)
+    else:
+        proposed_rows = {}
+        print(
+            "[CHECK][plot_phase1_pair_training] "
+            "cause=skipped_candidate_plots reason=no_candidate_summary_rows "
+            "hint=rerun training with --write-candidate-summary for candidate plots"
+        )
     _write_plots(output_dir, rows, proposed_rows, window=args.window)
 
 
@@ -75,8 +83,12 @@ def _read_metrics(path: Path) -> list[dict[str, str]]:
 
 def _read_candidate_summary(path: Path) -> list[dict[str, str]]:
     if not path.exists():
-        print(f"[ERROR][plot_phase1_pair_training._read_candidate_summary] cause=missing_candidate_summary path={path}")
-        raise RuntimeError(f"missing candidate summary file: {path}")
+        print(
+            "[CHECK][plot_phase1_pair_training._read_candidate_summary] "
+            f"cause=candidate_summary_disabled path={path} "
+            "hint=rerun training with --write-candidate-summary to get candidate plots"
+        )
+        return []
     rows = list(csv.DictReader(path.open(encoding="utf-8-sig")))
     if not rows:
         print(f"[ERROR][plot_phase1_pair_training._read_candidate_summary] cause=empty_candidate_summary path={path}")
@@ -110,8 +122,6 @@ def _write_plots(
     episodes = [int(row["episode"]) for row in rows]
     losses = [float(row["loss"]) for row in rows]
     sources = [row["best_source"] for row in rows]
-    proposed_sources = [_proposed_row(proposed_rows, episode)["source"] for episode in episodes]
-    scores = [json.loads(_proposed_row(proposed_rows, episode)["score_json"]) for episode in episodes]
     score_mode = rows[0].get("score_mode", "steel_first")
     objective_scope = _objective_scope(rows, score_mode)
     labels = _score_labels(score_mode, objective_scope)
@@ -119,10 +129,21 @@ def _write_plots(
     _plot_loss(output_dir / "loss_curve.png", plt, episodes, losses, normalized=False, window=window)
     _plot_loss(output_dir / "loss_curve_normalized.png", plt, episodes, losses, normalized=True, window=window)
     _plot_best_sources(output_dir / "best_source_counts.png", plt, sources)
-    _plot_best_sources(output_dir / "proposed_source_counts.png", plt, proposed_sources)
     _plot_agent_rate(output_dir / "agent_best_rate_curve.png", plt, episodes, sources)
-    _plot_score_components(output_dir / "best_score_curve_normalized.png", plt, episodes, scores, labels, mode="minmax", window=window)
-    _plot_score_components(output_dir / "best_score_curve_relative.png", plt, episodes, scores, labels, mode="relative", window=window)
+
+    proposed_sources: list[str] = []
+    if proposed_rows:
+        proposed_sources = [_proposed_row(proposed_rows, episode)["source"] for episode in episodes]
+        scores = [json.loads(_proposed_row(proposed_rows, episode)["score_json"]) for episode in episodes]
+        _plot_best_sources(output_dir / "proposed_source_counts.png", plt, proposed_sources)
+        _plot_score_components(output_dir / "best_score_curve_normalized.png", plt, episodes, scores, labels, mode="minmax", window=window)
+        _plot_score_components(output_dir / "best_score_curve_relative.png", plt, episodes, scores, labels, mode="relative", window=window)
+    else:
+        print(
+            "[CHECK][plot_phase1_pair_training._write_plots] "
+            "cause=skipped_candidate_plots reason=no_candidate_summary_rows "
+            "hint=rerun training with --write-candidate-summary for candidate plots"
+        )
 
     status = _quick_status(rows, losses, sources, proposed_sources)
     status.update(

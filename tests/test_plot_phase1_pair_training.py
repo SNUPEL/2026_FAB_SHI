@@ -6,6 +6,7 @@ from scripts.plot_phase1_pair_training import (
     _best_agent_rows_by_episode,
     _latest_objective_scope_rows,
     _quick_status,
+    _read_candidate_summary,
     _score_labels,
     _subproblem_sources,
 )
@@ -97,6 +98,27 @@ class Phase1AgentBestRateTest(unittest.TestCase):
         self.assertEqual(status["agent_best_count"], 3)
         self.assertAlmostEqual(status["agent_best_rate"], 0.75)
         self.assertAlmostEqual(status["last50_agent_best_rate"], 0.75)
+
+
+class ReadCandidateSummaryTests(unittest.TestCase):
+    def test_missing_file_returns_empty_list(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _read_candidate_summary(Path(tmp) / "candidate_summary.csv")
+
+        self.assertEqual(rows, [])
+
+    def test_empty_file_still_raises(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "candidate_summary.csv"
+            path.write_text("episode,source,score_json,learning_score_json\n", encoding="utf-8-sig")
+            with self.assertRaises(RuntimeError):
+                _read_candidate_summary(path)
 
 
 if __name__ == "__main__":
