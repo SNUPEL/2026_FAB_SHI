@@ -500,6 +500,7 @@ def train_phase1_pair_self_labeling(
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     device: str = "cpu",
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    write_candidate_summary: bool = False,
 ) -> Dict:
     """Train one shared pair policy with independent resource-pool teachers.
 
@@ -578,16 +579,12 @@ def train_phase1_pair_self_labeling(
         start_episode = completed_episode + 1
         objective_scope_transition = previous_objective_scope != normalized_objective_scope
         _move_optimizer_state(optimizer, torch_device)
-    # LINE-BY-LINE: resume 시 기존 metrics.csv에서 start_episode 이전 row만 보존합니다.
-    metrics_rows: List[Dict] = _read_csv_rows(output_path / "metrics.csv", "episode", start_episode)
-    # 한 parent episode의 자원군별 CE update를 독립 행으로 보존한다.
-    subproblem_metric_rows: List[Dict] = _read_csv_rows(
-        output_path / "subproblem_metrics.csv", "episode", start_episode
+    # LINE-BY-LINE: 진행 기록 파일은 학습 시작 시 한 번만 start_episode 기준으로 잘라내고, 이후에는 append합니다.
+    metrics_rows, subproblem_metric_rows = _truncate_history_files(
+        output_path,
+        start_episode,
+        write_candidate_summary,
     )
-    # LINE-BY-LINE: resume 시 기존 후보 audit CSV에서 start_episode 이전 row만 보존합니다.
-    candidate_rows: List[Dict] = _read_csv_rows(output_path / "candidate_summary.csv", "episode", start_episode)
-    # LINE-BY-LINE: resume 시 기존 pseudo-label JSONL에서 start_episode 이전 row만 보존합니다.
-    best_action_rows: List[Dict] = _read_jsonl_rows(output_path / "best_action_table.jsonl", "episode", start_episode)
     # LINE-BY-LINE: resume 시 기존 validation summary에서 start_episode 이전 row만 보존합니다.
     validation_rows: List[Dict] = _read_csv_rows(output_path / "validation_summary.csv", "train_episode", start_episode)
     # LINE-BY-LINE: resume 시 기존 validation 후보별 score CSV에서 start_episode 이전 row만 보존합니다.
@@ -620,6 +617,10 @@ def train_phase1_pair_self_labeling(
 
     # LINE-BY-LINE: start_episode부터 사용자가 요청한 episodes까지 학습 loop를 수행합니다.
     for episode in range(start_episode, episodes + 1):
+        # LINE-BY-LINE: 이 에피소드에서 새로 생긴 행만 모읍니다. 파일에는 이 행들만 덧붙입니다.
+        episode_subproblem_rows: List[Dict] = []
+        episode_candidate_rows: List[Dict] = []
+        episode_best_action_rows: List[Dict] = []
         # LINE-BY-LINE: 현재 episode의 Job-like mapping과 metadata를 가져옵니다. on-the-fly factory도 여기서 호출됩니다.
         jobs, metadata = _episode_payload(episode, episode_jobs, episode_metadata, episode_factory)
         episode_bay_ids, episode_capacity_weights = _resolve_phase1_episode_scope(
@@ -692,7 +693,7 @@ def train_phase1_pair_self_labeling(
             subproblem_losses.append(loss)
             total_candidate_count += len(candidates)
             for candidate_index, candidate in enumerate(candidates, start=1):
-                candidate_rows.append(
+                episode_candidate_rows.append(
                     _candidate_summary_row(
                         episode=episode,
                         problem_id=problem_id,
@@ -707,7 +708,7 @@ def train_phase1_pair_self_labeling(
                         objective_scope=normalized_objective_scope,
                     )
                 )
-            best_action_rows.extend(
+            episode_best_action_rows.extend(
                 _best_action_rows(
                     episode=episode,
                     problem_id=problem_id,
@@ -718,7 +719,7 @@ def train_phase1_pair_self_labeling(
                     objective_scope=normalized_objective_scope,
                 )
             )
-            subproblem_metric_rows.append(
+            episode_subproblem_rows.append(
                 {
                     "episode": episode,
                     "problem_id": problem_id,
@@ -778,13 +779,23 @@ def train_phase1_pair_self_labeling(
                 "subproblem_count": len(selected_subproblems),
             }
         )
-        # LINE-BY-LINE: 현재까지 metrics를 즉시 파일에 씁니다. 중간 중단되어도 진행 상황이 남습니다.
-        _write_metrics(output_path / "metrics.csv", metrics_rows)
-        _write_subproblem_metrics(output_path / "subproblem_metrics.csv", subproblem_metric_rows)
-        # LINE-BY-LINE: 현재까지 후보 audit row를 즉시 파일에 씁니다.
-        _write_candidate_summary(output_path / "candidate_summary.csv", candidate_rows)
-        # LINE-BY-LINE: 현재까지 pseudo-label action table을 즉시 파일에 씁니다.
-        _write_jsonl(output_path / "best_action_table.jsonl", best_action_rows)
+        # LINE-BY-LINE: 이번 에피소드에서 새로 생긴 행만 덧붙입니다. 누적 재작성을 하지 않습니다.
+        _append_csv_rows(output_path / "metrics.csv", _METRICS_FIELDS, [metrics_rows[-1]])
+        if episode_subproblem_rows:
+            subproblem_metric_rows.extend(episode_subproblem_rows)
+            _append_csv_rows(
+                output_path / "subproblem_metrics.csv",
+                _SUBPROBLEM_METRICS_FIELDS,
+                episode_subproblem_rows,
+            )
+        if write_candidate_summary and episode_candidate_rows:
+            _append_csv_rows(
+                output_path / "candidate_summary.csv",
+                _CANDIDATE_SUMMARY_FIELDS,
+                episode_candidate_rows,
+            )
+        if episode_best_action_rows:
+            _append_jsonl_rows(output_path / "best_action_table.jsonl", episode_best_action_rows)
         # LINE-BY-LINE: 콘솔에 episode 진행 상황과 best source/score를 출력합니다.
         print(
             "[CHECK][phase1_pair_self_labeling.train] "
@@ -2957,3 +2968,57 @@ def _append_jsonl_rows(path: Path, rows: Sequence[Mapping]) -> None:
     with path.open("a", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _truncate_history_files(
+    output_path: Path,
+    start_episode: int,
+    write_candidate_summary: bool,
+) -> tuple[List[Dict], List[Dict]]:
+    """Trim per-episode history files once, before the training loop appends to them.
+
+    새 학습(start_episode == 1)이면 이전 산출물을 지운다. resume이면 start_episode 이전 행만 남긴다.
+    metrics/subproblem 행은 summary 집계에 필요하므로 돌려주고, candidate/best-action 행은
+    학습 중 읽는 곳이 없으므로 메모리에 남기지 않는다.
+    """
+
+    metrics_path = output_path / "metrics.csv"
+    subproblem_path = output_path / "subproblem_metrics.csv"
+    candidate_path = output_path / "candidate_summary.csv"
+    best_action_path = output_path / "best_action_table.jsonl"
+
+    if start_episode <= 1:
+        for path in (metrics_path, subproblem_path, candidate_path, best_action_path):
+            if path.exists():
+                path.unlink()
+        return [], []
+
+    metrics_rows = _read_csv_rows(metrics_path, "episode", start_episode)
+    subproblem_rows = _read_csv_rows(subproblem_path, "episode", start_episode)
+    if metrics_rows:
+        _write_metrics(metrics_path, metrics_rows)
+    elif metrics_path.exists():
+        metrics_path.unlink()
+    if subproblem_rows:
+        _write_subproblem_metrics(subproblem_path, subproblem_rows)
+    elif subproblem_path.exists():
+        subproblem_path.unlink()
+
+    if write_candidate_summary:
+        candidate_rows = _read_csv_rows(candidate_path, "episode", start_episode)
+        if candidate_rows:
+            _write_candidate_summary(candidate_path, candidate_rows)
+        elif candidate_path.exists():
+            candidate_path.unlink()
+        del candidate_rows
+    elif candidate_path.exists():
+        candidate_path.unlink()
+
+    best_action_rows = _read_jsonl_rows(best_action_path, "episode", start_episode)
+    if best_action_rows:
+        _write_jsonl(best_action_path, best_action_rows)
+    elif best_action_path.exists():
+        best_action_path.unlink()
+    del best_action_rows
+
+    return metrics_rows, subproblem_rows

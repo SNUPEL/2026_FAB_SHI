@@ -12,6 +12,7 @@ from Phase1.pair_self_labeling import (
     _SUBPROBLEM_METRICS_FIELDS,
     _append_csv_rows,
     _append_jsonl_rows,
+    _truncate_history_files,
 )
 
 
@@ -79,6 +80,64 @@ class FieldConstantTests(unittest.TestCase):
 
     def test_candidate_fields_carry_is_best(self) -> None:
         self.assertIn("is_best", _CANDIDATE_SUMMARY_FIELDS)
+
+
+class TruncateHistoryFilesTests(unittest.TestCase):
+    def _write_csv(self, path: Path, fields, rows) -> None:
+        with path.open("w", encoding="utf-8-sig", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=list(fields))
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    def test_keeps_only_rows_before_start_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._write_csv(
+                out / "metrics.csv",
+                _METRICS_FIELDS,
+                [{"episode": 1}, {"episode": 2}, {"episode": 3}],
+            )
+            self._write_csv(
+                out / "subproblem_metrics.csv",
+                _SUBPROBLEM_METRICS_FIELDS,
+                [{"episode": 1}, {"episode": 2}],
+            )
+
+            metrics_rows, subproblem_rows = _truncate_history_files(
+                out, start_episode=3, write_candidate_summary=False
+            )
+
+            self.assertEqual([row["episode"] for row in metrics_rows], ["1", "2"])
+            self.assertEqual([row["episode"] for row in subproblem_rows], ["1", "2"])
+            with (out / "metrics.csv").open(encoding="utf-8-sig", newline="") as file:
+                on_disk = list(csv.DictReader(file))
+            self.assertEqual([row["episode"] for row in on_disk], ["1", "2"])
+
+    def test_fresh_run_removes_stale_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            self._write_csv(out / "metrics.csv", _METRICS_FIELDS, [{"episode": 1}])
+            (out / "best_action_table.jsonl").write_text(
+                json.dumps({"episode": 1}) + "\n", encoding="utf-8"
+            )
+
+            metrics_rows, subproblem_rows = _truncate_history_files(
+                out, start_episode=1, write_candidate_summary=False
+            )
+
+            self.assertEqual(metrics_rows, [])
+            self.assertEqual(subproblem_rows, [])
+            self.assertFalse((out / "metrics.csv").exists())
+            self.assertFalse((out / "best_action_table.jsonl").exists())
+
+    def test_missing_files_are_tolerated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metrics_rows, subproblem_rows = _truncate_history_files(
+                Path(tmp), start_episode=5, write_candidate_summary=True
+            )
+            self.assertEqual(metrics_rows, [])
+            self.assertEqual(subproblem_rows, [])
 
 
 if __name__ == "__main__":
