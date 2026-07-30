@@ -57,6 +57,7 @@ from Phase2.merged import (
     phase2_score_field_names,
     train_phase2_batch_machine_self_labeling,
 )
+from Phase2.validation_grid import build_phase2_validation_grid
 from Phase2.run_spec import build_phase2_run_spec, require_matching_phase2_run_spec
 from Phase1.pair_self_labeling import (
     run_phase1_pair_policy_resource_pool_best_of_k,
@@ -347,7 +348,12 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     )
     print(f"- rollout_samples_validation: {validation_rollout_samples}")
     print(f"- validation_every: {args.validation_every}")
-    print(f"- validation_episodes: {args.validation_episodes}")
+    print(f"- validation_types_per_size: {args.validation_episodes}")
+    print(
+        "- validation_block_grid: "
+        f"{args.validation_min_blocks}..{args.validation_max_blocks} "
+        f"gap={args.validation_block_gap}"
+    )
     print(f"- checkpoint_every: {args.checkpoint_every}")
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
     print(f"- action_pool_limit: {args.action_pool_limit}")
@@ -408,12 +414,31 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     def episode_job_factory(episode: int) -> Mapping[str, object]:
         return mixed_jobs(args.seed + episode * EPISODE_SEED_STRIDE)
 
-    def _validation_episode_jobs(validation_episode: int) -> Mapping[str, object]:
-        return mixed_jobs(args.seed + VALIDATION_SEED_OFFSET + validation_episode * EPISODE_SEED_STRIDE)
+    def validation_problem_factory(
+        block_count: int,
+        generation_seed: int,
+    ) -> Mapping[str, object]:
+        return build_phase1_episode_jobs(
+            episode_count=1,
+            min_blocks=block_count,
+            max_blocks=block_count,
+            seed=generation_seed,
+            verbose=False,
+        )[0]
 
-    validation_episode_job_factory = (
-        _validation_episode_jobs if args.validation_episodes > 0 else None
+    validation_problems = (
+        build_phase2_validation_grid(
+            problem_factory=validation_problem_factory,
+            min_blocks=args.validation_min_blocks,
+            max_blocks=args.validation_max_blocks,
+            block_gap=args.validation_block_gap,
+            type_count=args.validation_episodes,
+            seed=args.seed + VALIDATION_SEED_OFFSET,
+        )
+        if args.validation_episodes > 0
+        else ()
     )
+    print(f"- validation_problem_count: {len(validation_problems)}")
 
     summary = train_phase2_batch_machine_self_labeling(
         jobs=training_jobs,
@@ -436,7 +461,8 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
         episode_jobs=None,
         episode_job_factory=episode_job_factory,
         validation_episode_jobs=None,
-        validation_episode_job_factory=validation_episode_job_factory,
+        validation_episode_job_factory=None,
+        validation_problems=validation_problems or None,
         phase1_heuristic=phase1_heuristic,
         phase1_bay_ids=phase1_bay_ids,
         phase1_assignment_builder=phase1_assignment_builder,
@@ -457,6 +483,7 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     print(f"- resumed_from_episode: {summary['resumed_from_episode']}")
     print(f"- resume_checkpoint: {summary['resume_checkpoint']}")
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
+    print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
     print(f"- checkpoint_dir: {summary['checkpoint_dir']}")
     print(f"- metrics_csv: {summary['metrics_csv']}")
     print(f"- subproblem_metrics_csv: {summary['subproblem_metrics_csv']}")
@@ -464,7 +491,8 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     print(f"- write_candidate_summary: {summary['write_candidate_summary']}")
     print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
     print(f"- validation_candidate_summary_csv: {summary['validation_candidate_summary_csv']}")
-    print(f"- validation_hard_violation_png: {summary.get('validation_hard_violation_png', '')}")
+    print(f"- validation_parent_summary_csv: {summary['validation_parent_summary_csv']}")
+    print(f"- validation_root: {summary['validation_root']}")
     print(f"- validation_makespan_png: {summary.get('validation_makespan_png', '')}")
     print(f"- validation_wo_gap_png: {summary.get('validation_wo_gap_png', '')}")
     print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")
@@ -1293,7 +1321,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of stochastic agent candidates per validation problem. Default follows --rollout-samples.",
     )
     phase2_train_graph_parser.add_argument("--validation-every", type=int, default=100, help="Run Phase 2 validation every N episodes")
-    phase2_train_graph_parser.add_argument("--validation-episodes", type=int, default=20, help="Holdout Phase 2 validation episodes per validation run")
+    phase2_train_graph_parser.add_argument(
+        "--validation-episodes",
+        type=int,
+        default=5,
+        help="Number of fixed distribution Types generated for every validation block size.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--validation-min-blocks",
+        type=int,
+        default=10,
+        help="Minimum physical block count in the fixed Phase 2 validation grid.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--validation-max-blocks",
+        type=int,
+        default=60,
+        help="Maximum physical block count in the fixed Phase 2 validation grid.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--validation-block-gap",
+        type=int,
+        default=10,
+        help="Inclusive physical block-count interval in the fixed Phase 2 validation grid.",
+    )
     phase2_train_graph_parser.add_argument("--checkpoint-every", type=int, default=0, help="Save periodic Phase 2 checkpoint every N episodes. 0 disables periodic checkpoints.")
     phase2_train_graph_parser.add_argument(
         "--resume-checkpoint",
