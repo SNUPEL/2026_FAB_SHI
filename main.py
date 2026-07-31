@@ -454,6 +454,9 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
             constraint_profile=phase2_constraint_profile,
             candidate_workers=args.candidate_workers,
             candidate_executor=candidate_executor,
+            temperature=args.temperature,
+            temperature_min=args.temperature_min,
+            temperature_anneal_episodes=args.temperature_anneal_episodes,
         )
     finally:
         if candidate_executor is not None:
@@ -1305,6 +1308,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Spawn processes for parallel Phase 2 candidate generation. 1 preserves the sequential baseline.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Initial sampling temperature T0 for agent_sample candidates (softmax(logits/T)).",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--temperature-min",
+        type=float,
+        default=None,
+        help="Final temperature for exponential annealing. Omit or >=--temperature to keep T constant.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--temperature-anneal-episodes",
+        type=int,
+        default=None,
+        help="Episodes over which temperature decays from --temperature to --temperature-min. Default: --episodes.",
     )
     phase2_train_graph_parser.add_argument(
         "--rollout-samples_validation",

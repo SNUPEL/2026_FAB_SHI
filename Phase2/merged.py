@@ -224,6 +224,9 @@ def train_phase2_batch_machine_self_labeling(
     constraint_profile: PhaseConstraintProfile | None = None,
     candidate_workers: int = 1,
     candidate_executor: ProcessPoolExecutor | None = None,
+    temperature: float = 1.0,
+    temperature_min: float | None = None,
+    temperature_anneal_episodes: int | None = None,
 ) -> Dict:
     """Self-labeling으로 통합 Phase 2 batch-machine policy를 학습한다."""
 
@@ -370,8 +373,16 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- write_candidate_summary: {write_candidate_summary}")
     print(f"- device: {torch_device}")
     print(f"- candidate_workers: {candidate_workers}")
+    resolved_temperature_min = temperature if temperature_min is None else temperature_min
+    resolved_temperature_anneal_episodes = episodes if temperature_anneal_episodes is None else temperature_anneal_episodes
+    print(f"- temperature: {temperature}")
+    print(f"- temperature_min: {resolved_temperature_min}")
+    print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
 
     for episode in range(start_episode, episodes + 1):
+        current_temperature = annealed_temperature(
+            episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+        )
         current_jobs = _episode_jobs(episode, jobs, episode_jobs, episode_job_factory)
         current_phase1 = _phase1_assignments_for_episode(
             jobs=current_jobs,
@@ -399,6 +410,7 @@ def train_phase2_batch_machine_self_labeling(
             constraint_profile=resolved_constraint_profile,
             candidate_workers=candidate_workers,
             candidate_executor=candidate_executor,
+            temperature=current_temperature,
         )
         last_best = best
         row = {
@@ -424,7 +436,7 @@ def train_phase2_batch_machine_self_labeling(
             _append_rows(candidate_summary_csv, episode_candidate_rows, _candidate_fields(score_field_names))
         print(
             "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
-            f"episode={episode} best_source={best.source} loss={row['loss']} score={row['score_json']}"
+            f"episode={episode} temperature={current_temperature:.4f} best_source={best.source} loss={row['loss']} score={row['score_json']}"
         )
         if validation_episodes > 0 and episode % validation_every == 0:
             for validation_episode in range(1, validation_episodes + 1):
@@ -458,6 +470,7 @@ def train_phase2_batch_machine_self_labeling(
                     constraint_profile=resolved_constraint_profile,
                     candidate_workers=candidate_workers,
                     candidate_executor=candidate_executor,
+                    temperature=current_temperature,
                 )
                 ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
                 best_validation = ranked_candidates[0]
@@ -573,6 +586,9 @@ def train_phase2_batch_machine_self_labeling(
         "action_pool_limit": action_pool_limit,
         "write_candidate_summary": write_candidate_summary,
         "candidate_workers": candidate_workers,
+        "temperature": temperature,
+        "temperature_min": resolved_temperature_min,
+        "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
         "device": str(torch_device),
         "run_spec": run_spec,
     }
@@ -596,6 +612,7 @@ class _Phase2CandidateWorkerPayload:
     action_pool_limit: int | None
     score_mode: str
     constraint_profile: PhaseConstraintProfile
+    temperature: float = 1.0
 
 
 def create_phase2_candidate_executor(candidate_workers: int) -> ProcessPoolExecutor | None:
@@ -609,6 +626,19 @@ def create_phase2_candidate_executor(candidate_workers: int) -> ProcessPoolExecu
         mp_context=multiprocessing.get_context("spawn"),
         initializer=_initialize_phase2_candidate_worker,
     )
+
+
+def annealed_temperature(episode: int, t0: float, t_min: float, anneal_episodes: int) -> float:
+    """episode에 따른 지수 감쇠 temperature. t_min>=t0이면 상수(t0)로 동작(하위호환)."""
+
+    if t0 <= 0 or t_min <= 0:
+        print(f"[ERROR][Phase2.merged.annealed_temperature] cause=non_positive value t0={t0} t_min={t_min}")
+        raise ValueError("temperature and temperature_min must be positive")
+    if t_min >= t0 or anneal_episodes <= 1:
+        return t0
+    # T(ep) = t0 * (t_min/t0)^(min(ep, anneal)/anneal), clamp at t_min
+    frac = min(max(episode, 0), anneal_episodes) / float(anneal_episodes)
+    return max(t_min, t0 * (t_min / t0) ** frac)
 
 
 def _validate_candidate_workers(candidate_workers: int) -> None:
@@ -664,6 +694,7 @@ def _run_phase2_candidate_worker(
                     score_mode=payload.score_mode,
                     constraint_profile=payload.constraint_profile,
                     common_environment=base_environment,
+                    temperature=payload.temperature,
                 ),
             )
         )
@@ -686,6 +717,7 @@ def build_phase2_batch_machine_candidate_bank(
     common_environment: CommonHierarchicalEnvironment | None = None,
     candidate_workers: int = 1,
     candidate_executor: ProcessPoolExecutor | None = None,
+    temperature: float = 1.0,
 ) -> List[Phase2BatchMachineCandidate]:
     """통합 Phase 2 후보 bank를 만든다. 휴리스틱 후보와 agent 후보를 함께 비교한다."""
 
@@ -731,11 +763,11 @@ def build_phase2_batch_machine_candidate_bank(
     for algorithm in heuristic_algorithms:
         indexed_sources.append((len(indexed_sources), algorithm, seed))
     if model is not None:
-        indexed_sources.append((len(indexed_sources), "agent_greedy", seed))
+        # Phase 1과 동일한 방식으로 통일: sample_index==1을 greedy로 사용하며
+        # 총 rollout_samples개(=greedy 1 + sample rollout_samples-1)의 agent 후보를 만든다.
         for sample_index in range(1, rollout_samples + 1):
-            indexed_sources.append(
-                (len(indexed_sources), f"agent_sample_{sample_index}", seed + sample_index)
-            )
+            source = "agent_greedy" if sample_index == 1 else f"agent_sample_{sample_index}"
+            indexed_sources.append((len(indexed_sources), source, seed + sample_index))
     if candidate_workers == 1:
         return [
             run_phase2_batch_machine_candidate(
@@ -751,6 +783,7 @@ def build_phase2_batch_machine_candidate_bank(
                 score_mode=score_mode,
                 constraint_profile=resolved_constraint_profile,
                 common_environment=base_environment,
+                temperature=temperature,
             )
             for _, source, candidate_seed in indexed_sources
         ]
@@ -784,6 +817,7 @@ def build_phase2_batch_machine_candidate_bank(
             action_pool_limit=action_pool_limit,
             score_mode=score_mode,
             constraint_profile=resolved_constraint_profile,
+            temperature=temperature,
         )
         for source_chunk in source_chunks
     ]
@@ -837,6 +871,7 @@ def run_phase2_batch_machine_candidate(
     score_mode: str = "raw",
     constraint_profile: PhaseConstraintProfile | None = None,
     common_environment: CommonHierarchicalEnvironment | None = None,
+    temperature: float = 1.0,
 ) -> Phase2BatchMachineCandidate:
     """하나의 통합 후보 schedule을 생성한다."""
 
@@ -989,6 +1024,7 @@ def run_phase2_batch_machine_candidate(
                 model=model,
                 seed=seed + step,
                 policy_state=wo_policy_state,
+                temperature=temperature,
             )
             selected_wo = wo_actions[selected_wo_index]
             selected_job_id = str(selected_wo["job_ids"][0])
@@ -1107,6 +1143,7 @@ def _train_one_episode(
     constraint_profile: PhaseConstraintProfile,
     candidate_workers: int,
     candidate_executor: ProcessPoolExecutor | None,
+    temperature: float = 1.0,
 ) -> tuple[float, Phase2BatchMachineCandidate, List[Phase2BatchMachineCandidate], List[Dict]]:
     machine_bay_ids = _machine_bay_ids(machines)
     jobs_by_bay = _jobs_by_phase1_bay(jobs, phase1_assignments)
@@ -1139,6 +1176,7 @@ def _train_one_episode(
                 constraint_profile=constraint_profile,
                 candidate_workers=candidate_workers,
                 candidate_executor=candidate_executor,
+                temperature=temperature,
             )
         ]
         best = min(bay_candidates, key=_candidate_sort_key)
@@ -1529,11 +1567,12 @@ def _action_index(
     model: Phase2SetPointerPolicy | None,
     seed: int,
     policy_state: Phase2PolicyState,
+    temperature: float = 1.0,
 ) -> int:
     if source == "agent_greedy":
         return _model_action_index(actions, model, policy_state, sample=False, seed=seed)
     if source.startswith("agent_sample_"):
-        return _model_action_index(actions, model, policy_state, sample=True, seed=seed)
+        return _model_action_index(actions, model, policy_state, sample=True, seed=seed, temperature=temperature)
     best: tuple | None = None
     best_index = -1
     for index, action in enumerate(actions):
@@ -1616,17 +1655,21 @@ def _model_action_index(
     policy_state: Phase2PolicyState,
     sample: bool,
     seed: int,
+    temperature: float = 1.0,
 ) -> int:
     if model is None:
         print("[ERROR][Phase2.merged._model_action_index] cause=missing_model_for_agent_source")
         raise RuntimeError("merged Phase 2 agent candidate requires a model")
+    if temperature <= 0:
+        print(f"[ERROR][Phase2.merged._model_action_index] cause=non_positive_temperature value={temperature}")
+        raise ValueError("temperature must be positive")
     with torch.no_grad():
         logits = model(policy_state).detach().cpu()
     if not sample:
         return int(torch.argmax(logits).item())
     generator = torch.Generator()
     generator.manual_seed(seed)
-    probabilities = torch.softmax(logits, dim=0)
+    probabilities = torch.softmax(logits / temperature, dim=0)
     return int(torch.multinomial(probabilities, num_samples=1, generator=generator).item())
 
 
