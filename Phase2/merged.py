@@ -12,9 +12,9 @@ import json
 import math
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Sequence
+from typing import Callable, Dict, Iterator, List, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -34,6 +34,10 @@ from Environment.constraints.profiles import (
 )
 from Phase1.heuristics import run_phase1_resource_pool_heuristic_candidate
 from Phase2.set_pointer_policy import Phase2SetPointerPolicy
+from Phase2.validation_grid import (
+    Phase2ValidationProblem,
+    phase2_validation_grid_contract,
+)
 from Phase2.run_spec import (
     build_phase2_run_spec,
     require_matching_phase2_run_spec,
@@ -78,6 +82,8 @@ PHASE2_BATCH_MACHINE_DEFAULT_HEURISTIC_BANK = (
     "short_bevel_batch",   # 베벨 길이 짧은 W/O 우선
 )
 PHASE2_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
+PHASE2_VALIDATION_PHASE1_SEED_OFFSET = 20_000_000
+PHASE2_VALIDATION_CANDIDATE_SEED_OFFSET = 30_000_000
 
 MIXED_PHASE2_ELIGIBLE_FAMILIES = {
     "22": ("NP", "NC"),
@@ -154,6 +160,7 @@ class Phase2BatchMachineTransition:
 
     policy_state: Phase2PolicyState
     selected_action_index: int
+    target_action_indices: tuple[int, ...]
     selected_machine_id: str
     selected_job_ids: tuple[str, ...]
     action_type: str = ""
@@ -216,6 +223,7 @@ def train_phase2_batch_machine_self_labeling(
     validation_rollout_samples: int | None = None,
     validation_episode_jobs: Sequence[Mapping[str, object]] | None = None,
     validation_episode_job_factory: Callable[[int], Mapping[str, object]] | None = None,
+    validation_problems: Sequence[Phase2ValidationProblem] | None = None,
     device: str = "cpu",
     checkpoint_every: int = 0,
     write_candidate_summary: bool = False,
@@ -260,6 +268,7 @@ def train_phase2_batch_machine_self_labeling(
         episode_job_factory=episode_job_factory,
         validation_episode_jobs=validation_episode_jobs,
         validation_episode_job_factory=validation_episode_job_factory,
+        validation_problems=validation_problems,
         phase1_heuristic=phase1_heuristic,
         phase1_bay_ids=phase1_bay_ids,
         phase1_assignment_builder=phase1_assignment_builder,
@@ -286,6 +295,14 @@ def train_phase2_batch_machine_self_labeling(
         train_rollout_samples=rollout_samples,
         validation_rollout_samples=resolved_validation_rollout_samples,
     )
+    resolved_validation_problems = _resolve_validation_problems(
+        validation_episodes=validation_episodes,
+        default_jobs=jobs,
+        validation_episode_jobs=validation_episode_jobs,
+        validation_episode_job_factory=validation_episode_job_factory,
+        validation_problems=validation_problems,
+    )
+    validation_contract = phase2_validation_grid_contract(resolved_validation_problems)
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -295,13 +312,22 @@ def train_phase2_batch_machine_self_labeling(
     best_batches_csv = output_path / "best_batches.csv"
     best_timeline_csv = output_path / "best_timeline.csv"
     best_assignment_csv = output_path / "best_machine_assignment.csv"
-    validation_summary_csv = output_path / "validation_summary.csv"
-    validation_candidate_summary_csv = output_path / "validation_candidate_summary.csv"
+    validation_root = output_path / "validation"
+    validation_summary_csv = validation_root / "validation_bay_history.csv"
+    validation_candidate_summary_csv = validation_root / "validation_candidate_latest.csv"
+    validation_parent_summary_csv = validation_root / "validation_parent_history.csv"
     checkpoint_path = output_path / "phase2_batch_machine_policy.pt"
+    best_checkpoint_path = output_path / "phase2_best.pt"
     checkpoint_dir = output_path / "checkpoints"
     summary_json = output_path / "summary.json"
     if checkpoint_every > 0:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if resolved_validation_problems:
+        _write_validation_problem_catalog(
+            validation_root,
+            resolved_validation_problems,
+            validation_contract,
+        )
 
     resume_path = _resolve_phase2_resume_checkpoint(resume_checkpoint, output_path)
     resumed_from_episode = 0
@@ -314,6 +340,7 @@ def train_phase2_batch_machine_self_labeling(
             score_mode=score_mode,
             torch_device=torch_device,
             expected_run_spec=run_spec,
+            expected_validation_contract=validation_contract,
         )
         if resumed_from_episode >= episodes:
             print(
@@ -338,19 +365,32 @@ def train_phase2_batch_machine_self_labeling(
             "train_episode",
             resumed_from_episode,
         )
-        validation_candidate_rows = _prepare_resume_csv(
-            validation_candidate_summary_csv,
-            _validation_candidate_fields(score_field_names),
+        validation_parent_rows = _prepare_resume_csv(
+            validation_parent_summary_csv,
+            _validation_parent_fields(score_field_names),
             "train_episode",
             resumed_from_episode,
         )
     else:
-        for path in (metrics_csv, subproblem_metrics_csv, candidate_summary_csv, validation_summary_csv, validation_candidate_summary_csv):
+        for path in (
+            metrics_csv,
+            subproblem_metrics_csv,
+            candidate_summary_csv,
+            validation_summary_csv,
+            validation_candidate_summary_csv,
+            validation_parent_summary_csv,
+        ):
             if path.exists():
                 path.unlink()
+        if best_checkpoint_path.exists():
+            best_checkpoint_path.unlink()
         validation_rows: list[dict] = []
-        validation_candidate_rows: list[dict] = []
+        validation_parent_rows: list[dict] = []
 
+    best_validation_key = _resume_validation_checkpoint_key(
+        validation_parent_rows,
+        best_checkpoint_path,
+    )
     rows: list[dict] = []
     validation_plot_paths: Dict[str, str] = {}
     last_best: Phase2BatchMachineCandidate | None = None
@@ -368,7 +408,8 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- rollout_samples: {rollout_samples}")
     print(f"- rollout_samples_validation: {resolved_validation_rollout_samples}")
     print(f"- validation_every: {validation_every}")
-    print(f"- validation_episodes: {validation_episodes}")
+    print(f"- validation_types_per_size: {validation_episodes}")
+    print(f"- validation_problem_count: {len(resolved_validation_problems)}")
     print(f"- checkpoint_every: {checkpoint_every}")
     print(f"- write_candidate_summary: {write_candidate_summary}")
     print(f"- device: {torch_device}")
@@ -438,13 +479,22 @@ def train_phase2_batch_machine_self_labeling(
             "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
             f"episode={episode} temperature={current_temperature:.4f} best_source={best.source} loss={row['loss']} score={row['score_json']}"
         )
-        if validation_episodes > 0 and episode % validation_every == 0:
-            for validation_episode in range(1, validation_episodes + 1):
-                validation_jobs = _validation_episode_jobs(
-                    validation_episode,
-                    current_jobs,
-                    validation_episode_jobs,
-                    validation_episode_job_factory,
+        if resolved_validation_problems and episode % validation_every == 0:
+            current_validation_rows: list[dict] = []
+            current_validation_candidate_rows: list[dict] = []
+            current_validation_parent_rows: list[dict] = []
+            current_validation_method_rows: list[dict] = []
+            current_validation_bay_method_rows: list[dict] = []
+            evaluation_root = validation_root / "evaluations" / f"ep_{episode:06d}"
+            for validation_episode, validation_problem in enumerate(
+                resolved_validation_problems,
+                start=1,
+            ):
+                validation_jobs = validation_problem.jobs
+                validation_phase1_seed = (
+                    seed
+                    + PHASE2_VALIDATION_PHASE1_SEED_OFFSET
+                    + validation_episode
                 )
                 validation_phase1 = _phase1_assignments_for_episode(
                     jobs=validation_jobs,
@@ -452,10 +502,30 @@ def train_phase2_batch_machine_self_labeling(
                     phase1_heuristic=phase1_heuristic,
                     phase1_bay_ids=phase1_bay_ids,
                     phase1_assignment_builder=phase1_assignment_builder,
-                    phase1_assignment_seed=episode * 1_000_000 + validation_episode,
+                    phase1_assignment_seed=validation_phase1_seed,
                     phase1_bay_capacity_weights=phase1_bay_capacity_weights,
                 )
-                validation_candidates = build_phase2_batch_machine_candidate_bank(
+                validation_seed = (
+                    seed
+                    + PHASE2_VALIDATION_CANDIDATE_SEED_OFFSET
+                    + validation_episode * 100_000
+                )
+                candidate_banks_by_bay: dict[
+                    str,
+                    tuple[
+                        Mapping[str, object],
+                        Mapping[str, object],
+                        int,
+                        list[Phase2BatchMachineCandidate],
+                    ],
+                ] = {}
+                for (
+                    bay_id,
+                    bay_jobs,
+                    bay_machines,
+                    bay_seed,
+                    validation_candidates,
+                ) in _iter_phase2_bay_candidate_banks(
                     jobs=validation_jobs,
                     machines=machines,
                     phase1_assignments=validation_phase1,
@@ -465,40 +535,173 @@ def train_phase2_batch_machine_self_labeling(
                     max_wo_count=max_wo_count,
                     max_length_sum=max_length_sum,
                     action_pool_limit=action_pool_limit,
-                    seed=seed + episode * 1_000_000 + validation_episode,
+                    seed=validation_seed,
                     score_mode=score_mode,
                     constraint_profile=resolved_constraint_profile,
                     candidate_workers=candidate_workers,
                     candidate_executor=candidate_executor,
                     temperature=current_temperature,
+                ):
+                    ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
+                    candidate_banks_by_bay[bay_id] = (
+                        bay_jobs,
+                        bay_machines,
+                        bay_seed,
+                        ranked_candidates,
+                    )
+                    best_validation = ranked_candidates[0]
+                    proposed_rank, proposed_best = _agent_best_from_ranked(ranked_candidates)
+                    greedy_rank, greedy_best = _agent_greedy_from_ranked(ranked_candidates)
+                    best_heuristic = _best_heuristic_from_ranked(ranked_candidates)
+                    validation_row = _validation_summary_row(
+                        train_episode=episode,
+                        validation_episode=validation_episode,
+                        validation_phase1_seed=validation_phase1_seed,
+                        validation_sampling_seed=bay_seed,
+                        bay_id=bay_id,
+                        jobs=bay_jobs,
+                        machines=bay_machines,
+                        candidate_count=len(ranked_candidates),
+                        best=best_validation,
+                        best_heuristic=best_heuristic,
+                        proposed_rank=proposed_rank,
+                        proposed_best=proposed_best,
+                        greedy_rank=greedy_rank,
+                        greedy_best=greedy_best,
+                        score_field_names=score_field_names,
+                    )
+                    validation_row.update(
+                        _validation_problem_columns(
+                            validation_problem,
+                        )
+                    )
+                    current_validation_rows.append(validation_row)
+                    for rank, candidate in enumerate(ranked_candidates, start=1):
+                        candidate_row = _validation_candidate_summary_row(
+                            episode,
+                            validation_episode,
+                            bay_seed,
+                            rank,
+                            candidate,
+                            score_field_names,
+                        )
+                        candidate_row.update(
+                            _validation_problem_columns(
+                                validation_problem,
+                            )
+                        )
+                        current_validation_candidate_rows.append(candidate_row)
+                    current_validation_bay_method_rows.extend(
+                        _validation_bay_method_rows(
+                            train_episode=episode,
+                            validation_episode=validation_episode,
+                            validation_problem=validation_problem,
+                            bay_id=bay_id,
+                            ranked_candidates=ranked_candidates,
+                            heuristic_algorithms=heuristic_algorithms,
+                            score_field_names=score_field_names,
+                        )
+                    )
+
+                parent_candidates = _validation_parent_candidates(
+                    candidate_banks_by_bay=candidate_banks_by_bay,
+                    machines=machines,
+                    heuristic_algorithms=heuristic_algorithms,
+                    max_wo_count=max_wo_count,
+                    max_length_sum=max_length_sum,
+                    score_mode=score_mode,
                 )
-                ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
-                best_validation = ranked_candidates[0]
-                proposed_rank, proposed_best = _agent_best_from_ranked(ranked_candidates)
-                greedy_rank, greedy_best = _agent_greedy_from_ranked(ranked_candidates)
-                validation_row = _validation_summary_row(
+                parent_row, method_rows = _validation_parent_rows(
                     train_episode=episode,
                     validation_episode=validation_episode,
-                    jobs=validation_jobs,
-                    machines=machines,
-                    candidate_count=len(ranked_candidates),
-                    best=best_validation,
-                    proposed_rank=proposed_rank,
-                    proposed_best=proposed_best,
-                    greedy_rank=greedy_rank,
-                    greedy_best=greedy_best,
+                    validation_problem=validation_problem,
+                    parent_candidates=parent_candidates,
                     score_field_names=score_field_names,
                 )
-                validation_rows.append(validation_row)
-                for rank, candidate in enumerate(ranked_candidates, start=1):
-                    validation_candidate_rows.append(_validation_candidate_summary_row(episode, validation_episode, rank, candidate, score_field_names))
+                current_validation_parent_rows.append(parent_row)
+                current_validation_method_rows.extend(method_rows)
+                _write_validation_problem_evaluation(
+                    evaluation_root=evaluation_root,
+                    validation_problem=validation_problem,
+                    phase1_assignments=validation_phase1,
+                    machines=machines,
+                    candidate_banks_by_bay=candidate_banks_by_bay,
+                    parent_candidates=parent_candidates,
+                    score_field_names=score_field_names,
+                )
+
+            validation_key = _validation_checkpoint_key(current_validation_parent_rows)
+            checkpoint_saved = best_validation_key is None or validation_key < best_validation_key
+            selection_key_json = json.dumps(list(validation_key), ensure_ascii=False)
+            for validation_row in (
+                *current_validation_rows,
+                *current_validation_parent_rows,
+            ):
+                validation_row["checkpoint_selection_key_json"] = selection_key_json
+                validation_row["best_checkpoint_saved"] = int(checkpoint_saved)
+            validation_rows.extend(current_validation_rows)
+            validation_parent_rows.extend(current_validation_parent_rows)
             _write_rows(validation_summary_csv, validation_rows, _validation_summary_fields(score_field_names))
-            _write_rows(validation_candidate_summary_csv, validation_candidate_rows, _validation_candidate_fields(score_field_names))
-            validation_plot_paths = _write_validation_plots(output_path, validation_candidate_rows, validation_rows)
+            _write_rows(
+                validation_candidate_summary_csv,
+                current_validation_candidate_rows,
+                _validation_candidate_fields(score_field_names),
+            )
+            _write_rows(
+                validation_parent_summary_csv,
+                validation_parent_rows,
+                _validation_parent_fields(score_field_names),
+            )
+            validation_plot_paths = _write_validation_graph_hierarchy(
+                evaluation_root=evaluation_root,
+                parent_problem_rows=current_validation_parent_rows,
+                parent_method_rows=current_validation_method_rows,
+                bay_method_rows=current_validation_bay_method_rows,
+                score_field_names=score_field_names,
+            )
+            _write_json(
+                validation_root / "latest_evaluation.json",
+                {
+                    "train_episode": episode,
+                    "evaluation_root": str(evaluation_root),
+                    "selection_key": list(validation_key),
+                },
+            )
+            if checkpoint_saved:
+                _save_phase2_batch_machine_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    path=best_checkpoint_path,
+                    hidden_dim=hidden_dim,
+                    heuristic_algorithms=heuristic_algorithms,
+                    rollout_samples=rollout_samples,
+                    validation_rollout_samples=resolved_validation_rollout_samples,
+                    validation_every=validation_every,
+                    validation_episodes=validation_episodes,
+                    episodes=episode,
+                    max_wo_count=max_wo_count,
+                    max_length_sum=max_length_sum,
+                    action_pool_limit=action_pool_limit,
+                    device=torch_device,
+                    score_mode=score_mode,
+                    run_spec=run_spec,
+                    validation_contract=validation_contract,
+                )
+                best_validation_key = validation_key
+                _write_json(
+                    validation_root / "best_checkpoint.json",
+                    {
+                        "train_episode": episode,
+                        "checkpoint_path": str(best_checkpoint_path),
+                        "selection_key": list(validation_key),
+                        "parent_problem_count": len(current_validation_parent_rows),
+                    },
+                )
             print(
                 "[VALIDATION][Phase2.merged.train_phase2_batch_machine_self_labeling] "
-                f"episode={episode} validation_episodes={validation_episodes} "
-                f"validation_rollout_samples={resolved_validation_rollout_samples}"
+                f"episode={episode} validation_problems={len(resolved_validation_problems)} "
+                f"validation_rollout_samples={resolved_validation_rollout_samples} "
+                f"selection_key={selection_key_json} best_checkpoint_saved={str(checkpoint_saved).lower()}"
             )
         if checkpoint_every > 0 and episode % checkpoint_every == 0:
             checkpoint_file = checkpoint_dir / f"phase2_batch_machine_policy_ep{episode:05d}.pt"
@@ -519,6 +722,7 @@ def train_phase2_batch_machine_self_labeling(
                 device=torch_device,
                 score_mode=score_mode,
                 run_spec=run_spec,
+                validation_contract=validation_contract,
             )
             print(
                 "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
@@ -548,6 +752,7 @@ def train_phase2_batch_machine_self_labeling(
         device=torch_device,
         score_mode=score_mode,
         run_spec=run_spec,
+        validation_contract=validation_contract,
     )
     summary = {
         "episodes": episodes,
@@ -568,13 +773,16 @@ def train_phase2_batch_machine_self_labeling(
         "metrics_csv": str(metrics_csv),
         "subproblem_metrics_csv": str(subproblem_metrics_csv),
         "candidate_summary_csv": str(candidate_summary_csv),
+        "validation_root": str(validation_root),
         "validation_summary_csv": str(validation_summary_csv),
         "validation_candidate_summary_csv": str(validation_candidate_summary_csv),
+        "validation_parent_summary_csv": str(validation_parent_summary_csv),
         **validation_plot_paths,
         "best_batches_csv": str(best_batches_csv),
         "best_timeline_csv": str(best_timeline_csv),
         "best_assignment_csv": str(best_assignment_csv),
         "checkpoint_path": str(checkpoint_path),
+        "best_checkpoint_path": str(best_checkpoint_path) if best_checkpoint_path.is_file() else "",
         "checkpoint_dir": str(checkpoint_dir) if checkpoint_every > 0 else "",
         "checkpoint_every": checkpoint_every,
         "summary_json": str(summary_json),
@@ -583,6 +791,8 @@ def train_phase2_batch_machine_self_labeling(
         "validation_rollout_samples": resolved_validation_rollout_samples,
         "validation_every": validation_every,
         "validation_episodes": validation_episodes,
+        "validation_problem_count": len(resolved_validation_problems),
+        "validation_contract": validation_contract,
         "action_pool_limit": action_pool_limit,
         "write_candidate_summary": write_candidate_summary,
         "candidate_workers": candidate_workers,
@@ -1032,6 +1242,12 @@ def run_phase2_batch_machine_candidate(
                 Phase2BatchMachineTransition(
                     policy_state=wo_policy_state,
                     selected_action_index=selected_wo_index,
+                    target_action_indices=_teacher_target_action_indices(
+                        actions=wo_actions,
+                        source=source,
+                        selected_action_index=selected_wo_index,
+                        policy_state=wo_policy_state,
+                    ),
                     selected_machine_id=machine_id,
                     selected_job_ids=(selected_job_id,),
                     action_type="select_wo",
@@ -1126,6 +1342,69 @@ def run_phase2_batch_machine_candidate(
     )
 
 
+def _iter_phase2_bay_candidate_banks(
+    *,
+    jobs: Mapping[str, object],
+    machines: Mapping[str, object],
+    phase1_assignments: Mapping[str, str],
+    model: Phase2SetPointerPolicy,
+    heuristic_algorithms: Sequence[str],
+    rollout_samples: int,
+    max_wo_count: int,
+    max_length_sum: float,
+    action_pool_limit: int | None,
+    seed: int,
+    score_mode: str,
+    constraint_profile: PhaseConstraintProfile,
+    candidate_workers: int = 1,
+    candidate_executor: ProcessPoolExecutor | None = None,
+    temperature: float = 1.0,
+) -> Iterator[
+    tuple[
+        str,
+        Mapping[str, object],
+        Mapping[str, object],
+        int,
+        List[Phase2BatchMachineCandidate],
+    ]
+]:
+    """학습과 validation이 공유하는 Bay별 후보 bank를 순서대로 만든다."""
+
+    machine_bay_ids = _machine_bay_ids(machines)
+    jobs_by_bay = _jobs_by_phase1_bay(jobs, phase1_assignments)
+    machines_by_bay = _machines_by_bay(machines, machine_bay_ids)
+    for bay_index, bay_id in enumerate(sorted(jobs_by_bay), start=1):
+        bay_machines = machines_by_bay.get(bay_id)
+        if not bay_machines:
+            print(
+                "[ERROR][Phase2.merged._iter_phase2_bay_candidate_banks] "
+                f"cause=no_machine_for_bay bay_id={bay_id}"
+            )
+            raise RuntimeError(f"Phase 2 Bay subproblem has no machines: {bay_id}")
+        bank_seed = seed + bay_index * 10_000
+        bay_candidates = [
+            _with_subproblem_bay(candidate, bay_id)
+            for candidate in build_phase2_batch_machine_candidate_bank(
+                jobs=jobs_by_bay[bay_id],
+                machines=bay_machines,
+                phase1_assignments=phase1_assignments,
+                model=model,
+                heuristic_algorithms=heuristic_algorithms,
+                rollout_samples=rollout_samples,
+                max_wo_count=max_wo_count,
+                max_length_sum=max_length_sum,
+                action_pool_limit=action_pool_limit,
+                seed=bank_seed,
+                score_mode=score_mode,
+                constraint_profile=constraint_profile,
+                candidate_workers=candidate_workers,
+                candidate_executor=candidate_executor,
+                temperature=temperature,
+            )
+        ]
+        yield bay_id, jobs_by_bay[bay_id], bay_machines, bank_seed, bay_candidates
+
+
 def _train_one_episode(
     model: Phase2SetPointerPolicy,
     optimizer: torch.optim.Optimizer,
@@ -1145,40 +1424,29 @@ def _train_one_episode(
     candidate_executor: ProcessPoolExecutor | None,
     temperature: float = 1.0,
 ) -> tuple[float, Phase2BatchMachineCandidate, List[Phase2BatchMachineCandidate], List[Dict]]:
-    machine_bay_ids = _machine_bay_ids(machines)
-    jobs_by_bay = _jobs_by_phase1_bay(jobs, phase1_assignments)
-    machines_by_bay = _machines_by_bay(machines, machine_bay_ids)
     all_candidates: List[Phase2BatchMachineCandidate] = []
     bay_bests: List[Phase2BatchMachineCandidate] = []
     bay_losses: List[float] = []
     subproblem_rows: List[Dict] = []
     score_field_names = _score_field_names(score_mode)
 
-    for bay_index, bay_id in enumerate(sorted(jobs_by_bay), start=1):
-        bay_machines = machines_by_bay.get(bay_id)
-        if not bay_machines:
-            print(f"[ERROR][Phase2.merged._train_one_episode] cause=no_machine_for_bay bay_id={bay_id}")
-            raise RuntimeError(f"Phase 2 Bay subproblem has no machines: {bay_id}")
-        bay_candidates = [
-            _with_subproblem_bay(candidate, bay_id)
-            for candidate in build_phase2_batch_machine_candidate_bank(
-                jobs=jobs_by_bay[bay_id],
-                machines=bay_machines,
-                phase1_assignments=phase1_assignments,
-                model=model,
-                heuristic_algorithms=heuristic_algorithms,
-                rollout_samples=rollout_samples,
-                max_wo_count=max_wo_count,
-                max_length_sum=max_length_sum,
-                action_pool_limit=action_pool_limit,
-                seed=seed + bay_index * 10_000,
-                score_mode=score_mode,
-                constraint_profile=constraint_profile,
-                candidate_workers=candidate_workers,
-                candidate_executor=candidate_executor,
-                temperature=temperature,
-            )
-        ]
+    for bay_id, bay_jobs, bay_machines, _bank_seed, bay_candidates in _iter_phase2_bay_candidate_banks(
+        jobs=jobs,
+        machines=machines,
+        phase1_assignments=phase1_assignments,
+        model=model,
+        heuristic_algorithms=heuristic_algorithms,
+        rollout_samples=rollout_samples,
+        max_wo_count=max_wo_count,
+        max_length_sum=max_length_sum,
+        action_pool_limit=action_pool_limit,
+        seed=seed,
+        score_mode=score_mode,
+        constraint_profile=constraint_profile,
+        candidate_workers=candidate_workers,
+        candidate_executor=candidate_executor,
+        temperature=temperature,
+    ):
         best = min(bay_candidates, key=_candidate_sort_key)
         bay_loss = _update_from_candidate(model, optimizer, best)
         bay_losses.append(bay_loss)
@@ -1188,7 +1456,7 @@ def _train_one_episode(
             _subproblem_metrics_row(
                 episode=episode,
                 bay_id=bay_id,
-                job_count=len(jobs_by_bay[bay_id]),
+                job_count=len(bay_jobs),
                 machine_count=len(bay_machines),
                 candidate_count=len(bay_candidates),
                 best=best,
@@ -1198,7 +1466,7 @@ def _train_one_episode(
         )
         print(
             "[CHECK][Phase2.merged._train_one_episode.subproblem] "
-            f"bay_id={bay_id} job_count={len(jobs_by_bay[bay_id])} machine_count={len(bay_machines)} "
+            f"bay_id={bay_id} job_count={len(bay_jobs)} machine_count={len(bay_machines)} "
             f"candidate_count={len(bay_candidates)} best_source={best.source} "
             f"loss={bay_loss:.9f} score={json.dumps(list(best.score_tuple), ensure_ascii=False)}",
             flush=True,
@@ -1226,15 +1494,39 @@ def _update_from_candidate(
     total_loss = torch.zeros((), dtype=torch.float32, device=device)
     for transition in best.transitions:
         logits = model(transition.policy_state)
-        total_loss = total_loss + F.cross_entropy(
-            logits.unsqueeze(0),
-            torch.tensor([transition.selected_action_index], dtype=torch.long, device=device),
+        total_loss = total_loss + _multi_target_cross_entropy(
+            logits,
+            transition.target_action_indices,
         )
     mean_loss = total_loss / len(best.transitions)
     optimizer.zero_grad()
     mean_loss.backward()
     optimizer.step()
     return float(mean_loss.item())
+
+
+def _multi_target_cross_entropy(
+    logits: torch.Tensor,
+    target_action_indices: Sequence[int],
+) -> torch.Tensor:
+    """복수 정답 후보에 할당된 확률 질량의 음의 로그를 반환한다."""
+
+    if logits.ndim != 1 or logits.numel() == 0:
+        print(
+            "[ERROR][Phase2.merged._multi_target_cross_entropy] "
+            f"cause=invalid_logits_shape shape={tuple(logits.shape)}"
+        )
+        raise RuntimeError("Phase 2 tie-aware CE requires one-dimensional non-empty logits")
+    targets = tuple(dict.fromkeys(int(index) for index in target_action_indices))
+    if not targets or any(index < 0 or index >= logits.numel() for index in targets):
+        print(
+            "[ERROR][Phase2.merged._multi_target_cross_entropy] "
+            f"cause=invalid_targets targets={targets} action_count={logits.numel()}"
+        )
+        raise RuntimeError("Phase 2 tie-aware CE target indices are invalid")
+    target_tensor = torch.tensor(targets, dtype=torch.long, device=logits.device)
+    log_probabilities = F.log_softmax(logits, dim=0)
+    return -torch.logsumexp(log_probabilities.index_select(0, target_tensor), dim=0)
 
 
 def _with_subproblem_bay(candidate: Phase2BatchMachineCandidate, bay_id: str) -> Phase2BatchMachineCandidate:
@@ -1649,6 +1941,79 @@ def _heuristic_key(source: str, action: Mapping) -> tuple:
     raise RuntimeError(f"unknown merged Phase 2 candidate source: {source}")
 
 
+def _teacher_target_action_indices(
+    *,
+    actions: Sequence[Mapping],
+    source: str,
+    selected_action_index: int,
+    policy_state: Phase2PolicyState,
+) -> tuple[int, ...]:
+    """정책이 구분할 수 없는 휴리스틱 동률 후보를 모두 CE 정답으로 반환한다."""
+
+    if not 0 <= selected_action_index < len(actions):
+        print(
+            "[ERROR][Phase2.merged._teacher_target_action_indices] "
+            f"cause=selected_index_out_of_range index={selected_action_index} actions={len(actions)}"
+        )
+        raise RuntimeError("Phase 2 teacher selected action index is out of range")
+    if _is_agent_source(source):
+        return (selected_action_index,)
+
+    selected_priority = _heuristic_priority_key(source, actions[selected_action_index])
+    selected_observation = _policy_action_observation_key(policy_state, selected_action_index)
+    tied = tuple(
+        index
+        for index, action in enumerate(actions)
+        if _heuristic_priority_key(source, action) == selected_priority
+        and _policy_action_observation_key(policy_state, index) == selected_observation
+    )
+    if selected_action_index not in tied:
+        print(
+            "[ERROR][Phase2.merged._teacher_target_action_indices] "
+            f"cause=selected_index_missing_from_tie_set index={selected_action_index} tied={tied}"
+        )
+        raise RuntimeError("Phase 2 tie-aware target omitted the selected action")
+    return tied
+
+
+def _heuristic_priority_key(source: str, action: Mapping) -> tuple:
+    """재현성용 machine/job ID를 제외한 휴리스틱의 실제 우선순위 key다."""
+
+    key = _heuristic_key(source, action)
+    if len(key) < 3:
+        print(
+            "[ERROR][Phase2.merged._heuristic_priority_key] "
+            f"cause=invalid_heuristic_key source={source} key={key}"
+        )
+        raise RuntimeError("Phase 2 heuristic key has no removable identity tie-break")
+    return key[:-2]
+
+
+def _policy_action_observation_key(
+    policy_state: Phase2PolicyState,
+    action_index: int,
+) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Pointer score에 직접 들어가는 후보 W/O·projected feature를 반환한다."""
+
+    if not 0 <= action_index < len(policy_state.action_candidate_node_indices):
+        print(
+            "[ERROR][Phase2.merged._policy_action_observation_key] "
+            f"cause=action_index_out_of_range index={action_index}"
+        )
+        raise RuntimeError("Phase 2 action observation index is out of range")
+    node_index = policy_state.action_candidate_node_indices[action_index]
+    if not 0 <= node_index < len(policy_state.wo_node_features):
+        print(
+            "[ERROR][Phase2.merged._policy_action_observation_key] "
+            f"cause=node_index_out_of_range index={node_index}"
+        )
+        raise RuntimeError("Phase 2 action observation node index is out of range")
+    return (
+        tuple(float(value) for value in policy_state.wo_node_features[node_index]),
+        tuple(float(value) for value in policy_state.action_projected_features[action_index]),
+    )
+
+
 def _model_action_index(
     actions: Sequence[Mapping],
     model: Phase2SetPointerPolicy | None,
@@ -1723,6 +2088,18 @@ def _agent_greedy_from_ranked(ranked_candidates: Sequence[Phase2BatchMachineCand
         if candidate.source == "agent_greedy":
             return rank, candidate
     return 0, None
+
+
+def _best_heuristic_from_ranked(
+    ranked_candidates: Sequence[Phase2BatchMachineCandidate],
+) -> Phase2BatchMachineCandidate:
+    """검증 후보 중 사전식 score가 가장 좋은 dispatch heuristic을 반환한다."""
+
+    for candidate in ranked_candidates:
+        if not _is_agent_source(candidate.source):
+            return candidate
+    print("[ERROR][Phase2.merged._best_heuristic_from_ranked] cause=no_heuristic_candidate")
+    raise RuntimeError("Phase 2 validation requires at least one heuristic candidate")
 
 
 def _empty_machine_loads(machines: Mapping[str, object]) -> Dict[str, Dict[str, int | float]]:
@@ -2190,6 +2567,89 @@ def _validation_episode_jobs(
     return validation_episode_jobs[(validation_episode - 1) % len(validation_episode_jobs)]
 
 
+def _resolve_validation_problems(
+    validation_episodes: int,
+    default_jobs: Mapping[str, object],
+    validation_episode_jobs: Sequence[Mapping[str, object]] | None,
+    validation_episode_job_factory: Callable[[int], Mapping[str, object]] | None,
+    validation_problems: Sequence[Phase2ValidationProblem] | None,
+) -> tuple[Phase2ValidationProblem, ...]:
+    """모든 validation 입력 방식을 학습 시작 시 고정 문제 객체로 변환한다."""
+
+    if validation_episodes == 0:
+        if validation_problems is not None:
+            print(
+                "[ERROR][Phase2.merged._resolve_validation_problems] "
+                "cause=validation_disabled_with_explicit_problems"
+            )
+            raise RuntimeError("validation_problems require validation_episodes > 0")
+        return ()
+    if validation_problems is not None:
+        resolved = tuple(validation_problems)
+    else:
+        resolved = tuple(
+            Phase2ValidationProblem(
+                problem_id=f"VAL{index:03d}",
+                block_count=_physical_block_count(jobs),
+                distribution_type=index,
+                generation_seed=index,
+                target_distribution={},
+                normalized_distribution={},
+                actual_distribution={},
+                jobs=jobs,
+                metadata={
+                    "problem_id": f"VAL{index:03d}",
+                    "physical_block_count": _physical_block_count(jobs),
+                    "distribution_type": index,
+                    "input_contract": "legacy_fixed_validation",
+                },
+            )
+            for index in range(1, validation_episodes + 1)
+            for jobs in (
+                _validation_episode_jobs(
+                    index,
+                    default_jobs,
+                    validation_episode_jobs,
+                    validation_episode_job_factory,
+                ),
+            )
+        )
+    problem_ids = [problem.problem_id for problem in resolved]
+    if not resolved or len(set(problem_ids)) != len(problem_ids):
+        print(
+            "[ERROR][Phase2.merged._resolve_validation_problems] "
+            f"cause=invalid_problem_ids values={problem_ids}"
+        )
+        raise RuntimeError("Phase 2 validation problem IDs must be non-empty and unique")
+    return resolved
+
+
+def _physical_block_count(jobs: Mapping[str, object]) -> int:
+    block_ids = {
+        str(getattr(job, "block_set_id", ""))
+        for job in jobs.values()
+    }
+    if not block_ids or "" in block_ids:
+        print(
+            "[ERROR][Phase2.merged._physical_block_count] "
+            "cause=missing_block_set_id"
+        )
+        raise RuntimeError("Phase 2 validation jobs require block_set_id")
+    malformed = sorted(block_id for block_id in block_ids if len(block_id.split("::")) < 3)
+    if malformed:
+        print(
+            "[ERROR][Phase2.merged._physical_block_count] "
+            f"cause=invalid_block_set_ids values={malformed[:5]}"
+        )
+        raise RuntimeError("Phase 2 block_set_id must contain project, series, and block")
+    physical_ids = {
+        "::".join((parts[0], parts[-1]))
+        for block_id in block_ids
+        for parts in (block_id.split("::"),)
+    }
+    return len(physical_ids)
+
+
 def _phase1_assignments_for_episode(
     jobs: Mapping[str, object],
     fixed_assignments: Mapping[str, str],
@@ -2275,6 +2735,7 @@ def _validate_train_inputs(
     episode_job_factory: Callable[[int], Mapping[str, object]] | None,
     validation_episode_jobs: Sequence[Mapping[str, object]] | None,
     validation_episode_job_factory: Callable[[int], Mapping[str, object]] | None,
+    validation_problems: Sequence[Phase2ValidationProblem] | None,
     phase1_heuristic: str | None,
     phase1_bay_ids: Sequence[str] | None,
     phase1_assignment_builder: Callable[[Mapping[str, object], int], Mapping[str, str]] | None,
@@ -2336,15 +2797,26 @@ def _validate_train_inputs(
     if episode_jobs is not None and episode_job_factory is not None:
         print("[ERROR][Phase2.merged._validate_train_inputs] cause=conflicting_episode_sources")
         raise RuntimeError("use either episode_jobs or episode_job_factory, not both")
-    if validation_episode_jobs is not None and validation_episode_job_factory is not None:
+    validation_source_count = sum(
+        source is not None
+        for source in (
+            validation_episode_jobs,
+            validation_episode_job_factory,
+            validation_problems,
+        )
+    )
+    if validation_source_count > 1:
         print("[ERROR][Phase2.merged._validate_train_inputs] cause=conflicting_validation_episode_sources")
-        raise RuntimeError("use either validation_episode_jobs or validation_episode_job_factory, not both")
+        raise RuntimeError("use exactly one explicit Phase 2 validation problem source")
     if episode_jobs is not None and not episode_jobs:
         print("[ERROR][Phase2.merged._validate_train_inputs] cause=empty_episode_jobs")
         raise RuntimeError("episode_jobs must not be empty")
     if validation_episode_jobs is not None and not validation_episode_jobs:
         print("[ERROR][Phase2.merged._validate_train_inputs] cause=empty_validation_episode_jobs")
         raise RuntimeError("validation_episode_jobs must not be empty")
+    if validation_problems is not None and not validation_problems:
+        print("[ERROR][Phase2.merged._validate_train_inputs] cause=empty_validation_problems")
+        raise RuntimeError("validation_problems must not be empty")
 
 
 def _resolve_torch_device(device: str) -> torch.device:
@@ -2433,6 +2905,7 @@ def _load_phase2_batch_machine_checkpoint(
     score_mode: str,
     torch_device: torch.device,
     expected_run_spec: Mapping[str, object],
+    expected_validation_contract: Mapping[str, object],
 ) -> int:
     """Load Phase 2 model/optimizer state and return completed episode."""
 
@@ -2485,6 +2958,13 @@ def _load_phase2_batch_machine_checkpoint(
         expected_run_spec,
         context="resume_training",
     )
+    checkpoint_validation_contract = checkpoint.get("validation_contract")
+    if checkpoint_validation_contract != expected_validation_contract:
+        print(
+            "[ERROR][Phase2.merged._load_phase2_batch_machine_checkpoint] "
+            f"cause=validation_contract_mismatch path={path}"
+        )
+        raise RuntimeError("Phase 2 resume checkpoint validation grid mismatch")
     try:
         completed_episode = int(checkpoint["episodes"])
     except KeyError as exc:
@@ -2567,6 +3047,7 @@ def _save_phase2_batch_machine_checkpoint(
     device: torch.device,
     score_mode: str,
     run_spec: Mapping[str, object],
+    validation_contract: Mapping[str, object],
 ) -> None:
     """Save Phase 2 merged policy checkpoint with the feature contract."""
 
@@ -2594,6 +3075,7 @@ def _save_phase2_batch_machine_checkpoint(
             "action_pool_limit": action_pool_limit,
             "device": str(device),
             "run_spec": dict(run_spec),
+            "validation_contract": dict(validation_contract),
         },
         path,
     )
@@ -2646,13 +3128,99 @@ def _subproblem_metrics_row(
     return row
 
 
+def _score_relation(
+    proposed: Phase2BatchMachineCandidate | None,
+    heuristic: Phase2BatchMachineCandidate,
+) -> str:
+    """Proposed와 최상 휴리스틱의 사전식 score 관계를 반환한다."""
+
+    if proposed is None:
+        print("[ERROR][Phase2.merged._score_relation] cause=no_proposed_candidate")
+        raise RuntimeError("Phase 2 validation requires a Proposed candidate")
+    if proposed.score_tuple < heuristic.score_tuple:
+        return "win"
+    if proposed.score_tuple == heuristic.score_tuple:
+        return "tie"
+    return "loss"
+
+
+def _validation_checkpoint_key(rows: Sequence[Mapping]) -> tuple[int, int, float]:
+    """동일 가중치의 상위 `(block size, Type)` 문제로 best checkpoint를 고른다."""
+
+    if not rows:
+        print("[ERROR][Phase2.merged._validation_checkpoint_key] cause=no_rows")
+        raise RuntimeError("Phase 2 best-checkpoint selection requires validation rows")
+    relations = [str(row["proposed_vs_best_heuristic"]) for row in rows]
+    invalid = sorted(set(relations) - {"win", "tie", "loss"})
+    if invalid:
+        print(
+            "[ERROR][Phase2.merged._validation_checkpoint_key] "
+            f"cause=invalid_relation values={invalid}"
+        )
+        raise RuntimeError("Phase 2 validation contains invalid comparison labels")
+    ranks = [int(row["proposed_best_rank"]) for row in rows]
+    if any(rank <= 0 for rank in ranks):
+        print(
+            "[ERROR][Phase2.merged._validation_checkpoint_key] "
+            f"cause=invalid_proposed_rank ranks={ranks}"
+        )
+        raise RuntimeError("Phase 2 validation contains invalid Proposed ranks")
+    return (
+        relations.count("loss"),
+        -relations.count("win"),
+        sum(ranks) / float(len(ranks)),
+    )
+
+
+def _resume_validation_checkpoint_key(
+    rows: Sequence[Mapping],
+    checkpoint_path: Path,
+) -> tuple[float, ...] | None:
+    """재개 CSV의 신규 selection key가 있으면 기존 best 상태를 복원한다."""
+
+    keys: list[tuple[float, ...]] = []
+    for row in rows:
+        raw = row.get("checkpoint_selection_key_json")
+        if raw in (None, ""):
+            continue
+        try:
+            parsed = json.loads(str(raw))
+            key = tuple(float(value) for value in parsed)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(
+                "[ERROR][Phase2.merged._resume_validation_checkpoint_key] "
+                f"cause=invalid_selection_key value={raw}"
+            )
+            raise RuntimeError("invalid Phase 2 validation checkpoint key") from exc
+        if len(key) != 3:
+            print(
+                "[ERROR][Phase2.merged._resume_validation_checkpoint_key] "
+                f"cause=invalid_selection_key_length value={raw}"
+            )
+            raise RuntimeError("invalid Phase 2 validation checkpoint key length")
+        keys.append(key)
+    if not keys:
+        return None
+    if not checkpoint_path.is_file():
+        print(
+            "[ERROR][Phase2.merged._resume_validation_checkpoint_key] "
+            f"cause=missing_best_checkpoint path={checkpoint_path}"
+        )
+        raise RuntimeError("Phase 2 validation history exists but best checkpoint is missing")
+    return min(keys)
+
+
 def _validation_summary_row(
     train_episode: int,
     validation_episode: int,
+    validation_phase1_seed: int,
+    validation_sampling_seed: int,
+    bay_id: str,
     jobs: Mapping[str, object],
     machines: Mapping[str, object],
     candidate_count: int,
     best: Phase2BatchMachineCandidate,
+    best_heuristic: Phase2BatchMachineCandidate,
     proposed_rank: int,
     proposed_best: Phase2BatchMachineCandidate | None,
     greedy_rank: int,
@@ -2662,11 +3230,23 @@ def _validation_summary_row(
     row = {
         "train_episode": train_episode,
         "validation_episode": validation_episode,
+        "validation_phase1_seed": validation_phase1_seed,
+        "validation_sampling_seed": validation_sampling_seed,
+        "bay_id": bay_id,
         "job_count": len(jobs),
         "machine_count": len(machines),
         "candidate_count": candidate_count,
         "best_source": best.source,
         "best_score_json": json.dumps(list(best.score_tuple), ensure_ascii=False),
+        "best_heuristic_source": best_heuristic.source,
+        "best_heuristic_score_json": json.dumps(
+            list(best_heuristic.score_tuple),
+            ensure_ascii=False,
+        ),
+        "proposed_vs_best_heuristic": _score_relation(
+            proposed_best,
+            best_heuristic,
+        ),
         "agent_best_rank": proposed_rank,
         "agent_best_source": "" if proposed_best is None else proposed_best.source,
         "agent_best_score_json": "" if proposed_best is None else json.dumps(list(proposed_best.score_tuple), ensure_ascii=False),
@@ -2695,6 +3275,7 @@ def _validation_summary_row(
 def _validation_candidate_summary_row(
     train_episode: int,
     validation_episode: int,
+    validation_sampling_seed: int,
     rank: int,
     candidate: Phase2BatchMachineCandidate,
     score_field_names: Sequence[str],
@@ -2702,8 +3283,1330 @@ def _validation_candidate_summary_row(
     row = _candidate_summary_row(validation_episode, rank, candidate, score_field_names)
     row["train_episode"] = train_episode
     row["validation_episode"] = validation_episode
+    row["validation_sampling_seed"] = validation_sampling_seed
     row.pop("episode", None)
     return row
+
+
+def _validation_problem_columns(
+    problem: Phase2ValidationProblem,
+) -> dict[str, int | str]:
+    return {
+        "validation_problem_id": problem.problem_id,
+        "block_count": problem.block_count,
+        "distribution_type": problem.distribution_type,
+        "generation_seed": problem.generation_seed,
+    }
+
+
+def _validation_parent_candidates(
+    candidate_banks_by_bay: Mapping[
+        str,
+        tuple[
+            Mapping[str, object],
+            Mapping[str, object],
+            int,
+            Sequence[Phase2BatchMachineCandidate],
+        ],
+    ],
+    machines: Mapping[str, object],
+    heuristic_algorithms: Sequence[str],
+    max_wo_count: int,
+    max_length_sum: float,
+    score_mode: str,
+) -> dict[str, Phase2BatchMachineCandidate]:
+    """Bay별 결과를 같은 method끼리 합쳐 상위 validation 해를 만든다."""
+
+    if not candidate_banks_by_bay:
+        print("[ERROR][Phase2.merged._validation_parent_candidates] cause=no_bay_candidates")
+        raise RuntimeError("Phase 2 validation problem produced no Bay candidate bank")
+    result: dict[str, Phase2BatchMachineCandidate] = {}
+    for source in (PHASE2_PROPOSED_BEST_OF_K_SOURCE, *heuristic_algorithms):
+        bay_candidates: list[Phase2BatchMachineCandidate] = []
+        for bay_id in sorted(candidate_banks_by_bay):
+            ranked = candidate_banks_by_bay[bay_id][3]
+            if source == PHASE2_PROPOSED_BEST_OF_K_SOURCE:
+                _rank, selected = _agent_best_from_ranked(ranked)
+                if selected is None:
+                    print(
+                        "[ERROR][Phase2.merged._validation_parent_candidates] "
+                        f"cause=no_agent_candidate bay_id={bay_id}"
+                    )
+                    raise RuntimeError("Phase 2 validation requires an agent candidate in every non-empty Bay")
+            else:
+                matches = [candidate for candidate in ranked if candidate.source == source]
+                if len(matches) != 1:
+                    print(
+                        "[ERROR][Phase2.merged._validation_parent_candidates] "
+                        f"cause=heuristic_candidate_cardinality bay_id={bay_id} "
+                        f"source={source} count={len(matches)}"
+                    )
+                    raise RuntimeError("Phase 2 validation heuristic candidate is missing or duplicated")
+                selected = matches[0]
+            bay_candidates.append(selected)
+        combined = _combine_subproblem_bests(
+            bay_bests=bay_candidates,
+            machines=machines,
+            max_wo_count=max_wo_count,
+            max_length_sum=max_length_sum,
+            score_mode=score_mode,
+        )
+        result[source] = replace(combined, source=source)
+    return result
+
+
+def _validation_parent_rows(
+    train_episode: int,
+    validation_episode: int,
+    validation_problem: Phase2ValidationProblem,
+    parent_candidates: Mapping[str, Phase2BatchMachineCandidate],
+    score_field_names: Sequence[str],
+) -> tuple[dict, list[dict]]:
+    proposed = parent_candidates[PHASE2_PROPOSED_BEST_OF_K_SOURCE]
+    heuristic_candidates = [
+        candidate
+        for source, candidate in parent_candidates.items()
+        if source != PHASE2_PROPOSED_BEST_OF_K_SOURCE
+    ]
+    if not heuristic_candidates:
+        print("[ERROR][Phase2.merged._validation_parent_rows] cause=no_heuristic_candidates")
+        raise RuntimeError("Phase 2 parent validation requires heuristic candidates")
+    best_heuristic = min(heuristic_candidates, key=_candidate_sort_key)
+    ranked = sorted(parent_candidates.values(), key=_candidate_sort_key)
+    best = ranked[0]
+    proposed_rank = 1 + sum(
+        candidate.score_tuple < proposed.score_tuple
+        for candidate in ranked
+    )
+    parent_row = {
+        "train_episode": train_episode,
+        "validation_episode": validation_episode,
+        **_validation_problem_columns(validation_problem),
+        "job_count": len(validation_problem.jobs),
+        "bay_subproblem_count": len(
+            {
+                proposed.machine_bay_ids[machine_id]
+                for machine_id in proposed.machine_assignments.values()
+            }
+        ),
+        "best_source": best.source,
+        "best_score_json": json.dumps(list(best.score_tuple), ensure_ascii=False),
+        "best_heuristic_source": best_heuristic.source,
+        "best_heuristic_score_json": json.dumps(
+            list(best_heuristic.score_tuple),
+            ensure_ascii=False,
+        ),
+        "proposed_vs_best_heuristic": _score_relation(proposed, best_heuristic),
+        "proposed_best_rank": proposed_rank,
+        "proposed_best_source": proposed.source,
+        "proposed_best_score_json": json.dumps(
+            list(proposed.score_tuple),
+            ensure_ascii=False,
+        ),
+    }
+    parent_row.update(
+        {
+            field: proposed.score_tuple[index]
+            for index, field in enumerate(score_field_names)
+        }
+    )
+    method_rows: list[dict] = []
+    for candidate in ranked:
+        row = {
+            "train_episode": train_episode,
+            "validation_episode": validation_episode,
+            **_validation_problem_columns(validation_problem),
+            "source": candidate.source,
+            "score_json": json.dumps(list(candidate.score_tuple), ensure_ascii=False),
+        }
+        row.update(
+            {
+                field: candidate.score_tuple[index]
+                for index, field in enumerate(score_field_names)
+            }
+        )
+        method_rows.append(row)
+    return parent_row, method_rows
+
+
+def _validation_bay_method_rows(
+    train_episode: int,
+    validation_episode: int,
+    validation_problem: Phase2ValidationProblem,
+    bay_id: str,
+    ranked_candidates: Sequence[Phase2BatchMachineCandidate],
+    heuristic_algorithms: Sequence[str],
+    score_field_names: Sequence[str],
+) -> list[dict]:
+    """Bay별 그래프에 쓸 Proposed 1건과 휴리스틱별 1건을 고정한다."""
+
+    _rank, proposed = _agent_best_from_ranked(ranked_candidates)
+    if proposed is None:
+        print(
+            "[ERROR][Phase2.merged._validation_bay_method_rows] "
+            f"cause=no_agent_candidate problem={validation_problem.problem_id} bay_id={bay_id}"
+        )
+        raise RuntimeError("Phase 2 Bay validation requires an agent candidate")
+    selected = {PHASE2_PROPOSED_BEST_OF_K_SOURCE: proposed}
+    for source in heuristic_algorithms:
+        matches = [
+            candidate
+            for candidate in ranked_candidates
+            if candidate.source == source
+        ]
+        if len(matches) != 1:
+            print(
+                "[ERROR][Phase2.merged._validation_bay_method_rows] "
+                f"cause=heuristic_candidate_cardinality problem={validation_problem.problem_id} "
+                f"bay_id={bay_id} source={source} count={len(matches)}"
+            )
+            raise RuntimeError("Phase 2 Bay validation heuristic candidate is missing or duplicated")
+        selected[source] = matches[0]
+    rows: list[dict] = []
+    for source, candidate in selected.items():
+        row = {
+            "train_episode": train_episode,
+            "validation_episode": validation_episode,
+            **_validation_problem_columns(validation_problem),
+            "bay_id": bay_id,
+            "source": source,
+            "score_json": json.dumps(list(candidate.score_tuple), ensure_ascii=False),
+        }
+        row.update(
+            {
+                field: candidate.score_tuple[index]
+                for index, field in enumerate(score_field_names)
+            }
+        )
+        rows.append(row)
+    return rows
+
+
+def _write_validation_problem_catalog(
+    validation_root: Path,
+    problems: Sequence[Phase2ValidationProblem],
+    contract: Mapping[str, object],
+) -> None:
+    validation_root.mkdir(parents=True, exist_ok=True)
+    contract_path = validation_root / "grid_contract.json"
+    if contract_path.is_file():
+        existing = json.loads(contract_path.read_text(encoding="utf-8"))
+        if existing != contract:
+            print(
+                "[ERROR][Phase2.merged._write_validation_problem_catalog] "
+                f"cause=existing_contract_mismatch path={contract_path}"
+            )
+            raise RuntimeError("output directory contains a different Phase 2 validation grid")
+    _write_json(contract_path, contract)
+    for problem in problems:
+        problem_root = _validation_problem_root(validation_root / "problems", problem)
+        problem_root.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            problem_root / "problem_metadata.json",
+            {
+                **dict(problem.metadata),
+                **_validation_problem_columns(problem),
+            },
+        )
+        _write_json(
+            problem_root / "distribution_profile.json",
+            {
+                "target": dict(problem.target_distribution),
+                "normalized_actual": dict(problem.normalized_distribution),
+                "raw_actual": dict(problem.actual_distribution),
+            },
+        )
+        _write_rows(
+            problem_root / "jobs.csv",
+            _validation_job_rows(problem.jobs),
+            _validation_job_fields(),
+        )
+
+
+def _write_validation_problem_evaluation(
+    evaluation_root: Path,
+    validation_problem: Phase2ValidationProblem,
+    phase1_assignments: Mapping[str, str],
+    machines: Mapping[str, object],
+    candidate_banks_by_bay: Mapping[
+        str,
+        tuple[
+            Mapping[str, object],
+            Mapping[str, object],
+            int,
+            Sequence[Phase2BatchMachineCandidate],
+        ],
+    ],
+    parent_candidates: Mapping[str, Phase2BatchMachineCandidate],
+    score_field_names: Sequence[str],
+) -> None:
+    problem_root = _validation_problem_root(evaluation_root, validation_problem)
+    problem_root.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        problem_root / "evaluation_metadata.json",
+        {
+            **_validation_problem_columns(validation_problem),
+            "fixed_problem_path": str(
+                _validation_problem_root(
+                    evaluation_root.parents[1] / "problems",
+                    validation_problem,
+                )
+            ),
+            "evaluated_bays": sorted(candidate_banks_by_bay),
+        },
+    )
+    _write_rows(
+        problem_root / "phase1_assignments.csv",
+        [
+            {"block_set_id": block_set_id, "bay_id": bay_id}
+            for block_set_id, bay_id in sorted(phase1_assignments.items())
+        ],
+        ["block_set_id", "bay_id"],
+    )
+    jobs_by_bay = _jobs_by_phase1_bay(validation_problem.jobs, phase1_assignments)
+    machine_bay_ids = _machine_bay_ids(machines)
+    machines_by_bay = _machines_by_bay(machines, machine_bay_ids)
+    for bay_id in sorted(machines_by_bay):
+        bay_root = problem_root / f"bay_{bay_id}"
+        bay_root.mkdir(parents=True, exist_ok=True)
+        bay_jobs = jobs_by_bay.get(bay_id, {})
+        _write_json(
+            bay_root / "problem_metadata.json",
+            {
+                **_validation_problem_columns(validation_problem),
+                "bay_id": bay_id,
+                "job_count": len(bay_jobs),
+                "machine_count": len(machines_by_bay[bay_id]),
+                "evaluated": bool(bay_jobs),
+            },
+        )
+        if not bay_jobs:
+            continue
+        bank = candidate_banks_by_bay.get(bay_id)
+        if bank is None:
+            print(
+                "[ERROR][Phase2.merged._write_validation_problem_evaluation] "
+                f"cause=missing_candidate_bank problem={validation_problem.problem_id} bay_id={bay_id}"
+            )
+            raise RuntimeError("non-empty validation Bay has no candidate bank")
+        ranked = bank[3]
+        _write_rows(
+            bay_root / "jobs.csv",
+            _validation_job_rows(bay_jobs),
+            _validation_job_fields(),
+        )
+        _write_rows(
+            bay_root / "candidate_summary.csv",
+            [
+                _candidate_summary_row(0, rank, candidate, score_field_names)
+                for rank, candidate in enumerate(ranked, start=1)
+            ],
+            _candidate_fields(score_field_names),
+        )
+        _rank, proposed = _agent_best_from_ranked(ranked)
+        if proposed is None:
+            print(
+                "[ERROR][Phase2.merged._write_validation_problem_evaluation] "
+                f"cause=no_proposed_candidate problem={validation_problem.problem_id} bay_id={bay_id}"
+            )
+            raise RuntimeError("validation Bay requires a Proposed candidate")
+        _write_assignments(bay_root / "proposed_solution.csv", proposed)
+    _write_rows(
+        problem_root / "parent_method_summary.csv",
+        [
+            {
+                "source": source,
+                "score_json": json.dumps(list(candidate.score_tuple), ensure_ascii=False),
+                "method_rank": 1
+                + sum(
+                    other.score_tuple < candidate.score_tuple
+                    for other in parent_candidates.values()
+                ),
+                "is_rank1": int(
+                    not any(
+                        other.score_tuple < candidate.score_tuple
+                        for other in parent_candidates.values()
+                    )
+                ),
+                "rank1_tie_count": sum(
+                    other.score_tuple
+                    == min(
+                        item.score_tuple
+                        for item in parent_candidates.values()
+                    )
+                    for other in parent_candidates.values()
+                ),
+                **{
+                    field: candidate.score_tuple[index]
+                    for index, field in enumerate(score_field_names)
+                },
+            }
+            for source, candidate in parent_candidates.items()
+        ],
+        [
+            "source",
+            "score_json",
+            "method_rank",
+            "is_rank1",
+            "rank1_tie_count",
+            *score_field_names,
+        ],
+    )
+
+
+def _validation_problem_root(
+    root: Path,
+    problem: Phase2ValidationProblem,
+) -> Path:
+    return (
+        root
+        / f"blocks_{problem.block_count:03d}"
+        / f"type_{problem.distribution_type:02d}"
+    )
+
+
+def _validation_job_rows(jobs: Mapping[str, object]) -> list[dict]:
+    return [
+        {
+            "job_id": job_id,
+            "block_set_id": str(getattr(job, "block_set_id")),
+            "family": str(getattr(job, "family")),
+            "plate_length": float(getattr(job, "plate_length")),
+            "cut_length": float(getattr(job, "cut_length")),
+            "bevel_quantity": float(getattr(job, "bevel_quantity")),
+            "tact_time": float(_processing_time(job)),
+        }
+        for job_id, job in sorted(jobs.items())
+    ]
+
+
+def _validation_job_fields() -> list[str]:
+    return [
+        "job_id",
+        "block_set_id",
+        "family",
+        "plate_length",
+        "cut_length",
+        "bevel_quantity",
+        "tact_time",
+    ]
+
+
+def _write_json(path: Path, value: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, default=_json_default),
+        encoding="utf-8",
+    )
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
+
+
+def _rank_validation_method_rows(
+    rows: Sequence[Mapping],
+) -> list[dict]:
+    """상위 validation 문제마다 사전식 경쟁 순위를 계산한다."""
+
+    if not rows:
+        print("[ERROR][Phase2.merged._rank_validation_method_rows] cause=no_rows")
+        raise RuntimeError("Phase 2 validation ranking requires method rows")
+    grouped: dict[str, list[Mapping]] = {}
+    for row in rows:
+        problem_id = str(row.get("validation_problem_id", ""))
+        source = str(row.get("source", ""))
+        if not problem_id or not source:
+            print(
+                "[ERROR][Phase2.merged._rank_validation_method_rows] "
+                f"cause=missing_identity problem_id={problem_id} source={source}"
+            )
+            raise RuntimeError("Phase 2 validation method row has no identity")
+        grouped.setdefault(problem_id, []).append(row)
+
+    ranked_rows: list[dict] = []
+    for problem_id, problem_rows in grouped.items():
+        sources = [str(row["source"]) for row in problem_rows]
+        if len(set(sources)) != len(sources):
+            print(
+                "[ERROR][Phase2.merged._rank_validation_method_rows] "
+                f"cause=duplicate_source problem_id={problem_id} sources={sources}"
+            )
+            raise RuntimeError("Phase 2 validation problem contains duplicate methods")
+        scores = {
+            str(row["source"]): _validation_score_tuple(row)
+            for row in problem_rows
+        }
+        best_score = min(scores.values())
+        rank1_tie_count = sum(score == best_score for score in scores.values())
+        for row in problem_rows:
+            source = str(row["source"])
+            score = scores[source]
+            ranked_rows.append(
+                {
+                    **dict(row),
+                    "method_rank": 1
+                    + sum(other_score < score for other_score in scores.values()),
+                    "is_rank1": int(score == best_score),
+                    "rank1_tie_count": rank1_tie_count,
+                }
+            )
+    return sorted(
+        ranked_rows,
+        key=lambda row: (
+            int(row["block_count"]),
+            int(row["distribution_type"]),
+            int(row["method_rank"]),
+            str(row["source"]),
+        ),
+    )
+
+
+def _validation_score_tuple(row: Mapping) -> tuple[float, ...]:
+    raw = row.get("score_json")
+    try:
+        parsed = json.loads(str(raw))
+        score = tuple(float(value) for value in parsed)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(
+            "[ERROR][Phase2.merged._validation_score_tuple] "
+            f"cause=invalid_score_json value={raw}"
+        )
+        raise RuntimeError("invalid Phase 2 validation score JSON") from exc
+    if not score or any(not math.isfinite(value) for value in score):
+        print(
+            "[ERROR][Phase2.merged._validation_score_tuple] "
+            f"cause=invalid_score_values value={raw}"
+        )
+        raise RuntimeError("Phase 2 validation score must be finite and non-empty")
+    return score
+
+
+def _validation_rank_summary_rows(
+    parent_problem_rows: Sequence[Mapping],
+    ranked_method_rows: Sequence[Mapping],
+) -> list[dict]:
+    """전체·크기별·Type별 Proposed 관계와 method 1위 횟수를 집계한다."""
+
+    if not parent_problem_rows or not ranked_method_rows:
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=missing_rows parent={len(parent_problem_rows)} methods={len(ranked_method_rows)}"
+        )
+        raise RuntimeError("Phase 2 validation rank summary requires parent and method rows")
+    parent_by_problem = {
+        str(row["validation_problem_id"]): row
+        for row in parent_problem_rows
+    }
+    if len(parent_by_problem) != len(parent_problem_rows):
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            "cause=duplicate_parent_problem"
+        )
+        raise RuntimeError("Phase 2 validation parent rows contain duplicate problems")
+    method_problem_ids = {
+        str(row["validation_problem_id"])
+        for row in ranked_method_rows
+    }
+    if method_problem_ids != set(parent_by_problem):
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=problem_set_mismatch parent={sorted(parent_by_problem)} "
+            f"methods={sorted(method_problem_ids)}"
+        )
+        raise RuntimeError("Phase 2 validation parent and method problem sets differ")
+
+    scopes: list[tuple[str, int | str, int | str, set[str]]] = [
+        ("overall", "", "", set(parent_by_problem)),
+    ]
+    for block_count in sorted(
+        {int(row["block_count"]) for row in parent_problem_rows}
+    ):
+        scopes.append(
+            (
+                "block_size",
+                block_count,
+                "",
+                {
+                    str(row["validation_problem_id"])
+                    for row in parent_problem_rows
+                    if int(row["block_count"]) == block_count
+                },
+            )
+        )
+    for distribution_type in sorted(
+        {int(row["distribution_type"]) for row in parent_problem_rows}
+    ):
+        scopes.append(
+            (
+                "distribution_type",
+                "",
+                distribution_type,
+                {
+                    str(row["validation_problem_id"])
+                    for row in parent_problem_rows
+                    if int(row["distribution_type"]) == distribution_type
+                },
+            )
+        )
+
+    train_episodes = {int(row["train_episode"]) for row in parent_problem_rows}
+    if len(train_episodes) != 1:
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=mixed_train_episodes values={sorted(train_episodes)}"
+        )
+        raise RuntimeError("Phase 2 validation rank summary mixes checkpoints")
+    train_episode = next(iter(train_episodes))
+    sources = sorted({str(row["source"]) for row in ranked_method_rows})
+    result: list[dict] = []
+    for scope, block_count, distribution_type, problem_ids in scopes:
+        parents = [parent_by_problem[problem_id] for problem_id in sorted(problem_ids)]
+        methods = [
+            row
+            for row in ranked_method_rows
+            if str(row["validation_problem_id"]) in problem_ids
+        ]
+        relations = [str(row["proposed_vs_best_heuristic"]) for row in parents]
+        invalid_relations = sorted(set(relations) - {"win", "tie", "loss"})
+        if invalid_relations:
+            print(
+                "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+                f"cause=invalid_relations scope={scope} values={invalid_relations}"
+            )
+            raise RuntimeError("Phase 2 validation rank summary has invalid relations")
+        methods_by_source = {
+            source: [
+                row
+                for row in methods
+                if str(row["source"]) == source
+            ]
+            for source in sources
+        }
+        invalid_counts = {
+            source: len(source_rows)
+            for source, source_rows in methods_by_source.items()
+            if len(source_rows) != len(problem_ids)
+        }
+        if invalid_counts:
+            print(
+                "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+                f"cause=method_problem_count_mismatch scope={scope} counts={invalid_counts} "
+                f"expected={len(problem_ids)}"
+            )
+            raise RuntimeError("Phase 2 validation method grid is incomplete")
+        winner_counts = {
+            source: sum(
+                int(row["method_rank"]) == 1
+                for row in methods_by_source[source]
+            )
+            for source in sources
+        }
+        sole_winner_counts = {
+            source: sum(
+                int(row["method_rank"]) == 1
+                and int(row["rank1_tie_count"]) == 1
+                for row in methods_by_source[source]
+            )
+            for source in sources
+        }
+        tied_winner_counts = {
+            source: winner_counts[source] - sole_winner_counts[source]
+            for source in sources
+        }
+        mean_ranks = {
+            source: round(
+                sum(
+                    int(row["method_rank"])
+                    for row in methods_by_source[source]
+                )
+                / len(problem_ids),
+                6,
+            )
+            for source in sources
+        }
+        proposed_ranks = [int(row["proposed_best_rank"]) for row in parents]
+        result.append(
+            {
+                "train_episode": train_episode,
+                "scope": scope,
+                "block_count": block_count,
+                "distribution_type": distribution_type,
+                "problem_count": len(problem_ids),
+                "proposed_win_count": relations.count("win"),
+                "proposed_tie_count": relations.count("tie"),
+                "proposed_loss_count": relations.count("loss"),
+                "proposed_rank1_count": sum(rank == 1 for rank in proposed_ranks),
+                "proposed_mean_rank": round(
+                    sum(proposed_ranks) / len(proposed_ranks),
+                    6,
+                ),
+                "winner_counts_json": json.dumps(
+                    winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "sole_winner_counts_json": json.dumps(
+                    sole_winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "tied_winner_counts_json": json.dumps(
+                    tied_winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "mean_rank_by_method_json": json.dumps(
+                    mean_ranks,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        )
+    return result
+
+
+def _print_validation_rank_summary(rows: Sequence[Mapping]) -> None:
+    for row in rows:
+        scope_key = str(row["scope"])
+        if row["block_count"] != "":
+            scope_key += f":{row['block_count']}"
+        if row["distribution_type"] != "":
+            scope_key += f":{row['distribution_type']}"
+        print(
+            "[VALIDATION][Phase2.merged.validation_rank] "
+            f"episode={row['train_episode']} scope={scope_key} "
+            f"problems={row['problem_count']} "
+            f"proposed_wtl={row['proposed_win_count']}/"
+            f"{row['proposed_tie_count']}/{row['proposed_loss_count']} "
+            f"proposed_rank1={row['proposed_rank1_count']} "
+            f"proposed_mean_rank={row['proposed_mean_rank']} "
+            f"winner_counts={row['winner_counts_json']}"
+        )
+
+
+def _validation_rank_summary_fields() -> list[str]:
+    return [
+        "train_episode",
+        "scope",
+        "block_count",
+        "distribution_type",
+        "problem_count",
+        "proposed_win_count",
+        "proposed_tie_count",
+        "proposed_loss_count",
+        "proposed_rank1_count",
+        "proposed_mean_rank",
+        "winner_counts_json",
+        "sole_winner_counts_json",
+        "tied_winner_counts_json",
+        "mean_rank_by_method_json",
+    ]
+
+
+def _write_validation_rank_history(
+    plt,
+    validation_root: Path,
+) -> dict[str, str]:
+    """모든 checkpoint의 전체 winner count와 Proposed rank 추세를 기록한다."""
+
+    evaluation_dirs = sorted(
+        path
+        for path in (validation_root / "evaluations").glob("ep_*")
+        if path.is_dir()
+    )
+    if not evaluation_dirs:
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=no_evaluation_directories root={validation_root}"
+        )
+        raise RuntimeError("Phase 2 validation rank history requires evaluation directories")
+    history_rows: list[dict] = []
+    for evaluation_dir in evaluation_dirs:
+        summary_path = evaluation_dir / "aggregate" / "validation_rank_summary.csv"
+        if not summary_path.is_file():
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=missing_rank_summary path={summary_path}"
+            )
+            raise RuntimeError("Phase 2 validation checkpoint rank summary is missing")
+        with summary_path.open("r", encoding="utf-8-sig", newline="") as file:
+            rows = [dict(row) for row in csv.DictReader(file)]
+        episodes = {int(row["train_episode"]) for row in rows}
+        expected_episode = int(evaluation_dir.name.removeprefix("ep_"))
+        if episodes != {expected_episode}:
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=episode_mismatch directory={evaluation_dir.name} rows={sorted(episodes)}"
+            )
+            raise RuntimeError("Phase 2 validation rank summary episode mismatch")
+        history_rows.extend(rows)
+
+    history_csv = validation_root / "validation_rank_history.csv"
+    _write_rows(
+        history_csv,
+        history_rows,
+        _validation_rank_summary_fields(),
+    )
+    overall_rows = sorted(
+        (row for row in history_rows if row["scope"] == "overall"),
+        key=lambda row: int(row["train_episode"]),
+    )
+    if len(overall_rows) != len(evaluation_dirs):
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=overall_row_count_mismatch expected={len(evaluation_dirs)} "
+            f"actual={len(overall_rows)}"
+        )
+        raise RuntimeError("Phase 2 validation history requires one overall row per checkpoint")
+
+    winner_counts_by_episode: list[dict[str, int]] = []
+    for row in overall_rows:
+        try:
+            parsed = json.loads(str(row["winner_counts_json"]))
+            winner_counts = {
+                str(source): int(count)
+                for source, count in parsed.items()
+            }
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=invalid_winner_counts value={row.get('winner_counts_json')}"
+            )
+            raise RuntimeError("invalid Phase 2 validation winner count JSON") from exc
+        winner_counts_by_episode.append(winner_counts)
+    method_sets = {tuple(sorted(counts)) for counts in winner_counts_by_episode}
+    if len(method_sets) != 1:
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=method_set_mismatch values={sorted(method_sets)}"
+        )
+        raise RuntimeError("Phase 2 validation history method set changed")
+
+    episodes = [int(row["train_episode"]) for row in overall_rows]
+    methods = list(next(iter(method_sets)))
+    winner_png = validation_root / "validation_overall_winner_count_history.png"
+    plt.figure(figsize=(11, 6))
+    for method in methods:
+        plt.plot(
+            episodes,
+            [counts[method] for counts in winner_counts_by_episode],
+            marker="o",
+            linewidth=1.8,
+            label=_display_source_name(method),
+        )
+    plt.plot(
+        episodes,
+        [int(row["problem_count"]) for row in overall_rows],
+        color="black",
+        linestyle="--",
+        linewidth=1.2,
+        label="Total problems",
+    )
+    plt.title("Overall validation rank-1 count by checkpoint")
+    plt.xlabel("Training episode")
+    plt.ylabel("Rank-1 problem count")
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(winner_png, dpi=160)
+    plt.close()
+
+    proposed_rank_png = validation_root / "validation_proposed_mean_rank_history.png"
+    plt.figure(figsize=(11, 5))
+    plt.plot(
+        episodes,
+        [float(row["proposed_mean_rank"]) for row in overall_rows],
+        marker="D",
+        linewidth=2.0,
+        color="#1f77b4",
+        label="Proposed mean rank",
+    )
+    plt.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Rank 1")
+    plt.gca().invert_yaxis()
+    plt.title("Proposed overall validation mean rank by checkpoint")
+    plt.xlabel("Training episode")
+    plt.ylabel("Mean rank (lower is better)")
+    plt.grid(True, alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(proposed_rank_png, dpi=160)
+    plt.close()
+    return {
+        "validation_rank_history_csv": str(history_csv),
+        "validation_winner_count_history_png": str(winner_png),
+        "validation_proposed_mean_rank_history_png": str(proposed_rank_png),
+    }
+
+
+def _write_validation_graph_hierarchy(
+    evaluation_root: Path,
+    parent_problem_rows: Sequence[Mapping],
+    parent_method_rows: Sequence[Mapping],
+    bay_method_rows: Sequence[Mapping],
+    score_field_names: Sequence[str],
+) -> dict[str, str]:
+    """checkpoint 검증 결과를 전체 크기, parent Type, Bay Type 그래프로 기록한다."""
+
+    if not parent_method_rows:
+        print("[ERROR][Phase2.merged._write_validation_graph_hierarchy] cause=no_parent_method_rows")
+        raise RuntimeError("Phase 2 validation graph hierarchy requires parent method rows")
+    if not bay_method_rows:
+        print("[ERROR][Phase2.merged._write_validation_graph_hierarchy] cause=no_bay_method_rows")
+        raise RuntimeError("Phase 2 validation graph hierarchy requires Bay method rows")
+    _validate_validation_method_grid(parent_method_rows, "parent")
+    ranked_parent_method_rows = _rank_validation_method_rows(parent_method_rows)
+    rank_summary_rows = _validation_rank_summary_rows(
+        parent_problem_rows,
+        ranked_parent_method_rows,
+    )
+    metric_specs = _validation_graph_metric_specs(score_field_names)
+    aggregate_root = evaluation_root / "aggregate"
+    aggregate_root.mkdir(parents=True, exist_ok=True)
+    summary_rows = _validation_size_method_summary(parent_method_rows, score_field_names)
+    summary_fields = [
+        "block_count",
+        "source",
+        "type_count",
+        *[
+            column
+            for field in score_field_names
+            for column in (f"{field}_mean", f"{field}_std")
+        ],
+    ]
+    summary_csv = aggregate_root / "method_summary_by_block_size.csv"
+    _write_rows(summary_csv, summary_rows, summary_fields)
+    _write_rows(
+        aggregate_root / "method_problem_scores.csv",
+        ranked_parent_method_rows,
+        [
+            "train_episode",
+            "validation_episode",
+            "validation_problem_id",
+            "block_count",
+            "distribution_type",
+            "generation_seed",
+            "source",
+            "score_json",
+            "method_rank",
+            "is_rank1",
+            "rank1_tie_count",
+            *score_field_names,
+        ],
+    )
+    rank_summary_csv = aggregate_root / "validation_rank_summary.csv"
+    _write_rows(
+        rank_summary_csv,
+        rank_summary_rows,
+        _validation_rank_summary_fields(),
+    )
+    _print_validation_rank_summary(rank_summary_rows)
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Patch
+    except Exception as exc:
+        print(
+            "[ERROR][Phase2.merged._write_validation_graph_hierarchy] "
+            f"cause=matplotlib_import_failed error={exc}"
+        )
+        raise RuntimeError("matplotlib is required to write Phase 2 validation plots") from exc
+
+    paths = {
+        "validation_method_summary_csv": str(summary_csv),
+        "validation_rank_summary_csv": str(rank_summary_csv),
+    }
+    for output_key, field, stem, title, ylabel in metric_specs:
+        path = aggregate_root / f"{stem}_by_block_size_boxplot.png"
+        _plot_validation_block_size_boxplot(
+            plt,
+            Patch,
+            path,
+            parent_method_rows,
+            field,
+            title,
+            ylabel,
+        )
+        paths[output_key] = str(path)
+
+    block_counts = sorted(
+        {int(row["block_count"]) for row in parent_method_rows}
+    )
+    for block_count in block_counts:
+        parent_rows = [
+            row
+            for row in parent_method_rows
+            if int(row["block_count"]) == block_count
+        ]
+        _write_validation_type_graphs(
+            plt=plt,
+            output_root=evaluation_root / f"blocks_{block_count:03d}" / "by_type" / "parent",
+            method_rows=parent_rows,
+            score_field_names=score_field_names,
+            metric_specs=metric_specs,
+            bay_id="parent",
+        )
+        bay_ids = sorted(
+            {
+                str(row["bay_id"])
+                for row in bay_method_rows
+                if int(row["block_count"]) == block_count
+            }
+        )
+        for bay_id in bay_ids:
+            rows = [
+                row
+                for row in bay_method_rows
+                if int(row["block_count"]) == block_count
+                and str(row["bay_id"]) == bay_id
+            ]
+            _write_validation_type_graphs(
+                plt=plt,
+                output_root=(
+                    evaluation_root
+                    / f"blocks_{block_count:03d}"
+                    / "by_type"
+                    / f"bay_{bay_id}"
+                ),
+                method_rows=rows,
+                score_field_names=score_field_names,
+                metric_specs=metric_specs,
+                bay_id=bay_id,
+            )
+    paths.update(
+        _write_validation_rank_history(
+            plt,
+            evaluation_root.parents[1],
+        )
+    )
+    return paths
+
+
+def _validation_graph_metric_specs(
+    score_field_names: Sequence[str],
+) -> list[tuple[str, str, str, str, str]]:
+    """hard violation을 제외한 Phase 2 공개 그래프 지표를 확정한다."""
+
+    fields = set(score_field_names)
+    if "makespan" not in fields:
+        print(
+            "[ERROR][Phase2.merged._validation_graph_metric_specs] "
+            "cause=missing_metric fragment=makespan"
+        )
+        raise RuntimeError("Phase 2 validation graph requires makespan")
+
+    def field_with(fragment: str) -> str:
+        matches = [field for field in score_field_names if fragment in field]
+        if len(matches) != 1:
+            print(
+                "[ERROR][Phase2.merged._validation_graph_metric_specs] "
+                f"cause=metric_cardinality fragment={fragment} count={len(matches)}"
+            )
+            raise RuntimeError(f"Phase 2 validation graph metric is missing or duplicated: {fragment}")
+        return matches[0]
+
+    cut_field = field_with("cut_length_gap")
+    wo_field = field_with("wo_count_gap")
+    bevel_field = field_with("bevel_quantity_gap")
+    occupancy_field = field_with("occupancy_gap")
+    normalized = any("normalized" in field for field in score_field_names)
+    gap_prefix = "Normalized " if normalized else ""
+    return [
+        ("validation_makespan_png", "makespan", "makespan", "Makespan", "Minutes"),
+        (
+            "validation_cut_gap_png",
+            cut_field,
+            "cut_length_gap",
+            "CUT_LTH load gap",
+            f"{gap_prefix}CUT_LTH gap",
+        ),
+        (
+            "validation_wo_gap_png",
+            wo_field,
+            "wo_count_gap",
+            "W/O count load gap",
+            f"{gap_prefix}W/O count gap",
+        ),
+        (
+            "validation_bevel_gap_png",
+            bevel_field,
+            "bevel_quantity_gap",
+            "BV_QTY load gap",
+            f"{gap_prefix}BV_QTY gap",
+        ),
+        (
+            "validation_occupancy_gap_png",
+            occupancy_field,
+            "occupancy_gap",
+            "Machine occupancy gap",
+            f"{gap_prefix}occupancy gap",
+        ),
+    ]
+
+
+def _validate_validation_method_grid(
+    method_rows: Sequence[Mapping],
+    context: str,
+) -> None:
+    """모든 method가 동일한 실제 문제 key를 한 번씩 갖는지 검사한다."""
+
+    if not method_rows:
+        print(
+            "[ERROR][Phase2.merged._validate_validation_method_grid] "
+            f"cause=no_rows context={context}"
+        )
+        raise RuntimeError("Phase 2 validation method grid is empty")
+    keys_by_source: dict[str, list[tuple[int, int]]] = {}
+    for row in method_rows:
+        source = str(row["source"])
+        keys_by_source.setdefault(source, []).append(
+            (int(row["block_count"]), int(row["distribution_type"]))
+        )
+    reference: set[tuple[int, int]] | None = None
+    for source, keys in sorted(keys_by_source.items()):
+        unique_keys = set(keys)
+        if len(keys) != len(unique_keys):
+            print(
+                "[ERROR][Phase2.merged._validate_validation_method_grid] "
+                f"cause=duplicate_problem context={context} source={source}"
+            )
+            raise RuntimeError("Phase 2 validation method grid contains duplicate problems")
+        if reference is None:
+            reference = unique_keys
+        elif unique_keys != reference:
+            print(
+                "[ERROR][Phase2.merged._validate_validation_method_grid] "
+                f"cause=problem_set_mismatch context={context} source={source}"
+            )
+            raise RuntimeError("Phase 2 validation methods do not cover the same problems")
+
+
+def _write_validation_type_graphs(
+    plt,
+    output_root: Path,
+    method_rows: Sequence[Mapping],
+    score_field_names: Sequence[str],
+    metric_specs: Sequence[tuple[str, str, str, str, str]],
+    bay_id: str,
+) -> None:
+    """한 block size의 Type별 parent 또는 Bay 비교표와 PNG를 기록한다."""
+
+    _validate_validation_method_grid(method_rows, f"by_type:{bay_id}")
+    output_root.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            **dict(row),
+            "bay_id": bay_id,
+        }
+        for row in sorted(
+            method_rows,
+            key=lambda item: (
+                int(item["distribution_type"]),
+                str(item["source"]),
+            ),
+        )
+    ]
+    _write_rows(
+        output_root / "method_summary_by_type.csv",
+        rows,
+        [
+            "train_episode",
+            "validation_episode",
+            "validation_problem_id",
+            "block_count",
+            "distribution_type",
+            "generation_seed",
+            "bay_id",
+            "source",
+            "score_json",
+            *score_field_names,
+        ],
+    )
+    for _output_key, field, stem, title, ylabel in metric_specs:
+        _plot_validation_type_metric(
+            plt=plt,
+            path=output_root / f"{stem}_by_type.png",
+            rows=rows,
+            field=field,
+            title=title,
+            ylabel=ylabel,
+            bay_id=bay_id,
+        )
+
+
+def _validation_size_method_summary(
+    method_rows: Sequence[Mapping],
+    score_field_names: Sequence[str],
+) -> list[dict]:
+    groups: dict[tuple[int, str], list[Mapping]] = {}
+    for row in method_rows:
+        groups.setdefault(
+            (int(row["block_count"]), str(row["source"])),
+            [],
+        ).append(row)
+    result: list[dict] = []
+    for (block_count, source), rows in sorted(groups.items()):
+        summary = {
+            "block_count": block_count,
+            "source": source,
+            "type_count": len(rows),
+        }
+        for field in score_field_names:
+            values = [float(row[field]) for row in rows]
+            mean = sum(values) / len(values)
+            summary[f"{field}_mean"] = mean
+            summary[f"{field}_std"] = math.sqrt(
+                sum((value - mean) ** 2 for value in values) / len(values)
+            )
+        result.append(summary)
+    return result
+
+
+def _plot_validation_block_size_boxplot(
+    plt,
+    patch_type,
+    path: Path,
+    rows: Sequence[Mapping],
+    field: str,
+    title: str,
+    ylabel: str,
+) -> None:
+    """Type 값들을 표본으로 사용해 method별 block-size boxplot을 그린다."""
+
+    _validate_validation_method_grid(rows, "block_size_boxplot")
+    block_counts = sorted({int(row["block_count"]) for row in rows})
+    type_sets = {
+        block_count: {
+            int(row["distribution_type"])
+            for row in rows
+            if int(row["block_count"]) == block_count
+        }
+        for block_count in block_counts
+    }
+    if len({tuple(sorted(types)) for types in type_sets.values()}) != 1:
+        print(
+            "[ERROR][Phase2.merged._plot_validation_block_size_boxplot] "
+            f"cause=type_set_mismatch values={type_sets}"
+        )
+        raise RuntimeError("Phase 2 validation block sizes must share the same Type set")
+    sources = _ordered_sources(row["source"] for row in rows)
+    base_positions = list(range(1, len(block_counts) + 1))
+    group_width = 0.82
+    source_width = group_width / len(sources)
+    box_width = source_width * 0.82
+    colors = [plt.get_cmap("tab20")(index % 20) for index in range(len(sources))]
+    plt.figure(figsize=(max(12, len(block_counts) * 2.0), 6))
+    for source_index, source in enumerate(sources):
+        datasets = [
+            [
+                float(row[field])
+                for row in rows
+                if str(row["source"]) == source
+                and int(row["block_count"]) == block_count
+            ]
+            for block_count in block_counts
+        ]
+        if any(not values for values in datasets):
+            print(
+                "[ERROR][Phase2.merged._plot_validation_block_size_boxplot] "
+                f"cause=missing_method_size_values source={source} field={field}"
+            )
+            raise RuntimeError("Phase 2 validation boxplot has an empty method-size group")
+        offset = (source_index - (len(sources) - 1) / 2.0) * source_width
+        boxplot = plt.boxplot(
+            datasets,
+            positions=[position + offset for position in base_positions],
+            widths=box_width,
+            patch_artist=True,
+            manage_ticks=False,
+            showmeans=True,
+            meanprops={
+                "marker": "o",
+                "markerfacecolor": "white",
+                "markeredgecolor": "black",
+                "markersize": 3,
+            },
+            medianprops={"color": "black", "linewidth": 1.0},
+        )
+        for box in boxplot["boxes"]:
+            box.set_facecolor(colors[source_index])
+            box.set_alpha(0.85)
+    plt.xticks(base_positions, [str(block_count) for block_count in block_counts])
+    plt.xlabel("Number of physical blocks")
+    plt.ylabel(ylabel)
+    plt.title(f"{title} by problem size (Type distribution)")
+    plt.grid(True, axis="y", alpha=0.25)
+    plt.legend(
+        handles=[
+            patch_type(
+                facecolor=colors[index],
+                edgecolor="black",
+                label=_display_source_name(source),
+            )
+            for index, source in enumerate(sources)
+        ],
+        fontsize=8,
+        ncol=min(5, len(sources)),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.16),
+    )
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
+
+
+def _plot_validation_type_metric(
+    plt,
+    path: Path,
+    rows: Sequence[Mapping],
+    field: str,
+    title: str,
+    ylabel: str,
+    bay_id: str,
+) -> None:
+    """고정 block size 안에서 Type별 method 값을 선·점으로 비교한다."""
+
+    sources = _ordered_sources(row["source"] for row in rows)
+    distribution_types = sorted(
+        {int(row["distribution_type"]) for row in rows}
+    )
+    markers = ["D", "s", "^", "o", "v", "P", "X", "*", "h", "p", "<", ">"]
+    plt.figure(figsize=(max(9, len(distribution_types) * 1.4), 5))
+    for source_index, source in enumerate(sources):
+        source_rows = sorted(
+            (
+                row
+                for row in rows
+                if str(row["source"]) == source
+            ),
+            key=lambda row: int(row["distribution_type"]),
+        )
+        plt.plot(
+            [int(row["distribution_type"]) for row in source_rows],
+            [float(row[field]) for row in source_rows],
+            marker=markers[source_index % len(markers)],
+            linewidth=1.3,
+            markersize=6,
+            label=_display_source_name(source),
+        )
+    plt.xticks(
+        distribution_types,
+        [f"Type {distribution_type}" for distribution_type in distribution_types],
+    )
+    plt.xlabel("Validation distribution Type")
+    plt.ylabel(ylabel)
+    scope = "Parent" if bay_id == "parent" else f"Bay {bay_id}"
+    plt.title(f"{scope}: {title} by Type")
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=8, ncol=min(4, len(sources)))
+    plt.tight_layout()
+    plt.savefig(path, dpi=160)
+    plt.close()
 
 
 def _metrics_fields(score_field_names: Sequence[str]) -> list[str]:
@@ -2756,11 +4659,21 @@ def _validation_summary_fields(score_field_names: Sequence[str]) -> list[str]:
     return [
         "train_episode",
         "validation_episode",
+        "validation_problem_id",
+        "block_count",
+        "distribution_type",
+        "generation_seed",
+        "validation_phase1_seed",
+        "validation_sampling_seed",
+        "bay_id",
         "job_count",
         "machine_count",
         "candidate_count",
         "best_source",
         "best_score_json",
+        "best_heuristic_source",
+        "best_heuristic_score_json",
+        "proposed_vs_best_heuristic",
         "agent_best_rank",
         "agent_best_source",
         "agent_best_score_json",
@@ -2770,6 +4683,8 @@ def _validation_summary_fields(score_field_names: Sequence[str]) -> list[str]:
         "greedy_rank",
         "greedy_source",
         "greedy_score_json",
+        "checkpoint_selection_key_json",
+        "best_checkpoint_saved",
         *score_field_names,
         *PHASE2_BATCH_MACHINE_SCORE_DETAIL_FIELD_NAMES,
         *[f"agent_{field}" for field in score_field_names],
@@ -2782,6 +4697,11 @@ def _validation_candidate_fields(score_field_names: Sequence[str]) -> list[str]:
     return [
         "train_episode",
         "validation_episode",
+        "validation_problem_id",
+        "block_count",
+        "distribution_type",
+        "generation_seed",
+        "validation_sampling_seed",
         "rank",
         "bay_id",
         "source",
@@ -2791,6 +4711,30 @@ def _validation_candidate_fields(score_field_names: Sequence[str]) -> list[str]:
         "score_json",
         *score_field_names,
         *PHASE2_BATCH_MACHINE_SCORE_DETAIL_FIELD_NAMES,
+    ]
+
+
+def _validation_parent_fields(score_field_names: Sequence[str]) -> list[str]:
+    return [
+        "train_episode",
+        "validation_episode",
+        "validation_problem_id",
+        "block_count",
+        "distribution_type",
+        "generation_seed",
+        "job_count",
+        "bay_subproblem_count",
+        "best_source",
+        "best_score_json",
+        "best_heuristic_source",
+        "best_heuristic_score_json",
+        "proposed_vs_best_heuristic",
+        "proposed_best_rank",
+        "proposed_best_source",
+        "proposed_best_score_json",
+        "checkpoint_selection_key_json",
+        "best_checkpoint_saved",
+        *score_field_names,
     ]
 
 
@@ -2887,7 +4831,7 @@ def _collapse_agent_samples_for_validation_plot(rows: Sequence[Mapping]) -> List
         if not _is_agent_source(source):
             non_agent_rows.append(row)
             continue
-        key = str(row["validation_episode"])
+        key = f"{row['validation_episode']}::{row['bay_id']}"
         current_best = best_agent_rows.get(key)
         if current_best is None or _phase2_plot_score_key(row) < _phase2_plot_score_key(current_best):
             best_agent_rows[key] = row
@@ -2917,15 +4861,32 @@ def _phase2_plot_score_key(row: Mapping) -> tuple[float, ...]:
 def _plot_validation_metric(plt, path: Path, rows: Sequence[Mapping], score_field: str, title: str, ylabel: str) -> None:
     """Scatter one Phase 2 validation metric by validation episode and method."""
 
-    ordered_rows = sorted(rows, key=lambda row: (int(row["validation_episode"]), str(row["source"])))
-    validation_episodes = sorted({int(row["validation_episode"]) for row in ordered_rows})
-    episode_index = {episode: index + 1 for index, episode in enumerate(validation_episodes)}
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (
+            int(row["validation_episode"]),
+            str(row["bay_id"]),
+            str(row["source"]),
+        ),
+    )
+    validation_problems = sorted(
+        {
+            (int(row["validation_episode"]), str(row["bay_id"]))
+            for row in ordered_rows
+        }
+    )
+    problem_index = {
+        problem: index + 1 for index, problem in enumerate(validation_problems)
+    }
     sources = _ordered_sources(row["source"] for row in ordered_rows)
     markers = ["D", "s", "^", "o", "v", "P", "X", "*", "h", "p"]
     plt.figure(figsize=(11, 5))
     for source_index, source in enumerate(sources):
         source_rows = [row for row in ordered_rows if str(row["source"]) == source]
-        x_values = [episode_index[int(row["validation_episode"])] for row in source_rows]
+        x_values = [
+            problem_index[(int(row["validation_episode"]), str(row["bay_id"]))]
+            for row in source_rows
+        ]
         y_values = [float(row[score_field]) for row in source_rows]
         plt.scatter(
             x_values,
@@ -2938,7 +4899,12 @@ def _plot_validation_metric(plt, path: Path, rows: Sequence[Mapping], score_fiel
     plt.xlabel("Validation episode")
     plt.ylabel(ylabel)
     plt.title(f"{title} by method (lower is better)")
-    plt.xticks(list(episode_index.values()), [f"VAL{episode:02d}" for episode in validation_episodes], rotation=45, ha="right")
+    plt.xticks(
+        list(problem_index.values()),
+        [f"VAL{episode:02d}-B{bay_id}" for episode, bay_id in validation_problems],
+        rotation=45,
+        ha="right",
+    )
     plt.grid(True, alpha=0.25)
     plt.legend(fontsize=7, ncol=2)
     plt.tight_layout()
@@ -2968,9 +4934,15 @@ def _plot_validation_best_source_counts(plt, path: Path, rows: Sequence[Mapping]
 def _plot_validation_policy_rank(plt, path: Path, rows: Sequence[Mapping]) -> None:
     """Plot Proposed(best-of-K) rank and greedy-policy rank separately."""
 
-    ordered_rows = sorted(rows, key=lambda row: int(row["validation_episode"]))
+    ordered_rows = sorted(
+        rows,
+        key=lambda row: (int(row["validation_episode"]), str(row["bay_id"])),
+    )
     x_values = list(range(1, len(ordered_rows) + 1))
-    labels = [f"VAL{int(row['validation_episode']):02d}" for row in ordered_rows]
+    labels = [
+        f"VAL{int(row['validation_episode']):02d}-B{row['bay_id']}"
+        for row in ordered_rows
+    ]
     proposed_ranks = [int(row["proposed_best_rank"]) for row in ordered_rows]
     greedy_ranks = [int(row["greedy_rank"]) for row in ordered_rows]
     plt.figure(figsize=(10, 4))

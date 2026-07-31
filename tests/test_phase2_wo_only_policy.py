@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
+import torch
+
+import Phase2.merged as phase2_merged
 from Phase2.merged import _lookahead_makespan_lower_bound, run_phase2_batch_machine_candidate
 from Phase2.state import PHASE2_BAY_CONTEXT_FEATURE_NAMES
 
@@ -138,6 +144,135 @@ class Phase2WoOnlyPolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(lower_bound, 37.5)
+
+    def test_lpt_observational_tie_records_all_ce_target_indices(self) -> None:
+        jobs = {
+            "WO_A": self._job("WO_A", "P1::NP::BA", 30.0),
+            "WO_B": self._job("WO_B", "P1::NP::BB", 30.0),
+        }
+        candidate = run_phase2_batch_machine_candidate(
+            jobs=jobs,
+            machines={"PLS21": self._machine("PLS21", "22")},
+            phase1_assignments={job.block_set_id: "22" for job in jobs.values()},
+            source="lpt_batch",
+            model=None,
+            max_wo_count=1,
+            max_length_sum=55_000.0,
+            action_pool_limit=None,
+            seed=7,
+        )
+
+        self.assertEqual(candidate.transitions[0].target_action_indices, (0, 1))
+
+    def test_lpt_priority_tie_keeps_distinguishable_candidate_singleton(self) -> None:
+        jobs = {
+            "WO_A": self._job("WO_A", "P1::NP::BA", 30.0),
+            "WO_B": self._job("WO_B", "P1::NP::BB", 30.0),
+        }
+        jobs["WO_B"].cut_length = 200.0
+        candidate = run_phase2_batch_machine_candidate(
+            jobs=jobs,
+            machines={"PLS21": self._machine("PLS21", "22")},
+            phase1_assignments={job.block_set_id: "22" for job in jobs.values()},
+            source="lpt_batch",
+            model=None,
+            max_wo_count=1,
+            max_length_sum=55_000.0,
+            action_pool_limit=None,
+            seed=7,
+        )
+
+        transition = candidate.transitions[0]
+        self.assertEqual(
+            transition.target_action_indices,
+            (transition.selected_action_index,),
+        )
+
+    def test_multi_target_ce_accepts_probability_mass_on_any_tied_target(self) -> None:
+        logits = torch.tensor([0.0, 0.0], requires_grad=True)
+
+        loss = phase2_merged._multi_target_cross_entropy(logits, (0, 1))
+
+        self.assertAlmostEqual(float(loss.item()), 0.0, places=7)
+        loss.backward()
+
+    def test_validation_is_fixed_and_split_by_bay_and_saves_best_checkpoint(self) -> None:
+        jobs = {
+            "WO_22_A": self._job("WO_22_A", "P1::NP::B22A", 30.0),
+            "WO_22_B": self._job("WO_22_B", "P1::NP::B22B", 10.0),
+            "WO_23_A": self._job("WO_23_A", "P1::NP::B23A", 20.0),
+            "WO_23_B": self._job("WO_23_B", "P1::NP::B23B", 5.0),
+        }
+        machines = phase2_merged.build_mixed_phase2_training_machines()
+        assignments = {
+            job.block_set_id: ("22" if "22" in job.job_id else "23")
+            for job in jobs.values()
+        }
+        assignment_seeds = []
+
+        def assignment_builder(_jobs, assignment_seed):
+            assignment_seeds.append(assignment_seed)
+            return assignments
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary = phase2_merged.train_phase2_batch_machine_self_labeling(
+                jobs=jobs,
+                machines=machines,
+                phase1_assignments={},
+                output_dir=temp_dir,
+                episodes=2,
+                lr=1e-3,
+                hidden_dim=16,
+                seed=11,
+                heuristic_algorithms=("lpt_batch",),
+                rollout_samples=1,
+                max_wo_count=1,
+                max_length_sum=55_000.0,
+                action_pool_limit=None,
+                validation_every=1,
+                validation_episodes=1,
+                validation_rollout_samples=1,
+                validation_episode_jobs=(jobs,),
+                checkpoint_every=0,
+                device="cpu",
+                phase1_assignment_builder=assignment_builder,
+                phase1_bay_ids=("22", "23", "24", "25", "trans"),
+                phase1_bay_capacity_weights={
+                    "22": 4.0,
+                    "23": 3.0,
+                    "24": 4.0,
+                    "25": 2.0,
+                    "trans": 2.0,
+                },
+            )
+
+            with Path(summary["validation_summary_csv"]).open("r", encoding="utf-8", newline="") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(len(rows), 4)
+            self.assertEqual({row["bay_id"] for row in rows}, {"22", "23"})
+            self.assertEqual(
+                {row["validation_phase1_seed"] for row in rows},
+                {str(phase2_merged.PHASE2_VALIDATION_PHASE1_SEED_OFFSET + 12)},
+            )
+            seeds_by_bay = {
+                bay_id: {
+                    row["validation_sampling_seed"]
+                    for row in rows
+                    if row["bay_id"] == bay_id
+                }
+                for bay_id in ("22", "23")
+            }
+            self.assertEqual({bay_id: len(values) for bay_id, values in seeds_by_bay.items()}, {"22": 1, "23": 1})
+            self.assertEqual(
+                assignment_seeds,
+                [
+                    1,
+                    phase2_merged.PHASE2_VALIDATION_PHASE1_SEED_OFFSET + 12,
+                    2,
+                    phase2_merged.PHASE2_VALIDATION_PHASE1_SEED_OFFSET + 12,
+                ],
+            )
+            self.assertTrue(Path(summary["best_checkpoint_path"]).is_file())
 
     def _candidate(self):
         return run_phase2_batch_machine_candidate(
