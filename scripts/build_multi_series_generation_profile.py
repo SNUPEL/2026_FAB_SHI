@@ -26,23 +26,16 @@ def main() -> None:
     parser.add_argument("--wo-xlsx", default=str(DEFAULT_MULTI_SERIES_WO_SOURCE))
     parser.add_argument("--block-xlsx", default=str(DEFAULT_MULTI_SERIES_BLOCK_SOURCE))
     parser.add_argument("--output", default=str(DEFAULT_MULTI_SERIES_GENERATION_PROFILE))
-    parser.add_argument(
-        "--fl-mark-method",
-        choices=("chain", "dirichlet"),
-        default="chain",
-        help="FL MARK_LTH 생성 방법. canonical profile은 chain을 사용합니다.",
-    )
     args = parser.parse_args()
     print("[build-multi-series-generation-profile]")
     print(f"- wo_xlsx: {args.wo_xlsx}")
     print(f"- block_xlsx: {args.block_xlsx}")
     print(f"- output: {args.output}")
-    print(f"- fl_mark_method: {args.fl_mark_method}")
+    print("- scope: physical_block_joint_only (계수는 block_params/wo_params)")
     output = write_multi_series_generation_profile(
         output_path=args.output,
         wo_source_path=args.wo_xlsx,
         block_source_path=args.block_xlsx,
-        fl_mark_method=args.fl_mark_method,
     )
     print(f"[VALIDATION][build_multi_series_generation_profile.main] passed=true output={output}")
 

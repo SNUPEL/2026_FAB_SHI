@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from Utils.data.report_formula_data_generator import build_report_formula_episode_jobs
+from Utils.data.multi_series_formula_data_generator import (
+    build_multi_series_formula_episode_jobs,
+)
 from Utils.phase1.multi_series_planner import build_multi_series_phase1_training_problem
 
 
@@ -22,12 +24,11 @@ def build_phase1_episode_jobs(
     """
 
     _validate_sampling_args(episode_count, min_blocks, max_blocks)
-    generated = build_report_formula_episode_jobs(
+    generated = build_multi_series_formula_episode_jobs(
         episode_count=episode_count,
-        min_blocks=min_blocks,
-        max_blocks=max_blocks,
+        min_physical_blocks=min_blocks,
+        max_physical_blocks=max_blocks,
         seed=seed,
-        gyel="MIXED",
     )
     episodes: List[Dict] = []
     for episode_index, spec in enumerate(generated, start=1):

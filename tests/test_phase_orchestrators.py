@@ -22,10 +22,13 @@ from Utils.phase1.phase1_episode_dataset import build_phase1_episode_jobs
 class PhaseOrchestratorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        # 이 테스트는 두 자원군(NP_NC + FN_FL)이 모두 존재하는 episode가 필요하다.
+        # params_generator는 계열 조합을 표본하므로, 아주 작은 episode(2블록)는 한
+        # 자원군만 담길 수 있다. 두 자원군을 확실히 포함하도록 블록 수를 4로 둔다.
         cls.episode = build_phase1_episode_jobs(
             episode_count=1,
-            min_blocks=2,
-            max_blocks=2,
+            min_blocks=4,
+            max_blocks=4,
             seed=20260718,
             verbose=False,
         )[0]
