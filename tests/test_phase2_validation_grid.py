@@ -17,6 +17,64 @@ from Phase2.validation_grid import (
 
 
 class Phase2ValidationGridTests(unittest.TestCase):
+    def test_rank_summary_counts_tied_winners_without_forcing_one_source(self) -> None:
+        method_rows = [
+            self._method_row("P1", 10, 1, "proposed_best_of_k", (0, 10)),
+            self._method_row("P1", 10, 1, "lpt_batch", (0, 10)),
+            self._method_row("P1", 10, 1, "best_fit_lth", (0, 12)),
+            self._method_row("P2", 20, 1, "proposed_best_of_k", (0, 11)),
+            self._method_row("P2", 20, 1, "lpt_batch", (0, 9)),
+            self._method_row("P2", 20, 1, "best_fit_lth", (0, 13)),
+        ]
+        parent_rows = [
+            self._parent_row("P1", 10, 1, "tie", 1),
+            self._parent_row("P2", 20, 1, "loss", 2),
+        ]
+
+        ranked = phase2_merged._rank_validation_method_rows(method_rows)
+        p1 = {
+            row["source"]: row
+            for row in ranked
+            if row["validation_problem_id"] == "P1"
+        }
+        self.assertEqual(p1["proposed_best_of_k"]["method_rank"], 1)
+        self.assertEqual(p1["lpt_batch"]["method_rank"], 1)
+        self.assertEqual(p1["best_fit_lth"]["method_rank"], 3)
+        self.assertEqual(p1["proposed_best_of_k"]["rank1_tie_count"], 2)
+
+        summaries = phase2_merged._validation_rank_summary_rows(
+            parent_rows,
+            ranked,
+        )
+        overall = next(row for row in summaries if row["scope"] == "overall")
+        self.assertEqual(overall["problem_count"], 2)
+        self.assertEqual(overall["proposed_win_count"], 0)
+        self.assertEqual(overall["proposed_tie_count"], 1)
+        self.assertEqual(overall["proposed_loss_count"], 1)
+        self.assertEqual(overall["proposed_rank1_count"], 1)
+        self.assertEqual(overall["proposed_mean_rank"], 1.5)
+        self.assertEqual(
+            overall["winner_counts_json"],
+            '{"best_fit_lth": 0, "lpt_batch": 2, "proposed_best_of_k": 1}',
+        )
+        self.assertEqual(
+            overall["sole_winner_counts_json"],
+            '{"best_fit_lth": 0, "lpt_batch": 1, "proposed_best_of_k": 0}',
+        )
+        self.assertEqual(
+            overall["tied_winner_counts_json"],
+            '{"best_fit_lth": 0, "lpt_batch": 1, "proposed_best_of_k": 1}',
+        )
+        self.assertEqual(
+            {(row["scope"], row["block_count"]) for row in summaries},
+            {
+                ("overall", ""),
+                ("block_size", 10),
+                ("block_size", 20),
+                ("distribution_type", ""),
+            },
+        )
+
     def test_grid_crosses_inclusive_block_sizes_with_fixed_distribution_types(self) -> None:
         problems = build_phase2_validation_grid(
             problem_factory=self._problem_factory,
@@ -213,6 +271,46 @@ class Phase2ValidationGridTests(unittest.TestCase):
                 self.assertTrue(
                     (evaluation_root / "aggregate" / "method_summary_by_block_size.csv").is_file()
                 )
+                rank_summary_path = (
+                    evaluation_root
+                    / "aggregate"
+                    / "validation_rank_summary.csv"
+                )
+                self.assertTrue(rank_summary_path.is_file())
+                with rank_summary_path.open(
+                    "r",
+                    encoding="utf-8",
+                    newline="",
+                ) as file:
+                    rank_summary_rows = list(csv.DictReader(file))
+                self.assertEqual(
+                    {
+                        (row["scope"], row["block_count"], row["distribution_type"])
+                        for row in rank_summary_rows
+                    },
+                    {
+                        ("overall", "", ""),
+                        ("block_size", "10", ""),
+                        ("block_size", "20", ""),
+                        ("distribution_type", "", "1"),
+                        ("distribution_type", "", "2"),
+                    },
+                )
+                with (
+                    evaluation_root
+                    / "aggregate"
+                    / "method_problem_scores.csv"
+                ).open("r", encoding="utf-8", newline="") as file:
+                    method_score_rows = list(csv.DictReader(file))
+                self.assertTrue(method_score_rows)
+                self.assertTrue(
+                    all(
+                        row["method_rank"]
+                        and row["is_rank1"]
+                        and row["rank1_tie_count"]
+                        for row in method_score_rows
+                    )
+                )
                 with (
                     evaluation_root
                     / "blocks_010"
@@ -257,6 +355,35 @@ class Phase2ValidationGridTests(unittest.TestCase):
             )
             self.assertTrue((validation_root / "best_checkpoint.json").is_file())
             self.assertTrue(Path(summary["best_checkpoint_path"]).is_file())
+            rank_history_path = validation_root / "validation_rank_history.csv"
+            self.assertTrue(rank_history_path.is_file())
+            with rank_history_path.open(
+                "r",
+                encoding="utf-8",
+                newline="",
+            ) as file:
+                rank_history_rows = list(csv.DictReader(file))
+            self.assertEqual(len(rank_history_rows), 10)
+            self.assertEqual(
+                {
+                    row["train_episode"]
+                    for row in rank_history_rows
+                    if row["scope"] == "overall"
+                },
+                {"1", "2"},
+            )
+            self.assertTrue(
+                (
+                    validation_root
+                    / "validation_overall_winner_count_history.png"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    validation_root
+                    / "validation_proposed_mean_rank_history.png"
+                ).is_file()
+            )
 
             changed_validation_problems = (
                 self._validation_problem("B010_T01", 10, 1, 999, jobs_10),
@@ -352,6 +479,42 @@ class Phase2ValidationGridTests(unittest.TestCase):
                 "seed": seed,
             },
         )
+
+    @staticmethod
+    def _method_row(
+        problem_id: str,
+        block_count: int,
+        distribution_type: int,
+        source: str,
+        score: tuple[int, int],
+    ) -> dict:
+        return {
+            "train_episode": 100,
+            "validation_episode": 1,
+            "validation_problem_id": problem_id,
+            "block_count": block_count,
+            "distribution_type": distribution_type,
+            "generation_seed": 1,
+            "source": source,
+            "score_json": str(list(score)),
+        }
+
+    @staticmethod
+    def _parent_row(
+        problem_id: str,
+        block_count: int,
+        distribution_type: int,
+        relation: str,
+        rank: int,
+    ) -> dict:
+        return {
+            "train_episode": 100,
+            "validation_problem_id": problem_id,
+            "block_count": block_count,
+            "distribution_type": distribution_type,
+            "proposed_vs_best_heuristic": relation,
+            "proposed_best_rank": rank,
+        }
 
     @staticmethod
     def _job(job_id: str, block_set_id: str, tact: float):

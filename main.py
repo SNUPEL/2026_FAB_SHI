@@ -493,6 +493,16 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     print(f"- validation_candidate_summary_csv: {summary['validation_candidate_summary_csv']}")
     print(f"- validation_parent_summary_csv: {summary['validation_parent_summary_csv']}")
     print(f"- validation_root: {summary['validation_root']}")
+    print(f"- validation_rank_summary_csv: {summary.get('validation_rank_summary_csv', '')}")
+    print(f"- validation_rank_history_csv: {summary.get('validation_rank_history_csv', '')}")
+    print(
+        "- validation_winner_count_history_png: "
+        f"{summary.get('validation_winner_count_history_png', '')}"
+    )
+    print(
+        "- validation_proposed_mean_rank_history_png: "
+        f"{summary.get('validation_proposed_mean_rank_history_png', '')}"
+    )
     print(f"- validation_makespan_png: {summary.get('validation_makespan_png', '')}")
     print(f"- validation_wo_gap_png: {summary.get('validation_wo_gap_png', '')}")
     print(f"- validation_cut_gap_png: {summary.get('validation_cut_gap_png', '')}")

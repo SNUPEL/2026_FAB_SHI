@@ -625,6 +625,7 @@ def train_phase2_batch_machine_self_labeling(
             )
             validation_plot_paths = _write_validation_graph_hierarchy(
                 evaluation_root=evaluation_root,
+                parent_problem_rows=current_validation_parent_rows,
                 parent_method_rows=current_validation_method_rows,
                 bay_method_rows=current_validation_bay_method_rows,
                 score_field_names=score_field_names,
@@ -3405,6 +3406,25 @@ def _write_validation_problem_evaluation(
             {
                 "source": source,
                 "score_json": json.dumps(list(candidate.score_tuple), ensure_ascii=False),
+                "method_rank": 1
+                + sum(
+                    other.score_tuple < candidate.score_tuple
+                    for other in parent_candidates.values()
+                ),
+                "is_rank1": int(
+                    not any(
+                        other.score_tuple < candidate.score_tuple
+                        for other in parent_candidates.values()
+                    )
+                ),
+                "rank1_tie_count": sum(
+                    other.score_tuple
+                    == min(
+                        item.score_tuple
+                        for item in parent_candidates.values()
+                    )
+                    for other in parent_candidates.values()
+                ),
                 **{
                     field: candidate.score_tuple[index]
                     for index, field in enumerate(score_field_names)
@@ -3412,7 +3432,14 @@ def _write_validation_problem_evaluation(
             }
             for source, candidate in parent_candidates.items()
         ],
-        ["source", "score_json", *score_field_names],
+        [
+            "source",
+            "score_json",
+            "method_rank",
+            "is_rank1",
+            "rank1_tie_count",
+            *score_field_names,
+        ],
     )
 
 
@@ -3470,8 +3497,444 @@ def _json_default(value: object) -> object:
     raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
 
 
+def _rank_validation_method_rows(
+    rows: Sequence[Mapping],
+) -> list[dict]:
+    """상위 validation 문제마다 사전식 경쟁 순위를 계산한다."""
+
+    if not rows:
+        print("[ERROR][Phase2.merged._rank_validation_method_rows] cause=no_rows")
+        raise RuntimeError("Phase 2 validation ranking requires method rows")
+    grouped: dict[str, list[Mapping]] = {}
+    for row in rows:
+        problem_id = str(row.get("validation_problem_id", ""))
+        source = str(row.get("source", ""))
+        if not problem_id or not source:
+            print(
+                "[ERROR][Phase2.merged._rank_validation_method_rows] "
+                f"cause=missing_identity problem_id={problem_id} source={source}"
+            )
+            raise RuntimeError("Phase 2 validation method row has no identity")
+        grouped.setdefault(problem_id, []).append(row)
+
+    ranked_rows: list[dict] = []
+    for problem_id, problem_rows in grouped.items():
+        sources = [str(row["source"]) for row in problem_rows]
+        if len(set(sources)) != len(sources):
+            print(
+                "[ERROR][Phase2.merged._rank_validation_method_rows] "
+                f"cause=duplicate_source problem_id={problem_id} sources={sources}"
+            )
+            raise RuntimeError("Phase 2 validation problem contains duplicate methods")
+        scores = {
+            str(row["source"]): _validation_score_tuple(row)
+            for row in problem_rows
+        }
+        best_score = min(scores.values())
+        rank1_tie_count = sum(score == best_score for score in scores.values())
+        for row in problem_rows:
+            source = str(row["source"])
+            score = scores[source]
+            ranked_rows.append(
+                {
+                    **dict(row),
+                    "method_rank": 1
+                    + sum(other_score < score for other_score in scores.values()),
+                    "is_rank1": int(score == best_score),
+                    "rank1_tie_count": rank1_tie_count,
+                }
+            )
+    return sorted(
+        ranked_rows,
+        key=lambda row: (
+            int(row["block_count"]),
+            int(row["distribution_type"]),
+            int(row["method_rank"]),
+            str(row["source"]),
+        ),
+    )
+
+
+def _validation_score_tuple(row: Mapping) -> tuple[float, ...]:
+    raw = row.get("score_json")
+    try:
+        parsed = json.loads(str(raw))
+        score = tuple(float(value) for value in parsed)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        print(
+            "[ERROR][Phase2.merged._validation_score_tuple] "
+            f"cause=invalid_score_json value={raw}"
+        )
+        raise RuntimeError("invalid Phase 2 validation score JSON") from exc
+    if not score or any(not math.isfinite(value) for value in score):
+        print(
+            "[ERROR][Phase2.merged._validation_score_tuple] "
+            f"cause=invalid_score_values value={raw}"
+        )
+        raise RuntimeError("Phase 2 validation score must be finite and non-empty")
+    return score
+
+
+def _validation_rank_summary_rows(
+    parent_problem_rows: Sequence[Mapping],
+    ranked_method_rows: Sequence[Mapping],
+) -> list[dict]:
+    """전체·크기별·Type별 Proposed 관계와 method 1위 횟수를 집계한다."""
+
+    if not parent_problem_rows or not ranked_method_rows:
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=missing_rows parent={len(parent_problem_rows)} methods={len(ranked_method_rows)}"
+        )
+        raise RuntimeError("Phase 2 validation rank summary requires parent and method rows")
+    parent_by_problem = {
+        str(row["validation_problem_id"]): row
+        for row in parent_problem_rows
+    }
+    if len(parent_by_problem) != len(parent_problem_rows):
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            "cause=duplicate_parent_problem"
+        )
+        raise RuntimeError("Phase 2 validation parent rows contain duplicate problems")
+    method_problem_ids = {
+        str(row["validation_problem_id"])
+        for row in ranked_method_rows
+    }
+    if method_problem_ids != set(parent_by_problem):
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=problem_set_mismatch parent={sorted(parent_by_problem)} "
+            f"methods={sorted(method_problem_ids)}"
+        )
+        raise RuntimeError("Phase 2 validation parent and method problem sets differ")
+
+    scopes: list[tuple[str, int | str, int | str, set[str]]] = [
+        ("overall", "", "", set(parent_by_problem)),
+    ]
+    for block_count in sorted(
+        {int(row["block_count"]) for row in parent_problem_rows}
+    ):
+        scopes.append(
+            (
+                "block_size",
+                block_count,
+                "",
+                {
+                    str(row["validation_problem_id"])
+                    for row in parent_problem_rows
+                    if int(row["block_count"]) == block_count
+                },
+            )
+        )
+    for distribution_type in sorted(
+        {int(row["distribution_type"]) for row in parent_problem_rows}
+    ):
+        scopes.append(
+            (
+                "distribution_type",
+                "",
+                distribution_type,
+                {
+                    str(row["validation_problem_id"])
+                    for row in parent_problem_rows
+                    if int(row["distribution_type"]) == distribution_type
+                },
+            )
+        )
+
+    train_episodes = {int(row["train_episode"]) for row in parent_problem_rows}
+    if len(train_episodes) != 1:
+        print(
+            "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+            f"cause=mixed_train_episodes values={sorted(train_episodes)}"
+        )
+        raise RuntimeError("Phase 2 validation rank summary mixes checkpoints")
+    train_episode = next(iter(train_episodes))
+    sources = sorted({str(row["source"]) for row in ranked_method_rows})
+    result: list[dict] = []
+    for scope, block_count, distribution_type, problem_ids in scopes:
+        parents = [parent_by_problem[problem_id] for problem_id in sorted(problem_ids)]
+        methods = [
+            row
+            for row in ranked_method_rows
+            if str(row["validation_problem_id"]) in problem_ids
+        ]
+        relations = [str(row["proposed_vs_best_heuristic"]) for row in parents]
+        invalid_relations = sorted(set(relations) - {"win", "tie", "loss"})
+        if invalid_relations:
+            print(
+                "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+                f"cause=invalid_relations scope={scope} values={invalid_relations}"
+            )
+            raise RuntimeError("Phase 2 validation rank summary has invalid relations")
+        methods_by_source = {
+            source: [
+                row
+                for row in methods
+                if str(row["source"]) == source
+            ]
+            for source in sources
+        }
+        invalid_counts = {
+            source: len(source_rows)
+            for source, source_rows in methods_by_source.items()
+            if len(source_rows) != len(problem_ids)
+        }
+        if invalid_counts:
+            print(
+                "[ERROR][Phase2.merged._validation_rank_summary_rows] "
+                f"cause=method_problem_count_mismatch scope={scope} counts={invalid_counts} "
+                f"expected={len(problem_ids)}"
+            )
+            raise RuntimeError("Phase 2 validation method grid is incomplete")
+        winner_counts = {
+            source: sum(
+                int(row["method_rank"]) == 1
+                for row in methods_by_source[source]
+            )
+            for source in sources
+        }
+        sole_winner_counts = {
+            source: sum(
+                int(row["method_rank"]) == 1
+                and int(row["rank1_tie_count"]) == 1
+                for row in methods_by_source[source]
+            )
+            for source in sources
+        }
+        tied_winner_counts = {
+            source: winner_counts[source] - sole_winner_counts[source]
+            for source in sources
+        }
+        mean_ranks = {
+            source: round(
+                sum(
+                    int(row["method_rank"])
+                    for row in methods_by_source[source]
+                )
+                / len(problem_ids),
+                6,
+            )
+            for source in sources
+        }
+        proposed_ranks = [int(row["proposed_best_rank"]) for row in parents]
+        result.append(
+            {
+                "train_episode": train_episode,
+                "scope": scope,
+                "block_count": block_count,
+                "distribution_type": distribution_type,
+                "problem_count": len(problem_ids),
+                "proposed_win_count": relations.count("win"),
+                "proposed_tie_count": relations.count("tie"),
+                "proposed_loss_count": relations.count("loss"),
+                "proposed_rank1_count": sum(rank == 1 for rank in proposed_ranks),
+                "proposed_mean_rank": round(
+                    sum(proposed_ranks) / len(proposed_ranks),
+                    6,
+                ),
+                "winner_counts_json": json.dumps(
+                    winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "sole_winner_counts_json": json.dumps(
+                    sole_winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "tied_winner_counts_json": json.dumps(
+                    tied_winner_counts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "mean_rank_by_method_json": json.dumps(
+                    mean_ranks,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            }
+        )
+    return result
+
+
+def _print_validation_rank_summary(rows: Sequence[Mapping]) -> None:
+    for row in rows:
+        scope_key = str(row["scope"])
+        if row["block_count"] != "":
+            scope_key += f":{row['block_count']}"
+        if row["distribution_type"] != "":
+            scope_key += f":{row['distribution_type']}"
+        print(
+            "[VALIDATION][Phase2.merged.validation_rank] "
+            f"episode={row['train_episode']} scope={scope_key} "
+            f"problems={row['problem_count']} "
+            f"proposed_wtl={row['proposed_win_count']}/"
+            f"{row['proposed_tie_count']}/{row['proposed_loss_count']} "
+            f"proposed_rank1={row['proposed_rank1_count']} "
+            f"proposed_mean_rank={row['proposed_mean_rank']} "
+            f"winner_counts={row['winner_counts_json']}"
+        )
+
+
+def _validation_rank_summary_fields() -> list[str]:
+    return [
+        "train_episode",
+        "scope",
+        "block_count",
+        "distribution_type",
+        "problem_count",
+        "proposed_win_count",
+        "proposed_tie_count",
+        "proposed_loss_count",
+        "proposed_rank1_count",
+        "proposed_mean_rank",
+        "winner_counts_json",
+        "sole_winner_counts_json",
+        "tied_winner_counts_json",
+        "mean_rank_by_method_json",
+    ]
+
+
+def _write_validation_rank_history(
+    plt,
+    validation_root: Path,
+) -> dict[str, str]:
+    """모든 checkpoint의 전체 winner count와 Proposed rank 추세를 기록한다."""
+
+    evaluation_dirs = sorted(
+        path
+        for path in (validation_root / "evaluations").glob("ep_*")
+        if path.is_dir()
+    )
+    if not evaluation_dirs:
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=no_evaluation_directories root={validation_root}"
+        )
+        raise RuntimeError("Phase 2 validation rank history requires evaluation directories")
+    history_rows: list[dict] = []
+    for evaluation_dir in evaluation_dirs:
+        summary_path = evaluation_dir / "aggregate" / "validation_rank_summary.csv"
+        if not summary_path.is_file():
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=missing_rank_summary path={summary_path}"
+            )
+            raise RuntimeError("Phase 2 validation checkpoint rank summary is missing")
+        with summary_path.open("r", encoding="utf-8-sig", newline="") as file:
+            rows = [dict(row) for row in csv.DictReader(file)]
+        episodes = {int(row["train_episode"]) for row in rows}
+        expected_episode = int(evaluation_dir.name.removeprefix("ep_"))
+        if episodes != {expected_episode}:
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=episode_mismatch directory={evaluation_dir.name} rows={sorted(episodes)}"
+            )
+            raise RuntimeError("Phase 2 validation rank summary episode mismatch")
+        history_rows.extend(rows)
+
+    history_csv = validation_root / "validation_rank_history.csv"
+    _write_rows(
+        history_csv,
+        history_rows,
+        _validation_rank_summary_fields(),
+    )
+    overall_rows = sorted(
+        (row for row in history_rows if row["scope"] == "overall"),
+        key=lambda row: int(row["train_episode"]),
+    )
+    if len(overall_rows) != len(evaluation_dirs):
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=overall_row_count_mismatch expected={len(evaluation_dirs)} "
+            f"actual={len(overall_rows)}"
+        )
+        raise RuntimeError("Phase 2 validation history requires one overall row per checkpoint")
+
+    winner_counts_by_episode: list[dict[str, int]] = []
+    for row in overall_rows:
+        try:
+            parsed = json.loads(str(row["winner_counts_json"]))
+            winner_counts = {
+                str(source): int(count)
+                for source, count in parsed.items()
+            }
+        except (AttributeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(
+                "[ERROR][Phase2.merged._write_validation_rank_history] "
+                f"cause=invalid_winner_counts value={row.get('winner_counts_json')}"
+            )
+            raise RuntimeError("invalid Phase 2 validation winner count JSON") from exc
+        winner_counts_by_episode.append(winner_counts)
+    method_sets = {tuple(sorted(counts)) for counts in winner_counts_by_episode}
+    if len(method_sets) != 1:
+        print(
+            "[ERROR][Phase2.merged._write_validation_rank_history] "
+            f"cause=method_set_mismatch values={sorted(method_sets)}"
+        )
+        raise RuntimeError("Phase 2 validation history method set changed")
+
+    episodes = [int(row["train_episode"]) for row in overall_rows]
+    methods = list(next(iter(method_sets)))
+    winner_png = validation_root / "validation_overall_winner_count_history.png"
+    plt.figure(figsize=(11, 6))
+    for method in methods:
+        plt.plot(
+            episodes,
+            [counts[method] for counts in winner_counts_by_episode],
+            marker="o",
+            linewidth=1.8,
+            label=_display_source_name(method),
+        )
+    plt.plot(
+        episodes,
+        [int(row["problem_count"]) for row in overall_rows],
+        color="black",
+        linestyle="--",
+        linewidth=1.2,
+        label="Total problems",
+    )
+    plt.title("Overall validation rank-1 count by checkpoint")
+    plt.xlabel("Training episode")
+    plt.ylabel("Rank-1 problem count")
+    plt.grid(True, alpha=0.25)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(winner_png, dpi=160)
+    plt.close()
+
+    proposed_rank_png = validation_root / "validation_proposed_mean_rank_history.png"
+    plt.figure(figsize=(11, 5))
+    plt.plot(
+        episodes,
+        [float(row["proposed_mean_rank"]) for row in overall_rows],
+        marker="D",
+        linewidth=2.0,
+        color="#1f77b4",
+        label="Proposed mean rank",
+    )
+    plt.axhline(1.0, color="black", linestyle="--", linewidth=1.0, label="Rank 1")
+    plt.gca().invert_yaxis()
+    plt.title("Proposed overall validation mean rank by checkpoint")
+    plt.xlabel("Training episode")
+    plt.ylabel("Mean rank (lower is better)")
+    plt.grid(True, alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(proposed_rank_png, dpi=160)
+    plt.close()
+    return {
+        "validation_rank_history_csv": str(history_csv),
+        "validation_winner_count_history_png": str(winner_png),
+        "validation_proposed_mean_rank_history_png": str(proposed_rank_png),
+    }
+
+
 def _write_validation_graph_hierarchy(
     evaluation_root: Path,
+    parent_problem_rows: Sequence[Mapping],
     parent_method_rows: Sequence[Mapping],
     bay_method_rows: Sequence[Mapping],
     score_field_names: Sequence[str],
@@ -3485,6 +3948,11 @@ def _write_validation_graph_hierarchy(
         print("[ERROR][Phase2.merged._write_validation_graph_hierarchy] cause=no_bay_method_rows")
         raise RuntimeError("Phase 2 validation graph hierarchy requires Bay method rows")
     _validate_validation_method_grid(parent_method_rows, "parent")
+    ranked_parent_method_rows = _rank_validation_method_rows(parent_method_rows)
+    rank_summary_rows = _validation_rank_summary_rows(
+        parent_problem_rows,
+        ranked_parent_method_rows,
+    )
     metric_specs = _validation_graph_metric_specs(score_field_names)
     aggregate_root = evaluation_root / "aggregate"
     aggregate_root.mkdir(parents=True, exist_ok=True)
@@ -3503,7 +3971,7 @@ def _write_validation_graph_hierarchy(
     _write_rows(summary_csv, summary_rows, summary_fields)
     _write_rows(
         aggregate_root / "method_problem_scores.csv",
-        parent_method_rows,
+        ranked_parent_method_rows,
         [
             "train_episode",
             "validation_episode",
@@ -3513,9 +3981,19 @@ def _write_validation_graph_hierarchy(
             "generation_seed",
             "source",
             "score_json",
+            "method_rank",
+            "is_rank1",
+            "rank1_tie_count",
             *score_field_names,
         ],
     )
+    rank_summary_csv = aggregate_root / "validation_rank_summary.csv"
+    _write_rows(
+        rank_summary_csv,
+        rank_summary_rows,
+        _validation_rank_summary_fields(),
+    )
+    _print_validation_rank_summary(rank_summary_rows)
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -3530,6 +4008,7 @@ def _write_validation_graph_hierarchy(
 
     paths = {
         "validation_method_summary_csv": str(summary_csv),
+        "validation_rank_summary_csv": str(rank_summary_csv),
     }
     for output_key, field, stem, title, ylabel in metric_specs:
         path = aggregate_root / f"{stem}_by_block_size_boxplot.png"
@@ -3588,6 +4067,12 @@ def _write_validation_graph_hierarchy(
                 metric_specs=metric_specs,
                 bay_id=bay_id,
             )
+    paths.update(
+        _write_validation_rank_history(
+            plt,
+            evaluation_root.parents[1],
+        )
+    )
     return paths
 
 
