@@ -691,9 +691,14 @@ def generate_heatmaps(
     actual_wos = pd.read_excel(actual_wo_path)
     actual_blocks = pd.read_excel(actual_block_path)
     physical_block_count = actual_blocks.groupby(["PROJ_NO", "BLK_NO"]).ngroups
-    generated = generate_multi_series_formula_data(
-        n_physical_blocks=physical_block_count,
-        seed=seed,
+    from types import SimpleNamespace
+
+    from 데이터분석.params_generator import block_df_from_wo, generate_synthetic_wo_df
+
+    generated_wo_df = generate_synthetic_wo_df(physical_block_count, seed)
+    generated = SimpleNamespace(
+        wo_df=generated_wo_df,
+        block_df=block_df_from_wo(generated_wo_df),
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     generated.wo_df.to_csv(output_dir / f"mixed_wo_seed{seed}.csv", index=False, encoding="utf-8-sig")

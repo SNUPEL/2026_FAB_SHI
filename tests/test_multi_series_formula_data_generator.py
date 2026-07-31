@@ -75,9 +75,11 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
             "read_excel",
             side_effect=AssertionError("invalid profile must not fall back to Excel"),
         ):
+            # profile은 이제 joint(physical_block_joint)만 담는다. slim 로더가 요구하는
+            # schema/physical_block_joint 위반이 Excel fallback 없이 실패하는지 검증한다.
             for name, mutate in (
                 ("schema", lambda value: value.__setitem__("schema", "invalid")),
-                ("series", lambda value: value["empirical_series"].pop("NC")),
+                ("physical_block_joint", lambda value: value.pop("physical_block_joint")),
             ):
                 broken = json.loads(json.dumps(payload))
                 mutate(broken)
@@ -323,19 +325,9 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
             )
 
     def test_generated_multi_series_data_preserves_physical_and_series_block_contracts(self) -> None:
-        seed = 20260714
-        generated = generate_multi_series_formula_data(n_physical_blocks=24, seed=seed)
-
-        block_seed_child = np.random.SeedSequence(seed).spawn(3 + len(SUPPORTED_SERIES))[0]
-        block_seed = int(block_seed_child.generate_state(1, dtype=np.uint32)[0])
-        original_formula = generate_report_formula_block_seeds(24, block_seed)
-        formula_totals_by_index = generated.allocation_df.groupby(
-            "physical_index", sort=True
-        )["FORMULA_WO_QTY"].first()
-        self.assertEqual(
-            formula_totals_by_index.tolist(),
-            original_formula.sort_values("physical_index")["WO_QTY"].astype(int).tolist(),
-        )
+        # params_generator 경로: 물리블록/블록-계열 구조와 롤업·TACT 계약을 검증한다.
+        # (옛 allocation_df 기반 검증은 이 경로에 없으므로 제거했다.)
+        generated = generate_multi_series_formula_data(n_physical_blocks=24, seed=20260714)
 
         self.assertEqual(generated.physical_block_count, 24)
         self.assertEqual(
@@ -351,28 +343,6 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
         )
         grouped = generated.wo_df.groupby(["PROJ_NO", "GYEL", "BLK_NO"])
         self.assertEqual(grouped.ngroups, len(generated.block_df))
-        allocation_counts = generated.allocation_df.groupby(
-            ["PROJ_NO", "BLK_NO", "GYEL"], sort=True
-        )["SERIES_WO_QTY"].first()
-        generated_counts = generated.wo_df.groupby(
-            ["PROJ_NO", "BLK_NO", "GYEL"], sort=True
-        ).size()
-        self.assertEqual(allocation_counts.to_dict(), generated_counts.to_dict())
-        physical_allocations = generated.allocation_df.groupby(
-            ["PROJ_NO", "BLK_NO"], sort=True
-        )["SERIES_WO_QTY"].sum()
-        physical_rows = generated.wo_df.groupby(
-            ["PROJ_NO", "BLK_NO"], sort=True
-        ).size()
-        self.assertEqual(physical_allocations.to_dict(), physical_rows.to_dict())
-        formula_totals = generated.allocation_df.groupby(
-            ["PROJ_NO", "BLK_NO"], sort=True
-        )["FORMULA_WO_QTY"].first()
-        self.assertEqual(formula_totals.to_dict(), physical_rows.to_dict())
-        multi_series_seed_counts = generated.allocation_df.groupby(
-            ["PROJ_NO", "BLK_NO"], sort=True
-        )["SERIES_RANDOM_SEED"].agg(lambda values: values.nunique() == len(values))
-        self.assertTrue(multi_series_seed_counts.all())
         for _, block in generated.block_df.iterrows():
             key = (block["PROJ_NO"], block["GYEL"], block["BLK_NO"])
             rows = grouped.get_group(key)
@@ -384,26 +354,6 @@ class MultiSeriesFormulaDataGeneratorTest(unittest.TestCase):
                 + 0.3840 * rows["PTLST_QTY"]
             )
             np.testing.assert_allclose(rows["TACT_TIME"], expected_tact, atol=1e-6, rtol=0.0)
-
-    def test_validation_rejects_fractional_allocation_counts(self) -> None:
-        generated = generate_multi_series_formula_data(
-            n_physical_blocks=3,
-            seed=20260714,
-        )
-        invalid_allocations = generated.allocation_df.copy()
-        invalid_allocations["SERIES_WO_QTY"] = invalid_allocations[
-            "SERIES_WO_QTY"
-        ].astype(float)
-        invalid_allocations.loc[invalid_allocations.index[0], "SERIES_WO_QTY"] += 0.5
-
-        with self.assertRaisesRegex(RuntimeError, "invalid expected series allocation values"):
-            validate_multi_series_formula_data(
-                generated.wo_df,
-                generated.block_df,
-                expected_physical_blocks=3,
-                expected_series_combinations=generated.series_combinations,
-                expected_allocations=invalid_allocations,
-            )
 
     def test_phase1_and_phase2_share_exact_mixed_episode_input(self) -> None:
         phase1 = build_phase1_episode_jobs(

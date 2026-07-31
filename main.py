@@ -95,18 +95,12 @@ from Utils.phase1.multi_series_rules import (
     PHASE1_OBJECTIVE_SCOPES,
     joint_phase1_bay_capacity_weights,
 )
-from Utils.data.report_formula_data_generator import (
-    BTH_FORMULA_FEATURES,
+from Utils.data.wo_job_contract import (
     TACT_A_CUT,
     TACT_A_MARK,
     TACT_A_PTLST,
     TACT_A_THK,
-    scenario_jobs_from_report_formula_jobs,
-)
-from Utils.data.multi_series_formula_data_generator import (
-    generate_multi_series_formula_data,
-    load_multi_series_generation_profile,
-    load_physical_block_joint_profile,
+    scenario_jobs_from_jobs,
 )
 
 
@@ -715,7 +709,7 @@ def _build_mixed_full_flow_scenario(
         seed=seed,
         verbose=False,
     )[0]
-    jobs = scenario_jobs_from_report_formula_jobs(episode["jobs"])
+    jobs = scenario_jobs_from_jobs(episode["jobs"])
     machines = [
         asdict(machine)
         for machine in build_mixed_phase2_training_machines().values()
@@ -1025,71 +1019,45 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
     synthetic_source = MIXED_SYNTHETIC_SOURCE
     print(f"- synthetic_source: {synthetic_source}")
     print(f"- output_dir: {args.output_dir}")
-    generated = generate_multi_series_formula_data(
-        n_physical_blocks=args.n_blocks,
-        seed=args.seed,
+    from 데이터분석.params_generator import (
+        block_df_from_wo,
+        generate_synthetic_wo_df,
+        load_params,
+        series_combinations_from_wo,
     )
-    physical_block_count = generated.physical_block_count
+
+    wo_df = generate_synthetic_wo_df(args.n_blocks, args.seed, params=load_params())
+    block_df = block_df_from_wo(wo_df)
+    physical_block_count = args.n_blocks
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     blocks_csv = output_dir / "phase1_synthetic_blocks.csv"
     wos_csv = output_dir / "phase1_synthetic_wos.csv"
     summary_json = output_dir / "summary.json"
-    generated.block_df.to_csv(blocks_csv, index=False, encoding="utf-8-sig")
-    generated.wo_df.to_csv(wos_csv, index=False, encoding="utf-8-sig")
+    block_df.to_csv(blocks_csv, index=False, encoding="utf-8-sig")
+    wo_df.to_csv(wos_csv, index=False, encoding="utf-8-sig")
     aggregation = {
         "max": ["LTH", "BTH", "THK", "TACT_TIME"],
         "sum": ["CUT_LTH", "MARK_LTH", "BVL_LTH", "STL_QTY", "BV_QTY", "PTLST_QTY"],
         "WO_QTY": "W/O row count",
     }
-    formula_series = ("NP", "FN", "FL", "NC")
-    fixed_profile = load_multi_series_generation_profile()
-    fixed_bth_profiles = {
-        "NP": fixed_profile.np_bth,
-        **{
-            series: fixed_profile.empirical_generators[series].conditional_bth_stl[
-                "bth_formula"
-            ]
-            for series in formula_series
-            if series != "NP"
-        },
-    }
-    bth_profiles = {}
-    for series in formula_series:
-        profile = fixed_bth_profiles[series]
-        bth_profiles[series] = {
-            "coefficients": {
-                "intercept": profile.coefficients[0],
-                **dict(zip(BTH_FORMULA_FEATURES, profile.coefficients[1:])),
-            },
-            "residual_std": profile.residual_std,
-            "r_squared": profile.r_squared,
-            "observed_spec_count": len(profile.observed_specs),
-            "observed_spec_min": min(profile.observed_specs),
-            "observed_spec_max": max(profile.observed_specs),
-        }
     summary = {
         "synthetic_source": synthetic_source,
         "gyel": "MIXED",
         "seed": args.seed,
+        "coefficient_source": "block_params.json + wo_params.json (params_generator)",
         "physical_block_count": physical_block_count,
-        "block_count": len(generated.block_df),
-        "wo_count": len(generated.wo_df),
+        "block_count": len(block_df),
+        "wo_count": len(wo_df),
         "series_block_counts": {
             str(series): int(count)
-            for series, count in generated.block_df["GYEL"].value_counts().sort_index().items()
+            for series, count in block_df["GYEL"].value_counts().sort_index().items()
         },
         "series_wo_counts": {
             str(series): int(count)
-            for series, count in generated.wo_df["GYEL"].value_counts().sort_index().items()
+            for series, count in wo_df["GYEL"].value_counts().sort_index().items()
         },
         "aggregation": aggregation,
-        "bth_formula": {
-            "equation": "ln(BTH)=b0+sum(bk*ln(1+xk))+epsilon",
-            "features": list(BTH_FORMULA_FEATURES),
-            "rounding": "nearest_observed_series_spec",
-            "profiles": bth_profiles,
-        },
         "tact_time_formula": {
             "equation": "0.3037*CUT_LTH+0.1325*MARK_LTH+0.4790*THK+0.3840*PTLST_QTY",
             "coefficients": {
@@ -1101,9 +1069,11 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
             "scope": "all_series_shared_np_ppt_case6",
         },
     }
-    reference = load_physical_block_joint_profile()
+    from 데이터분석.params_generator import load_joint_reference
+
+    reference = load_joint_reference()
     generated_combination_counts = Counter(
-        "+".join(combination) for combination in generated.series_combinations
+        "+".join(combination) for combination in series_combinations_from_wo(wo_df)
     )
     summary["actual_series_combination_distribution"] = {
         "+".join(combination): {
@@ -1111,9 +1081,9 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
             "probability": probability,
         }
         for combination, count, probability in zip(
-            reference.combinations,
-            reference.counts,
-            reference.probabilities,
+            reference["combinations"],
+            reference["counts"],
+            reference["probabilities"],
         )
     }
     summary["generated_series_combination_counts"] = dict(
@@ -1128,7 +1098,7 @@ def command_generate_phase1_blocks(args: argparse.Namespace) -> None:
     print(f"- summary_json: {summary_json}")
     print(
         "[VALIDATION][main.command_generate_phase1_blocks] "
-        f"passed=true blocks={len(generated.block_df)} wos={len(generated.wo_df)}"
+        f"passed=true blocks={len(block_df)} wos={len(wo_df)}"
     )
 
 
