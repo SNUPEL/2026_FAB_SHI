@@ -28,6 +28,13 @@ _VALIDATION = (
     "200,FN_FL,1,1\n"
 )
 
+_VALIDATION_MIXED = (
+    "train_episode,validation_view,agent_is_best,agent_rank\n"
+    "100,NP,1,1\n"
+    "100,NP_NC,1,1\n"
+    "100,FN_FL,0,2\n"
+)
+
 
 def _make_run(tmp: Path) -> Path:
     run = tmp / "run"
@@ -71,6 +78,17 @@ class TestPhase1AdoptionSeries(unittest.TestCase):
         self.assertEqual(adoption["heuristic"][2], [3.0, 0.0])
 
 
+class TestPhase1ValidationTable(unittest.TestCase):
+    def test_ignores_non_parent_views(self):
+        rows = dash._read_csv_rows_for_test(_VALIDATION_MIXED)
+        table = dash.phase1_validation_table(rows)
+        self.assertEqual(len(table), 1)
+        self.assertEqual(table[0]["episode"], 100)
+        self.assertEqual(table[0]["rate"], 50.0)  # not 66.7 (all-views pool)
+        overall = dash.phase1_best_rate_by_view(rows, "overall")
+        self.assertEqual(table[0]["rate"], overall[0][1])
+
+
 class TestBuildPayload(unittest.TestCase):
     def test_payload_shape(self):
         with tempfile.TemporaryDirectory() as td:
@@ -83,6 +101,22 @@ class TestBuildPayload(unittest.TestCase):
         for key in ("best_rate_np_nc", "best_rate_fn_fl", "best_rate_overall", "adoption", "best_rate_latest"):
             self.assertIn(key, run_data)
         self.assertEqual(run_data["best_rate_latest"], 100.0)  # overall 최신(ep200)
+
+    def test_missing_metrics_csv_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "run"
+            run.mkdir()
+            (run / "validation_summary.csv").write_text(_VALIDATION, encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                dash.build_payload(run, target=20000, window=25)
+
+    def test_missing_validation_summary_still_works(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td) / "run"
+            run.mkdir()
+            (run / "metrics.csv").write_text(_METRICS, encoding="utf-8")
+            payload = dash.build_payload(run, target=20000, window=25)
+        self.assertEqual(payload["run"]["best_rate_overall"], [])
 
 
 class TestWriteDashboard(unittest.TestCase):

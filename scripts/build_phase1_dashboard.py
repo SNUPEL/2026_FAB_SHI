@@ -23,6 +23,7 @@ from build_training_dashboard import (  # noqa: E402
     _moving_average,
     _read_csv_rows,
     _subproblem_sources,
+    _to_float,
     _to_int,
 )
 
@@ -105,7 +106,39 @@ def phase1_adoption_series(
     }
 
 
+def phase1_validation_table(validation_rows: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """holdout 상세 표: 부모 view(NP_NC/FN_FL)만 pool해 tile/chart의 overall과 일치시킨다.
+
+    train_episode 별 rate=100*mean(agent_is_best), rank=mean(agent_rank); 최근 8개만.
+    """
+    grouped: dict[int, list[dict[str, str]]] = {}
+    for row in validation_rows:
+        if row.get("validation_view") not in PARENT_VIEWS:
+            continue
+        episode = _to_int(row.get("train_episode"))
+        if episode is not None:
+            grouped.setdefault(episode, []).append(row)
+    out: list[dict[str, Any]] = []
+    for episode in sorted(grouped)[-8:]:
+        block = grouped[episode]
+        ranks = [_to_float(r.get("agent_rank")) for r in block]
+        ranks = [value for value in ranks if value is not None]
+        flags = [1 if str(r.get("agent_is_best", "")).strip().lower() in {"true", "1"} else 0 for r in block]
+        rate = 100.0 * sum(flags) / len(flags) if flags else None
+        out.append({
+            "episode": episode,
+            "rate": rate,
+            "rank": sum(ranks) / len(ranks) if ranks else None,
+        })
+    return out
+
+
 def build_payload(run_dir: Path, target: int, window: int) -> dict[str, Any]:
+    metrics_path = run_dir / "metrics.csv"
+    if not metrics_path.exists():
+        print(f"[ERROR][build_phase1_dashboard] cause=missing_metrics path={metrics_path}")
+        raise RuntimeError(f"missing metrics.csv: {metrics_path}")
+
     now = datetime.now(timezone.utc).timestamp()
     run = collect_phase(run_dir, target, window, now)
     metrics_rows = _read_csv_rows(run_dir / "metrics.csv")
@@ -116,6 +149,7 @@ def build_payload(run_dir: Path, target: int, window: int) -> dict[str, Any]:
     run["adoption"] = phase1_adoption_series(metrics_rows, window)
     overall = run["best_rate_overall"]
     run["best_rate_latest"] = overall[-1][1] if overall else None
+    run["validation_rows"] = phase1_validation_table(validation_rows)
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "window": window,
