@@ -10,6 +10,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import build_phase1_dashboard as dash  # noqa: E402
+import watch_phase1_dashboard as watch  # noqa: E402
 
 
 _METRICS = (
@@ -103,6 +104,28 @@ class TestWriteDashboard(unittest.TestCase):
             self.assertTrue(data_file.exists())
             reloaded = json.loads(data_file.read_text(encoding="utf-8"))
             self.assertEqual(reloaded["run"]["current_ep"], payload["run"]["current_ep"])
+
+
+class TestWatcherPolling(unittest.TestCase):
+    def test_latest_validation_episode(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td)
+            (run / "validation_summary.csv").write_text(_VALIDATION, encoding="utf-8")
+            self.assertEqual(watch.latest_validation_episode(run), 200)
+
+    def test_latest_validation_episode_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(watch.latest_validation_episode(Path(td)))
+
+    def test_current_train_episode(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = Path(td)
+            (run / "metrics.csv").write_text(_METRICS, encoding="utf-8")
+            self.assertEqual(watch.current_train_episode(run), 3)
+
+    def test_current_train_episode_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            self.assertIsNone(watch.current_train_episode(Path(td)))
 
 
 if __name__ == "__main__":
