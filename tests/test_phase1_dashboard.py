@@ -84,5 +84,26 @@ class TestBuildPayload(unittest.TestCase):
         self.assertEqual(run_data["best_rate_latest"], 100.0)  # overall 최신(ep200)
 
 
+class TestWriteDashboard(unittest.TestCase):
+    def test_writes_self_contained_html_and_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            run = _make_run(Path(td))
+            out = Path(td) / "dash" / "dashboard.html"
+            payload = dash.write_dashboard(run, target=20000, output=out, window=25)
+            self.assertTrue(out.exists())
+            html = out.read_text(encoding="utf-8")
+            self.assertNotIn("__DATA__", html)          # 데이터가 실제로 치환됐다
+            self.assertIn('id="app"', html)
+            self.assertIn('id="chart-val"', html)
+            self.assertIn('id="chart-adopt"', html)
+            # JSON 인코딩된 형태로 비교한다: Windows 경로는 백슬래시가 \\ 로 이스케이프되어
+            # render_html 이 내장하는 실제 문자열은 str(run) 그대로가 아니다(POSIX 경로는 무영향).
+            self.assertIn(json.dumps(str(run))[1:-1], html)  # run 경로가 푸터에 박힌다
+            data_file = out.parent / "dashboard_data.json"
+            self.assertTrue(data_file.exists())
+            reloaded = json.loads(data_file.read_text(encoding="utf-8"))
+            self.assertEqual(reloaded["run"]["current_ep"], payload["run"]["current_ep"])
+
+
 if __name__ == "__main__":
     unittest.main()
