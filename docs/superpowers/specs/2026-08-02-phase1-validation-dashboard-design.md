@@ -57,7 +57,8 @@ Phase 1 런이 이미 쓰고 있는 파일만 읽는다. **학습 코드 변경 
 - **추가 추출(신규 helper)**: holdout best-rate를 자원군 view별로 분리하는
   `phase1_best_rate_by_view(validation_rows, view)` — `validation_view == view`인 행만
   골라 `train_episode`별 `100 * mean(agent_is_best)` 시계열. view = `NP_NC`, `FN_FL`,
-  그리고 두 view 합친 `overall`.
+  그리고 `overall` = `validation_view in {NP_NC, FN_FL}`인 모든 행을 pool한
+  `train_episode`별 `100 * mean(agent_is_best)` (두 view-비율의 산술평균이 아니라 행 pooling).
 - self-contained HTML + `dashboard_data.json`을 쓴다. 외부 의존성 0, 라이트/다크 테마,
   손수 짠 SVG 차트/툴팁/테마토글 JS는 기존 `_TEMPLATE`에서 가져와 재사용하되 DOM은
   단일 런 레이아웃으로 재구성한다.
