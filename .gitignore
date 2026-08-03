@@ -18,6 +18,7 @@ env/
 Thumbs.db
 
 # Generated outputs
+# 학습 산출물은 전부 제외한다. run 인덱스는 저장소에 남겨야 하므로 output/ 밖(루트 RUNS.md)에 둔다.
 /output/
 /tmp/
 /notebooks/*.png

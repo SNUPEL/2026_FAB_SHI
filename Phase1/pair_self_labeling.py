@@ -76,6 +76,7 @@ from Phase1.heuristics import (
     PHASE1_HEURISTIC_BANK,
     run_phase1_heuristic_candidate,
 )
+from Utils.learning.run_manifest import summarize_validation_contract, write_run_manifest
 
 
 # MIXED pair 후보는 W/O-first 부하, 계열 그룹, NP hard mask 상태를 포함한다.
@@ -96,6 +97,9 @@ PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(6)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
 PHASE1_VALIDATION_VIEW_ORDER = ("NP", "NC", "NP_NC", "FN", "FL", "FN_FL")
+# validation 후보 sampling 온도. 학습 온도(--temperature)와 분리된 고정값이며, 이 값이
+# 학습 설정에 따라 흔들리면 서로 다른 arm의 checkpoint가 다른 조건으로 채점된다.
+PHASE1_VALIDATION_SAMPLING_TEMPERATURE = 1.0
 PHASE1_VALIDATION_GAP_FIELDS = tuple(
     f"{scope}_{metric}_gap"
     for scope in ("np", "nc", "np_nc", "fn", "fl", "fn_fl")
@@ -501,6 +505,9 @@ def train_phase1_pair_self_labeling(
     device: str = "cpu",
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     write_candidate_summary: bool = False,
+    temperature_min: float | None = None,
+    temperature_anneal_episodes: int | None = None,
+    run_manifest_fields: Mapping[str, object] | None = None,
 ) -> Dict:
     """Train one shared pair policy with independent resource-pool teachers.
 
@@ -579,6 +586,45 @@ def train_phase1_pair_self_labeling(
         start_episode = completed_episode + 1
         objective_scope_transition = previous_objective_scope != normalized_objective_scope
         _move_optimizer_state(optimizer, torch_device)
+    if run_manifest_fields is not None:
+        # Phase 1은 아직 run_spec도 고정 validation grid도 없다(Phase 2 parity 미완).
+        # 그 사실 자체를 manifest에 남겨, 비교 단계에서 "감사 불가"로 취급되게 한다.
+        write_run_manifest(
+            output_path,
+            cli_fields=run_manifest_fields,
+            run_spec=None,
+            run_spec_source="phase1_run_spec_absent_parity_pending",
+            validation={
+                "main": summarize_validation_contract(
+                    None,
+                    fixed_grid=False,
+                    seed=seed,
+                    note=(
+                        "phase1 validation problems are regenerated from seed offsets per run; "
+                        "no fixed grid contract yet, so cross-run comparability is not enforced"
+                    ),
+                ),
+                "validation_temperature": PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
+                "validation_rollout_samples": resolved_validation_rollout_samples,
+                "validation_every": validation_every,
+                "validation_episodes": validation_episodes,
+            },
+            extra={
+                "device": str(torch_device),
+                "seed": seed,
+                "episodes": episodes,
+                "start_episode": start_episode,
+                "resume_checkpoint": str(resume_path) if resume_path is not None else "",
+                "objective_scope": normalized_objective_scope,
+                "heuristic_algorithms": list(heuristic_algorithms),
+                "rollout_samples": rollout_samples,
+                "temperature": temperature,
+                "lr": lr,
+                "hidden_dim": hidden_dim,
+                "bay_ids": list(normalized_bay_ids),
+                "phase2_feedback_contract": normalized_feedback_contract,
+            },
+        )
     # LINE-BY-LINE: 진행 기록 파일은 학습 시작 시 한 번만 start_episode 기준으로 잘라내고, 이후에는 append합니다.
     metrics_rows, subproblem_metric_rows = _truncate_history_files(
         output_path,
@@ -614,9 +660,19 @@ def train_phase1_pair_self_labeling(
     print(f"- episode_mode: {'on_the_fly' if episode_factory is not None else 'prebuilt'}")
     print(f"- resume_checkpoint: {resume_path or ''}")
     print(f"- device: {torch_device}")
+    resolved_temperature_min = temperature if temperature_min is None else temperature_min
+    resolved_temperature_anneal_episodes = episodes if temperature_anneal_episodes is None else temperature_anneal_episodes
+    print(f"- temperature: {temperature}")
+    print(f"- temperature_min: {resolved_temperature_min}")
+    print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
 
     # LINE-BY-LINE: start_episode부터 사용자가 요청한 episodes까지 학습 loop를 수행합니다.
     for episode in range(start_episode, episodes + 1):
+        # 샘플링 rollout에만 쓰는 annealed temperature. greedy와 validation은 1.0 고정이라
+        # 학습이 진행돼도 비교 기준이 흔들리지 않는다.
+        current_temperature = annealed_temperature(
+            episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+        )
         # LINE-BY-LINE: 이 에피소드에서 새로 생긴 행만 모읍니다. 파일에는 이 행들만 덧붙입니다.
         episode_subproblem_rows: List[Dict] = []
         episode_candidate_rows: List[Dict] = []
@@ -659,7 +715,7 @@ def train_phase1_pair_self_labeling(
                         jobs=pool_jobs,
                         bay_ids=episode_bay_ids,
                         model=model,
-                        temperature=temperature,
+                        temperature=1.0 if is_greedy else current_temperature,
                         seed=seed + episode * 10_000 + pool_index * 1_000 + sample_index,
                         source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
                         selection="greedy" if is_greedy else "sample",
@@ -799,7 +855,8 @@ def train_phase1_pair_self_labeling(
         # LINE-BY-LINE: 콘솔에 episode 진행 상황과 best source/score를 출력합니다.
         print(
             "[CHECK][phase1_pair_self_labeling.train] "
-            f"episode={episode} problem_id={problem_id} block_count={block_count} "
+            f"episode={episode} temperature={current_temperature:.4f} "
+            f"problem_id={problem_id} block_count={block_count} "
             f"best_source={combined_best.source} subproblem_count={len(selected_subproblems)} "
             f"loss={loss:.6f} "
             f"learning_score={learning_score} phase1_score={score}"
@@ -911,6 +968,9 @@ def train_phase1_pair_self_labeling(
         "episodes": episodes,
         "rollout_samples": rollout_samples,
         "validation_rollout_samples": resolved_validation_rollout_samples,
+        "temperature": temperature,
+        "temperature_min": resolved_temperature_min,
+        "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
         "bay_ids": list(normalized_bay_ids),
         "bay_capacity_weights": dict(normalized_capacity_weights),
         "heuristic_algorithms": list(heuristic_algorithms),
@@ -1223,6 +1283,19 @@ def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) 
         raise RuntimeError("Phase 1 pair model dimensions do not match the MIXED schema")
 
 
+def annealed_temperature(episode: int, t0: float, t_min: float, anneal_episodes: int) -> float:
+    """episode에 따른 지수 감쇠 temperature. t_min>=t0이면 상수(t0)로 동작(하위호환)."""
+
+    if t0 <= 0 or t_min <= 0:
+        print(f"[ERROR][Phase1.pair_self_labeling.annealed_temperature] cause=non_positive value t0={t0} t_min={t_min}")
+        raise ValueError("temperature and temperature_min must be positive")
+    if t_min >= t0 or anneal_episodes <= 1:
+        return t0
+    # T(ep) = t0 * (t_min/t0)^(min(ep, anneal)/anneal), clamp at t_min
+    frac = min(max(episode, 0), anneal_episodes) / float(anneal_episodes)
+    return max(t_min, t0 * (t_min / t0) ** frac)
+
+
 def _validate_pair_policy(
     model: Phase1PairPointerPolicy,
     validation_episode_factory: Callable[[int], Mapping[str, object]],
@@ -1274,7 +1347,7 @@ def _validate_pair_policy(
                         jobs=view_jobs,
                         bay_ids=validation_bay_ids,
                         model=model,
-                        temperature=1.0,
+                        temperature=PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
                         seed=(
                             episode * 1_000_000
                             + validation_index * 10_000

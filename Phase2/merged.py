@@ -51,6 +51,7 @@ from Phase2.state import (
 )
 from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_BAY
 from Utils.learning.phase_graph_mdp import _processing_time, _required_non_negative, build_phase2_wo_machine_graph
+from Utils.learning.run_manifest import summarize_validation_contract, write_run_manifest
 
 
 PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES = list(PHASE2_RAW_SCORE_FIELD_NAMES)
@@ -224,17 +225,21 @@ def train_phase2_batch_machine_self_labeling(
     validation_episode_jobs: Sequence[Mapping[str, object]] | None = None,
     validation_episode_job_factory: Callable[[int], Mapping[str, object]] | None = None,
     validation_problems: Sequence[Phase2ValidationProblem] | None = None,
+    secondary_validation_problems: Sequence[Phase2ValidationProblem] | None = None,
     device: str = "cpu",
     checkpoint_every: int = 0,
     write_candidate_summary: bool = False,
     score_mode: str = "raw",
     resume_checkpoint: str | Path | None = None,
+    eval_only: bool = False,
     constraint_profile: PhaseConstraintProfile | None = None,
     candidate_workers: int = 1,
     candidate_executor: ProcessPoolExecutor | None = None,
     temperature: float = 1.0,
     temperature_min: float | None = None,
     temperature_anneal_episodes: int | None = None,
+    validation_temperature: float | None = None,
+    run_manifest_fields: Mapping[str, object] | None = None,
 ) -> Dict:
     """Self-labeling으로 통합 Phase 2 batch-machine policy를 학습한다."""
 
@@ -303,6 +308,19 @@ def train_phase2_batch_machine_self_labeling(
         validation_problems=validation_problems,
     )
     validation_contract = phase2_validation_grid_contract(resolved_validation_problems)
+    # 부차(GENERALIZATION) validation 문제집합. best-checkpoint 선택/RunSpec 대조에는
+    # 절대 참여하지 않으며 오직 리포팅 용도로 validation_generalization/에만 기록한다.
+    resolved_secondary_validation_problems = tuple(secondary_validation_problems or ())
+    if resolved_secondary_validation_problems:
+        secondary_problem_ids = [
+            problem.problem_id for problem in resolved_secondary_validation_problems
+        ]
+        if len(set(secondary_problem_ids)) != len(secondary_problem_ids):
+            print(
+                "[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+                f"cause=duplicate_secondary_problem_ids values={secondary_problem_ids}"
+            )
+            raise RuntimeError("secondary validation problem IDs must be unique")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -316,6 +334,10 @@ def train_phase2_batch_machine_self_labeling(
     validation_summary_csv = validation_root / "validation_bay_history.csv"
     validation_candidate_summary_csv = validation_root / "validation_candidate_latest.csv"
     validation_parent_summary_csv = validation_root / "validation_parent_history.csv"
+    generalization_root = output_path / "validation_generalization"
+    generalization_summary_csv = generalization_root / "validation_bay_history.csv"
+    generalization_candidate_summary_csv = generalization_root / "validation_candidate_latest.csv"
+    generalization_parent_summary_csv = generalization_root / "validation_parent_history.csv"
     checkpoint_path = output_path / "phase2_batch_machine_policy.pt"
     best_checkpoint_path = output_path / "phase2_best.pt"
     checkpoint_dir = output_path / "checkpoints"
@@ -327,6 +349,12 @@ def train_phase2_batch_machine_self_labeling(
             validation_root,
             resolved_validation_problems,
             validation_contract,
+        )
+    if resolved_secondary_validation_problems:
+        _write_validation_problem_catalog(
+            generalization_root,
+            resolved_secondary_validation_problems,
+            phase2_validation_grid_contract(resolved_secondary_validation_problems),
         )
 
     resume_path = _resolve_phase2_resume_checkpoint(resume_checkpoint, output_path)
@@ -341,8 +369,9 @@ def train_phase2_batch_machine_self_labeling(
             torch_device=torch_device,
             expected_run_spec=run_spec,
             expected_validation_contract=validation_contract,
+            eval_only=eval_only,
         )
-        if resumed_from_episode >= episodes:
+        if resumed_from_episode >= episodes and not eval_only:
             print(
                 "[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] "
                 f"cause=resume_episode_not_less_than_target resume_episode={resumed_from_episode} "
@@ -371,6 +400,18 @@ def train_phase2_batch_machine_self_labeling(
             "train_episode",
             resumed_from_episode,
         )
+        secondary_validation_rows = _prepare_resume_csv(
+            generalization_summary_csv,
+            _validation_summary_fields(score_field_names),
+            "train_episode",
+            resumed_from_episode,
+        )
+        secondary_validation_parent_rows = _prepare_resume_csv(
+            generalization_parent_summary_csv,
+            _validation_parent_fields(score_field_names),
+            "train_episode",
+            resumed_from_episode,
+        )
     else:
         for path in (
             metrics_csv,
@@ -379,6 +420,9 @@ def train_phase2_batch_machine_self_labeling(
             validation_summary_csv,
             validation_candidate_summary_csv,
             validation_parent_summary_csv,
+            generalization_summary_csv,
+            generalization_candidate_summary_csv,
+            generalization_parent_summary_csv,
         ):
             if path.exists():
                 path.unlink()
@@ -386,6 +430,8 @@ def train_phase2_batch_machine_self_labeling(
             best_checkpoint_path.unlink()
         validation_rows: list[dict] = []
         validation_parent_rows: list[dict] = []
+        secondary_validation_rows: list[dict] = []
+        secondary_validation_parent_rows: list[dict] = []
 
     best_validation_key = _resume_validation_checkpoint_key(
         validation_parent_rows,
@@ -410,6 +456,7 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- validation_every: {validation_every}")
     print(f"- validation_types_per_size: {validation_episodes}")
     print(f"- validation_problem_count: {len(resolved_validation_problems)}")
+    print(f"- secondary_validation_problem_count: {len(resolved_secondary_validation_problems)}")
     print(f"- checkpoint_every: {checkpoint_every}")
     print(f"- write_candidate_summary: {write_candidate_summary}")
     print(f"- device: {torch_device}")
@@ -419,6 +466,414 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- temperature: {temperature}")
     print(f"- temperature_min: {resolved_temperature_min}")
     print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
+    # validation/eval에서 agent_sample 후보를 뽑는 온도. None이면 기존처럼 학습 스케줄의
+    # 현재 온도를 그대로 쓴다. 값을 주면 학습 arm이 달라도 채점 온도는 같아지므로,
+    # 서로 다른 temperature 설정을 비교할 때 평가 자체가 교란되지 않는다.
+    resolved_validation_temperature = _resolve_validation_temperature(validation_temperature)
+    print(
+        "- validation_temperature: "
+        + (
+            "follows_training_schedule"
+            if resolved_validation_temperature is None
+            else str(resolved_validation_temperature)
+        )
+    )
+
+    def _validation_sampling_temperature(current_temperature: float) -> float:
+        """평가용 sampling 온도를 고정값(지정 시) 또는 학습 스케줄 값으로 정한다."""
+
+        if resolved_validation_temperature is None:
+            return current_temperature
+        return resolved_validation_temperature
+
+    if run_manifest_fields is not None:
+        write_run_manifest(
+            output_path,
+            cli_fields=run_manifest_fields,
+            run_spec=run_spec,
+            run_spec_source="phase2_run_spec",
+            validation={
+                "main": summarize_validation_contract(
+                    validation_contract if resolved_validation_problems else None,
+                    fixed_grid=bool(resolved_validation_problems),
+                    seed=seed,
+                    note="phase2 in-distribution grid; drives best-checkpoint selection",
+                ),
+                "generalization": summarize_validation_contract(
+                    phase2_validation_grid_contract(resolved_secondary_validation_problems)
+                    if resolved_secondary_validation_problems
+                    else None,
+                    fixed_grid=bool(resolved_secondary_validation_problems),
+                    seed=seed,
+                    note="phase2 reporting-only grid",
+                ),
+                "validation_temperature": resolved_validation_temperature,
+                "validation_rollout_samples": resolved_validation_rollout_samples,
+                "validation_every": validation_every,
+            },
+            extra={
+                "device": str(torch_device),
+                "seed": seed,
+                "episodes": episodes,
+                "start_episode": start_episode,
+                "eval_only": bool(eval_only),
+                "resume_checkpoint": str(resume_path) if resume_path is not None else "",
+                "resumed_from_episode": resumed_from_episode,
+                "temperature": temperature,
+                "temperature_min": resolved_temperature_min,
+                "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+                "lr": lr,
+                "hidden_dim": hidden_dim,
+                "score_mode": score_mode,
+                "phase1_heuristic": phase1_heuristic or "",
+                "candidate_workers": candidate_workers,
+            },
+        )
+
+    def _run_phase2_validation_cycle(
+        *,
+        episode: int,
+        current_temperature: float,
+        problems: Sequence[Phase2ValidationProblem],
+        root: Path,
+        select_best: bool,
+        accumulated_rows: list[dict],
+        accumulated_parent_rows: list[dict],
+        current_best_validation_key: tuple | None,
+    ) -> dict:
+        """한 checkpoint의 validation pass를 root 아래에 기록한다.
+
+        select_best=True(=MAIN)만 best_checkpoint.json 기록과 best_checkpoint 저장을
+        수행한다. select_best=False(=GENERALIZATION)는 리포팅만 하며 checkpoint 선택,
+        best_checkpoint.json, resume-contract 대조에 절대 관여하지 않는다.
+        """
+
+        cycle_summary_csv = root / "validation_bay_history.csv"
+        cycle_candidate_summary_csv = root / "validation_candidate_latest.csv"
+        cycle_parent_summary_csv = root / "validation_parent_history.csv"
+        current_validation_rows: list[dict] = []
+        current_validation_candidate_rows: list[dict] = []
+        current_validation_parent_rows: list[dict] = []
+        current_validation_method_rows: list[dict] = []
+        current_validation_bay_method_rows: list[dict] = []
+        evaluation_root = root / "evaluations" / f"ep_{episode:06d}"
+        for validation_episode, validation_problem in enumerate(
+            problems,
+            start=1,
+        ):
+            validation_jobs = validation_problem.jobs
+            validation_phase1_seed = (
+                seed
+                + PHASE2_VALIDATION_PHASE1_SEED_OFFSET
+                + validation_episode
+            )
+            validation_phase1 = _phase1_assignments_for_episode(
+                jobs=validation_jobs,
+                fixed_assignments=phase1_assignments,
+                phase1_heuristic=phase1_heuristic,
+                phase1_bay_ids=phase1_bay_ids,
+                phase1_assignment_builder=phase1_assignment_builder,
+                phase1_assignment_seed=validation_phase1_seed,
+                phase1_bay_capacity_weights=phase1_bay_capacity_weights,
+            )
+            validation_seed = (
+                seed
+                + PHASE2_VALIDATION_CANDIDATE_SEED_OFFSET
+                + validation_episode * 100_000
+            )
+            candidate_banks_by_bay: dict[
+                str,
+                tuple[
+                    Mapping[str, object],
+                    Mapping[str, object],
+                    int,
+                    list[Phase2BatchMachineCandidate],
+                ],
+            ] = {}
+            for (
+                bay_id,
+                bay_jobs,
+                bay_machines,
+                bay_seed,
+                validation_candidates,
+            ) in _iter_phase2_bay_candidate_banks(
+                jobs=validation_jobs,
+                machines=machines,
+                phase1_assignments=validation_phase1,
+                model=model,
+                heuristic_algorithms=heuristic_algorithms,
+                rollout_samples=resolved_validation_rollout_samples,
+                max_wo_count=max_wo_count,
+                max_length_sum=max_length_sum,
+                action_pool_limit=action_pool_limit,
+                seed=validation_seed,
+                score_mode=score_mode,
+                constraint_profile=resolved_constraint_profile,
+                candidate_workers=candidate_workers,
+                candidate_executor=candidate_executor,
+                temperature=current_temperature,
+            ):
+                ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
+                candidate_banks_by_bay[bay_id] = (
+                    bay_jobs,
+                    bay_machines,
+                    bay_seed,
+                    ranked_candidates,
+                )
+                best_validation = ranked_candidates[0]
+                proposed_rank, proposed_best = _agent_best_from_ranked(ranked_candidates)
+                greedy_rank, greedy_best = _agent_greedy_from_ranked(ranked_candidates)
+                best_heuristic = _best_heuristic_from_ranked(ranked_candidates)
+                validation_row = _validation_summary_row(
+                    train_episode=episode,
+                    validation_episode=validation_episode,
+                    validation_phase1_seed=validation_phase1_seed,
+                    validation_sampling_seed=bay_seed,
+                    bay_id=bay_id,
+                    jobs=bay_jobs,
+                    machines=bay_machines,
+                    candidate_count=len(ranked_candidates),
+                    best=best_validation,
+                    best_heuristic=best_heuristic,
+                    proposed_rank=proposed_rank,
+                    proposed_best=proposed_best,
+                    greedy_rank=greedy_rank,
+                    greedy_best=greedy_best,
+                    score_field_names=score_field_names,
+                )
+                validation_row.update(
+                    _validation_problem_columns(
+                        validation_problem,
+                    )
+                )
+                current_validation_rows.append(validation_row)
+                for rank, candidate in enumerate(ranked_candidates, start=1):
+                    candidate_row = _validation_candidate_summary_row(
+                        episode,
+                        validation_episode,
+                        bay_seed,
+                        rank,
+                        candidate,
+                        score_field_names,
+                    )
+                    candidate_row.update(
+                        _validation_problem_columns(
+                            validation_problem,
+                        )
+                    )
+                    current_validation_candidate_rows.append(candidate_row)
+                current_validation_bay_method_rows.extend(
+                    _validation_bay_method_rows(
+                        train_episode=episode,
+                        validation_episode=validation_episode,
+                        validation_problem=validation_problem,
+                        bay_id=bay_id,
+                        ranked_candidates=ranked_candidates,
+                        heuristic_algorithms=heuristic_algorithms,
+                        score_field_names=score_field_names,
+                    )
+                )
+
+            parent_candidates = _validation_parent_candidates(
+                candidate_banks_by_bay=candidate_banks_by_bay,
+                machines=machines,
+                heuristic_algorithms=heuristic_algorithms,
+                max_wo_count=max_wo_count,
+                max_length_sum=max_length_sum,
+                score_mode=score_mode,
+            )
+            parent_row, method_rows = _validation_parent_rows(
+                train_episode=episode,
+                validation_episode=validation_episode,
+                validation_problem=validation_problem,
+                parent_candidates=parent_candidates,
+                score_field_names=score_field_names,
+            )
+            current_validation_parent_rows.append(parent_row)
+            current_validation_method_rows.extend(method_rows)
+            _write_validation_problem_evaluation(
+                evaluation_root=evaluation_root,
+                validation_problem=validation_problem,
+                phase1_assignments=validation_phase1,
+                machines=machines,
+                candidate_banks_by_bay=candidate_banks_by_bay,
+                parent_candidates=parent_candidates,
+                score_field_names=score_field_names,
+            )
+
+        validation_key = _validation_checkpoint_key(current_validation_parent_rows)
+        if select_best:
+            checkpoint_saved = (
+                current_best_validation_key is None
+                or validation_key < current_best_validation_key
+            )
+        else:
+            checkpoint_saved = False
+        selection_key_json = json.dumps(list(validation_key), ensure_ascii=False)
+        for validation_row in (
+            *current_validation_rows,
+            *current_validation_parent_rows,
+        ):
+            validation_row["checkpoint_selection_key_json"] = selection_key_json
+            validation_row["best_checkpoint_saved"] = int(checkpoint_saved)
+        accumulated_rows.extend(current_validation_rows)
+        accumulated_parent_rows.extend(current_validation_parent_rows)
+        _write_rows(cycle_summary_csv, accumulated_rows, _validation_summary_fields(score_field_names))
+        _write_rows(
+            cycle_candidate_summary_csv,
+            current_validation_candidate_rows,
+            _validation_candidate_fields(score_field_names),
+        )
+        _write_rows(
+            cycle_parent_summary_csv,
+            accumulated_parent_rows,
+            _validation_parent_fields(score_field_names),
+        )
+        cycle_plot_paths = _write_validation_graph_hierarchy(
+            evaluation_root=evaluation_root,
+            parent_problem_rows=current_validation_parent_rows,
+            parent_method_rows=current_validation_method_rows,
+            bay_method_rows=current_validation_bay_method_rows,
+            score_field_names=score_field_names,
+        )
+        _write_json(
+            root / "latest_evaluation.json",
+            {
+                "train_episode": episode,
+                "evaluation_root": str(evaluation_root),
+                "selection_key": list(validation_key),
+            },
+        )
+        new_best_validation_key = current_best_validation_key
+        if select_best and checkpoint_saved:
+            _save_phase2_batch_machine_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                path=best_checkpoint_path,
+                hidden_dim=hidden_dim,
+                heuristic_algorithms=heuristic_algorithms,
+                rollout_samples=rollout_samples,
+                validation_rollout_samples=resolved_validation_rollout_samples,
+                validation_every=validation_every,
+                validation_episodes=validation_episodes,
+                episodes=episode,
+                max_wo_count=max_wo_count,
+                max_length_sum=max_length_sum,
+                action_pool_limit=action_pool_limit,
+                device=torch_device,
+                score_mode=score_mode,
+                run_spec=run_spec,
+                validation_contract=validation_contract,
+            )
+            new_best_validation_key = validation_key
+            _write_json(
+                root / "best_checkpoint.json",
+                {
+                    "train_episode": episode,
+                    "checkpoint_path": str(best_checkpoint_path),
+                    "selection_key": list(validation_key),
+                    "parent_problem_count": len(current_validation_parent_rows),
+                },
+            )
+        role = "main" if select_best else "generalization"
+        print(
+            "[VALIDATION][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+            f"role={role} episode={episode} validation_problems={len(problems)} "
+            f"validation_rollout_samples={resolved_validation_rollout_samples} "
+            f"selection_key={selection_key_json} best_checkpoint_saved={str(checkpoint_saved).lower()}"
+        )
+        return {
+            "current_parent_rows": current_validation_parent_rows,
+            "plot_paths": cycle_plot_paths,
+            "best_validation_key": new_best_validation_key,
+            "checkpoint_saved": checkpoint_saved,
+        }
+
+    if eval_only:
+        # 순수 평가: 이미 학습된 checkpoint를 로드해 고정 validation 문제로 1회 평가만 한다.
+        # 학습 루프도 optimizer step도 없다(가중치 불변). best-checkpoint 선택/저장도 하지 않는다.
+        if resume_path is None:
+            print(
+                "[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+                "cause=eval_only_requires_resume_checkpoint"
+            )
+            raise RuntimeError("eval_only requires --resume-checkpoint (an already-trained model)")
+        if not resolved_validation_problems and not resolved_secondary_validation_problems:
+            print(
+                "[ERROR][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+                "cause=eval_only_requires_validation_problems"
+            )
+            raise RuntimeError("eval_only requires at least one validation problem set")
+        eval_episode = resumed_from_episode if resumed_from_episode > 0 else start_episode
+        eval_temperature = _validation_sampling_temperature(
+            annealed_temperature(
+                eval_episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+            )
+        )
+        print(
+            "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+            f"eval_only=true eval_episode={eval_episode} eval_temperature={eval_temperature:.4f} "
+            f"validation_temperature_fixed={str(resolved_validation_temperature is not None).lower()}"
+        )
+        if resolved_validation_problems:
+            _run_phase2_validation_cycle(
+                episode=eval_episode,
+                current_temperature=eval_temperature,
+                problems=resolved_validation_problems,
+                root=validation_root,
+                select_best=False,
+                accumulated_rows=validation_rows,
+                accumulated_parent_rows=validation_parent_rows,
+                current_best_validation_key=None,
+            )
+        if resolved_secondary_validation_problems:
+            _run_phase2_validation_cycle(
+                episode=eval_episode,
+                current_temperature=eval_temperature,
+                problems=resolved_secondary_validation_problems,
+                root=generalization_root,
+                select_best=False,
+                accumulated_rows=secondary_validation_rows,
+                accumulated_parent_rows=secondary_validation_parent_rows,
+                current_best_validation_key=None,
+            )
+        eval_summary = {
+            "eval_only": True,
+            "eval_episode": eval_episode,
+            "resumed_from_episode": resumed_from_episode,
+            "resume_checkpoint": str(resume_path),
+            "validation_root": str(validation_root),
+            "validation_problem_count": len(resolved_validation_problems),
+            "generalization_validation_root": (
+                str(generalization_root) if resolved_secondary_validation_problems else ""
+            ),
+            "secondary_validation_problem_count": len(resolved_secondary_validation_problems),
+            "summary_json": str(summary_json),
+            # 아래는 재평가 디렉터리가 자기 채점 조건을 스스로 증명하기 위한 값이다.
+            # 이것이 없으면 eval 결과만 보고는 어떤 계약/온도로 채점했는지 알 수 없다.
+            "run_spec": run_spec,
+            "validation_contract": validation_contract,
+            "score_mode": score_mode,
+            "heuristic_algorithms": list(heuristic_algorithms),
+            "rollout_samples": rollout_samples,
+            "validation_rollout_samples": resolved_validation_rollout_samples,
+            "temperature": temperature,
+            "temperature_min": resolved_temperature_min,
+            "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+            "validation_temperature": resolved_validation_temperature,
+            "eval_temperature": eval_temperature,
+            "device": str(torch_device),
+        }
+        summary_json.write_text(
+            json.dumps(eval_summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(
+            "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+            f"eval_only=true eval_episode={eval_episode} "
+            f"validation_problems={len(resolved_validation_problems)} "
+            f"generalization_problems={len(resolved_secondary_validation_problems)}"
+        )
+        return eval_summary
 
     for episode in range(start_episode, episodes + 1):
         current_temperature = annealed_temperature(
@@ -479,229 +934,32 @@ def train_phase2_batch_machine_self_labeling(
             "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
             f"episode={episode} temperature={current_temperature:.4f} best_source={best.source} loss={row['loss']} score={row['score_json']}"
         )
-        if resolved_validation_problems and episode % validation_every == 0:
-            current_validation_rows: list[dict] = []
-            current_validation_candidate_rows: list[dict] = []
-            current_validation_parent_rows: list[dict] = []
-            current_validation_method_rows: list[dict] = []
-            current_validation_bay_method_rows: list[dict] = []
-            evaluation_root = validation_root / "evaluations" / f"ep_{episode:06d}"
-            for validation_episode, validation_problem in enumerate(
-                resolved_validation_problems,
-                start=1,
-            ):
-                validation_jobs = validation_problem.jobs
-                validation_phase1_seed = (
-                    seed
-                    + PHASE2_VALIDATION_PHASE1_SEED_OFFSET
-                    + validation_episode
-                )
-                validation_phase1 = _phase1_assignments_for_episode(
-                    jobs=validation_jobs,
-                    fixed_assignments=phase1_assignments,
-                    phase1_heuristic=phase1_heuristic,
-                    phase1_bay_ids=phase1_bay_ids,
-                    phase1_assignment_builder=phase1_assignment_builder,
-                    phase1_assignment_seed=validation_phase1_seed,
-                    phase1_bay_capacity_weights=phase1_bay_capacity_weights,
-                )
-                validation_seed = (
-                    seed
-                    + PHASE2_VALIDATION_CANDIDATE_SEED_OFFSET
-                    + validation_episode * 100_000
-                )
-                candidate_banks_by_bay: dict[
-                    str,
-                    tuple[
-                        Mapping[str, object],
-                        Mapping[str, object],
-                        int,
-                        list[Phase2BatchMachineCandidate],
-                    ],
-                ] = {}
-                for (
-                    bay_id,
-                    bay_jobs,
-                    bay_machines,
-                    bay_seed,
-                    validation_candidates,
-                ) in _iter_phase2_bay_candidate_banks(
-                    jobs=validation_jobs,
-                    machines=machines,
-                    phase1_assignments=validation_phase1,
-                    model=model,
-                    heuristic_algorithms=heuristic_algorithms,
-                    rollout_samples=resolved_validation_rollout_samples,
-                    max_wo_count=max_wo_count,
-                    max_length_sum=max_length_sum,
-                    action_pool_limit=action_pool_limit,
-                    seed=validation_seed,
-                    score_mode=score_mode,
-                    constraint_profile=resolved_constraint_profile,
-                    candidate_workers=candidate_workers,
-                    candidate_executor=candidate_executor,
-                    temperature=current_temperature,
-                ):
-                    ranked_candidates = sorted(validation_candidates, key=_candidate_sort_key)
-                    candidate_banks_by_bay[bay_id] = (
-                        bay_jobs,
-                        bay_machines,
-                        bay_seed,
-                        ranked_candidates,
-                    )
-                    best_validation = ranked_candidates[0]
-                    proposed_rank, proposed_best = _agent_best_from_ranked(ranked_candidates)
-                    greedy_rank, greedy_best = _agent_greedy_from_ranked(ranked_candidates)
-                    best_heuristic = _best_heuristic_from_ranked(ranked_candidates)
-                    validation_row = _validation_summary_row(
-                        train_episode=episode,
-                        validation_episode=validation_episode,
-                        validation_phase1_seed=validation_phase1_seed,
-                        validation_sampling_seed=bay_seed,
-                        bay_id=bay_id,
-                        jobs=bay_jobs,
-                        machines=bay_machines,
-                        candidate_count=len(ranked_candidates),
-                        best=best_validation,
-                        best_heuristic=best_heuristic,
-                        proposed_rank=proposed_rank,
-                        proposed_best=proposed_best,
-                        greedy_rank=greedy_rank,
-                        greedy_best=greedy_best,
-                        score_field_names=score_field_names,
-                    )
-                    validation_row.update(
-                        _validation_problem_columns(
-                            validation_problem,
-                        )
-                    )
-                    current_validation_rows.append(validation_row)
-                    for rank, candidate in enumerate(ranked_candidates, start=1):
-                        candidate_row = _validation_candidate_summary_row(
-                            episode,
-                            validation_episode,
-                            bay_seed,
-                            rank,
-                            candidate,
-                            score_field_names,
-                        )
-                        candidate_row.update(
-                            _validation_problem_columns(
-                                validation_problem,
-                            )
-                        )
-                        current_validation_candidate_rows.append(candidate_row)
-                    current_validation_bay_method_rows.extend(
-                        _validation_bay_method_rows(
-                            train_episode=episode,
-                            validation_episode=validation_episode,
-                            validation_problem=validation_problem,
-                            bay_id=bay_id,
-                            ranked_candidates=ranked_candidates,
-                            heuristic_algorithms=heuristic_algorithms,
-                            score_field_names=score_field_names,
-                        )
-                    )
-
-                parent_candidates = _validation_parent_candidates(
-                    candidate_banks_by_bay=candidate_banks_by_bay,
-                    machines=machines,
-                    heuristic_algorithms=heuristic_algorithms,
-                    max_wo_count=max_wo_count,
-                    max_length_sum=max_length_sum,
-                    score_mode=score_mode,
-                )
-                parent_row, method_rows = _validation_parent_rows(
-                    train_episode=episode,
-                    validation_episode=validation_episode,
-                    validation_problem=validation_problem,
-                    parent_candidates=parent_candidates,
-                    score_field_names=score_field_names,
-                )
-                current_validation_parent_rows.append(parent_row)
-                current_validation_method_rows.extend(method_rows)
-                _write_validation_problem_evaluation(
-                    evaluation_root=evaluation_root,
-                    validation_problem=validation_problem,
-                    phase1_assignments=validation_phase1,
-                    machines=machines,
-                    candidate_banks_by_bay=candidate_banks_by_bay,
-                    parent_candidates=parent_candidates,
-                    score_field_names=score_field_names,
-                )
-
-            validation_key = _validation_checkpoint_key(current_validation_parent_rows)
-            checkpoint_saved = best_validation_key is None or validation_key < best_validation_key
-            selection_key_json = json.dumps(list(validation_key), ensure_ascii=False)
-            for validation_row in (
-                *current_validation_rows,
-                *current_validation_parent_rows,
-            ):
-                validation_row["checkpoint_selection_key_json"] = selection_key_json
-                validation_row["best_checkpoint_saved"] = int(checkpoint_saved)
-            validation_rows.extend(current_validation_rows)
-            validation_parent_rows.extend(current_validation_parent_rows)
-            _write_rows(validation_summary_csv, validation_rows, _validation_summary_fields(score_field_names))
-            _write_rows(
-                validation_candidate_summary_csv,
-                current_validation_candidate_rows,
-                _validation_candidate_fields(score_field_names),
+        run_validation_now = episode % validation_every == 0
+        if run_validation_now and resolved_validation_problems:
+            # PRIMARY(MAIN, in-distribution): best-checkpoint 선택을 담당한다.
+            primary_result = _run_phase2_validation_cycle(
+                episode=episode,
+                current_temperature=_validation_sampling_temperature(current_temperature),
+                problems=resolved_validation_problems,
+                root=validation_root,
+                select_best=True,
+                accumulated_rows=validation_rows,
+                accumulated_parent_rows=validation_parent_rows,
+                current_best_validation_key=best_validation_key,
             )
-            _write_rows(
-                validation_parent_summary_csv,
-                validation_parent_rows,
-                _validation_parent_fields(score_field_names),
-            )
-            validation_plot_paths = _write_validation_graph_hierarchy(
-                evaluation_root=evaluation_root,
-                parent_problem_rows=current_validation_parent_rows,
-                parent_method_rows=current_validation_method_rows,
-                bay_method_rows=current_validation_bay_method_rows,
-                score_field_names=score_field_names,
-            )
-            _write_json(
-                validation_root / "latest_evaluation.json",
-                {
-                    "train_episode": episode,
-                    "evaluation_root": str(evaluation_root),
-                    "selection_key": list(validation_key),
-                },
-            )
-            if checkpoint_saved:
-                _save_phase2_batch_machine_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    path=best_checkpoint_path,
-                    hidden_dim=hidden_dim,
-                    heuristic_algorithms=heuristic_algorithms,
-                    rollout_samples=rollout_samples,
-                    validation_rollout_samples=resolved_validation_rollout_samples,
-                    validation_every=validation_every,
-                    validation_episodes=validation_episodes,
-                    episodes=episode,
-                    max_wo_count=max_wo_count,
-                    max_length_sum=max_length_sum,
-                    action_pool_limit=action_pool_limit,
-                    device=torch_device,
-                    score_mode=score_mode,
-                    run_spec=run_spec,
-                    validation_contract=validation_contract,
-                )
-                best_validation_key = validation_key
-                _write_json(
-                    validation_root / "best_checkpoint.json",
-                    {
-                        "train_episode": episode,
-                        "checkpoint_path": str(best_checkpoint_path),
-                        "selection_key": list(validation_key),
-                        "parent_problem_count": len(current_validation_parent_rows),
-                    },
-                )
-            print(
-                "[VALIDATION][Phase2.merged.train_phase2_batch_machine_self_labeling] "
-                f"episode={episode} validation_problems={len(resolved_validation_problems)} "
-                f"validation_rollout_samples={resolved_validation_rollout_samples} "
-                f"selection_key={selection_key_json} best_checkpoint_saved={str(checkpoint_saved).lower()}"
+            best_validation_key = primary_result["best_validation_key"]
+            validation_plot_paths = primary_result["plot_paths"]
+        if run_validation_now and resolved_secondary_validation_problems:
+            # SECONDARY(GENERALIZATION): 리포팅 전용. best-checkpoint 선택에 관여하지 않는다.
+            _run_phase2_validation_cycle(
+                episode=episode,
+                current_temperature=_validation_sampling_temperature(current_temperature),
+                problems=resolved_secondary_validation_problems,
+                root=generalization_root,
+                select_best=False,
+                accumulated_rows=secondary_validation_rows,
+                accumulated_parent_rows=secondary_validation_parent_rows,
+                current_best_validation_key=None,
             )
         if checkpoint_every > 0 and episode % checkpoint_every == 0:
             checkpoint_file = checkpoint_dir / f"phase2_batch_machine_policy_ep{episode:05d}.pt"
@@ -777,6 +1035,15 @@ def train_phase2_batch_machine_self_labeling(
         "validation_summary_csv": str(validation_summary_csv),
         "validation_candidate_summary_csv": str(validation_candidate_summary_csv),
         "validation_parent_summary_csv": str(validation_parent_summary_csv),
+        "generalization_validation_root": (
+            str(generalization_root) if resolved_secondary_validation_problems else ""
+        ),
+        "generalization_validation_parent_summary_csv": (
+            str(generalization_parent_summary_csv)
+            if resolved_secondary_validation_problems
+            else ""
+        ),
+        "secondary_validation_problem_count": len(resolved_secondary_validation_problems),
         **validation_plot_paths,
         "best_batches_csv": str(best_batches_csv),
         "best_timeline_csv": str(best_timeline_csv),
@@ -799,6 +1066,7 @@ def train_phase2_batch_machine_self_labeling(
         "temperature": temperature,
         "temperature_min": resolved_temperature_min,
         "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+        "validation_temperature": resolved_validation_temperature,
         "device": str(torch_device),
         "run_spec": run_spec,
     }
@@ -836,6 +1104,28 @@ def create_phase2_candidate_executor(candidate_workers: int) -> ProcessPoolExecu
         mp_context=multiprocessing.get_context("spawn"),
         initializer=_initialize_phase2_candidate_worker,
     )
+
+
+def _resolve_validation_temperature(validation_temperature: float | None) -> float | None:
+    """평가용 고정 sampling 온도를 검증한다. None이면 학습 스케줄을 그대로 따른다."""
+
+    if validation_temperature is None:
+        return None
+    try:
+        value = float(validation_temperature)
+    except (TypeError, ValueError) as exc:
+        print(
+            "[ERROR][Phase2.merged._resolve_validation_temperature] "
+            f"cause=invalid_validation_temperature value={validation_temperature!r}"
+        )
+        raise ValueError("validation_temperature must be a positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        print(
+            "[ERROR][Phase2.merged._resolve_validation_temperature] "
+            f"cause=non_positive_validation_temperature value={validation_temperature!r}"
+        )
+        raise ValueError("validation_temperature must be a positive number")
+    return value
 
 
 def annealed_temperature(episode: int, t0: float, t_min: float, anneal_episodes: int) -> float:
@@ -2906,8 +3196,13 @@ def _load_phase2_batch_machine_checkpoint(
     torch_device: torch.device,
     expected_run_spec: Mapping[str, object],
     expected_validation_contract: Mapping[str, object],
+    eval_only: bool = False,
 ) -> int:
-    """Load Phase 2 model/optimizer state and return completed episode."""
+    """Load Phase 2 model/optimizer state and return completed episode.
+
+    eval_only=True는 이미 학습된 checkpoint를 (다를 수 있는) validation 문제로 평가만 하므로
+    validation_contract 일치 검사를 건너뛴다. run_spec(정책/피처/휴리스틱 계약) 검사는 유지한다.
+    """
 
     checkpoint = torch.load(path, map_location=torch_device, weights_only=False)
     if not isinstance(checkpoint, Mapping):
@@ -2960,11 +3255,18 @@ def _load_phase2_batch_machine_checkpoint(
     )
     checkpoint_validation_contract = checkpoint.get("validation_contract")
     if checkpoint_validation_contract != expected_validation_contract:
-        print(
-            "[ERROR][Phase2.merged._load_phase2_batch_machine_checkpoint] "
-            f"cause=validation_contract_mismatch path={path}"
-        )
-        raise RuntimeError("Phase 2 resume checkpoint validation grid mismatch")
+        if eval_only:
+            print(
+                "[CHECK][Phase2.merged._load_phase2_batch_machine_checkpoint] "
+                f"eval_only=true validation_contract_differs path={path} "
+                "(평가 전용이므로 contract 불일치를 허용한다)"
+            )
+        else:
+            print(
+                "[ERROR][Phase2.merged._load_phase2_batch_machine_checkpoint] "
+                f"cause=validation_contract_mismatch path={path}"
+            )
+            raise RuntimeError("Phase 2 resume checkpoint validation grid mismatch")
     try:
         completed_episode = int(checkpoint["episodes"])
     except KeyError as exc:
