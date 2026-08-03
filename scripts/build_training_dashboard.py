@@ -341,29 +341,43 @@ def _validation_table(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     return out
 
 
-def build_payload(phase1_dir: Path, phase2_dir: Path, target: int, window: int) -> dict[str, Any]:
+def build_payload(
+    phase1_dir: Path, phase2_dir: Path | None, target: int, window: int
+) -> dict[str, Any]:
+    """`phase2_dir` 가 None 이면 Phase 1 전용 payload 를 만든다.
+
+    화면 쪽은 `phase2` 키가 없으면 Phase 2 요소를 통째로 감춘다.
+    """
+
     now = datetime.now(timezone.utc).timestamp()
-    return {
+    payload: dict[str, Any] = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "window": window,
         "phase1": collect_phase(phase1_dir, target, window, now),
-        "phase2": collect_phase(phase2_dir, target, window, now),
+        "phase2": None,
     }
+    if phase2_dir is not None:
+        payload["phase2"] = collect_phase(phase2_dir, target, window, now)
+    return payload
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase1-dir", required=True)
-    parser.add_argument("--phase2-dir", required=True)
+    parser.add_argument(
+        "--phase2-dir",
+        default=None,
+        help="생략하면 Phase 1 전용 대시보드를 만든다.",
+    )
     parser.add_argument("--output", default="output/dashboard/training_dashboard.html")
     parser.add_argument("--target-episodes", type=int, default=20000)
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW)
     args = parser.parse_args()
 
     phase1_dir = Path(args.phase1_dir)
-    phase2_dir = Path(args.phase2_dir)
+    phase2_dir = Path(args.phase2_dir) if args.phase2_dir else None
     for run_dir in (phase1_dir, phase2_dir):
-        if not run_dir.is_dir():
+        if run_dir is not None and not run_dir.is_dir():
             print(f"[ERROR][build_training_dashboard] cause=missing_run_dir path={run_dir}")
             raise RuntimeError(f"missing run directory: {run_dir}")
 
@@ -379,17 +393,24 @@ def main() -> int:
     p2 = payload["phase2"]
     print(
         f"[CHECK][build_training_dashboard] wrote={output} bytes={output.stat().st_size} "
-        f"phase1_ep={p1['current_ep']} phase2_ep={p2['current_ep']}"
+        f"phase1_ep={p1['current_ep']} "
+        f"phase2_ep={'-' if p2 is None else p2['current_ep']}"
     )
     return 0
 
 
 def render_html(payload: dict[str, Any]) -> str:
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return _TEMPLATE.replace("__DATA__", data_json)
+    # <title>은 브라우저 탭·아티팩트 이름으로 쓰이므로 JS가 아니라 여기서 확정한다.
+    title = (
+        "Phase 1 · Phase 2 학습 진행 모니터"
+        if payload.get("phase2")
+        else "Phase 1 학습 진행 모니터"
+    )
+    return _TEMPLATE.replace("__TITLE__", title).replace("__DATA__", data_json)
 
 
-_TEMPLATE = r"""<title>Phase 1 · Phase 2 학습 진행 모니터</title>
+_TEMPLATE = r"""<title>__TITLE__</title>
 <style>
 :root{
   color-scheme:light;
@@ -475,6 +496,7 @@ svg.chart{width:100%;height:auto;display:block}
 .ax{fill:var(--ink-3);font-size:11px;font-variant-numeric:tabular-nums}
 .gridline{stroke:var(--grid);stroke-width:1}
 .axisline{stroke:var(--axis);stroke-width:1}
+.crosshair{stroke:var(--axis);stroke-width:1;stroke-dasharray:3 3;opacity:0}
 
 .bars{display:flex;flex-direction:column;gap:9px}
 .bar-row{display:grid;grid-template-columns:170px 1fr auto;align-items:center;gap:12px;font-size:12.5px}
@@ -509,8 +531,8 @@ tbody tr td:first-child{font-weight:600}
 <div id="app">
   <header class="hdr">
     <div>
-      <p class="eyebrow" id="eyebrow">MIXED 다계열 · 동시 병렬 학습</p>
-      <h1>Phase 1 · Phase 2 학습 진행 모니터</h1>
+      <p class="eyebrow" id="eyebrow">MIXED 다계열 자기지도 학습</p>
+      <h1 id="page-title">학습 진행 모니터</h1>
       <p class="sub">self-labeling 학습의 현재까지 스냅샷 — 각 episode는 서로 다른 무작위 문제라 raw 점수는 노이즈가 크므로,
         학습 신호는 <strong>CE loss 추세</strong>와 <strong>agent가 teacher 휴리스틱을 이기는 비율</strong>로 읽는다.</p>
     </div>
@@ -588,7 +610,7 @@ tbody tr td:first-child{font-weight:600}
   </section>
 
   <footer class="ftr">
-    <span>출처: <code id="src-p1"></code> · <code id="src-p2"></code></span>
+    <span>출처: <code id="src-p1"></code><span id="src-p2-sep"> · <code id="src-p2"></code></span></span>
     <span id="snap-note"></span>
   </footer>
 </div>
@@ -617,22 +639,26 @@ function renderTiles() {
   const etaText = (p) => p.eta_h === null || p.eta_h === undefined
     ? `${fmt(p.progress_pct)}% · 속도 측정 대기`
     : `${fmt(p.progress_pct)}% · ${fmt(p.sec_per_ep)} s/ep · 남은 ${fmt(p.eta_h)}h`;
-  const html = [
+  const tiles = [
     tile("p1", "Phase 1 진행", `${fmtInt(p1.current_ep)} / ${fmtInt(p1.target)}`,
          etaText(p1), p1.progress_pct, p1.running),
-    tile("p2", "Phase 2 진행", `${fmtInt(p2.current_ep)} / ${fmtInt(p2.target)}`,
-         etaText(p2), p2.progress_pct, p2.running),
     tile("p1", "Phase 1 agent 최상위율",
          p1.agent_rate_recent === null ? "–" : `${fmt(p1.agent_rate_recent)}%`,
          `최근 200 episode 기준`),
-    tile("p2", "Phase 2 agent 최상위율",
-         p2.agent_rate_recent === null ? "–" : `${fmt(p2.agent_rate_recent)}%`,
-         `최근 200 episode 기준`),
-    tile("good", "Phase 2 제약 위반",
-         p2.hard_latest === null ? "–" : fmtInt(p2.hard_latest),
-         "최신 episode hard violation"),
-  ].join("");
-  document.querySelector(".tiles").innerHTML = html;
+  ];
+  if (p2) {
+    tiles.push(
+      tile("p2", "Phase 2 진행", `${fmtInt(p2.current_ep)} / ${fmtInt(p2.target)}`,
+           etaText(p2), p2.progress_pct, p2.running),
+      tile("p2", "Phase 2 agent 최상위율",
+           p2.agent_rate_recent === null ? "–" : `${fmt(p2.agent_rate_recent)}%`,
+           `최근 200 episode 기준`),
+      tile("good", "Phase 2 제약 위반",
+           p2.hard_latest === null ? "–" : fmtInt(p2.hard_latest),
+           "최신 episode hard violation"),
+    );
+  }
+  document.querySelector(".tiles").innerHTML = tiles.join("");
 }
 
 function legend(target, items) {
@@ -760,9 +786,16 @@ function lineChart(svgId, series, opts) {
   };
 }
 
+// Phase 2 가 없는 run 에서는 Phase 1 만 훑는다.
+function phaseEntries(p1Tag, p2Tag) {
+  const out = [[p1Tag, DATA.phase1, css("--p1")]];
+  if (DATA.phase2) out.push([p2Tag, DATA.phase2, css("--p2")]);
+  return out;
+}
+
 function renderBars() {
   const rows = [];
-  for (const [tag, phase, color] of [["P1", DATA.phase1, css("--p1")], ["P2", DATA.phase2, css("--p2")]]) {
+  for (const [tag, phase, color] of phaseEntries("P1", "P2")) {
     const counts = phase.source_counts || [];
     if (!counts.length) continue;
     const total = phase.source_total || counts.reduce((s, c) => s + c[1], 0);
@@ -785,7 +818,7 @@ function renderBars() {
 function renderTable() {
   const body = document.querySelector("#val-table tbody");
   const rows = [];
-  for (const [tag, phase, color] of [["Phase 1", DATA.phase1, css("--p1")], ["Phase 2", DATA.phase2, css("--p2")]]) {
+  for (const [tag, phase, color] of phaseEntries("Phase 1", "Phase 2")) {
     for (const r of (phase.validation_rows || [])) {
       rows.push(`<tr><td><span class="pill" style="background:${color}"></span>${tag}</td>
         <td>${fmtInt(r.episode)}</td>
@@ -800,39 +833,56 @@ function renderTable() {
 
 function renderAll() {
   const p1c = css("--p1"), p2c = css("--p2");
+  const p2 = DATA.phase2;
+  // Phase 2 가 없으면 범례·계열·전용 카드를 통째로 뺀다.
+  const legendItems = [{ color: p1c, label: "Phase 1" }];
+  if (p2) legendItems.push({ color: p2c, label: "Phase 2" });
+
+  document.getElementById("page-title").textContent =
+    p2 ? "Phase 1 · Phase 2 학습 진행 모니터" : "Phase 1 학습 진행 모니터";
+  document.getElementById("eyebrow").textContent =
+    p2 ? "MIXED 다계열 · 동시 병렬 학습" : "MIXED 다계열 자기지도 학습";
   renderTiles();
-  legend("loss-legend", [{ color: p1c, label: "Phase 1" }, { color: p2c, label: "Phase 2" }]);
+  legend("loss-legend", legendItems);
   // CE loss 는 음수가 될 수 없으므로 하한을 0 으로 고정한다.
   // raw 는 옅게 깔고 툴팁에는 이동평균만 싣는다 — 네 계열을 다 띄우면 읽기 어렵다.
   lineChart("chart-loss", [
     { points: DATA.phase1.loss, color: p1c, width: 1, opacity: .22 },
-    { points: DATA.phase2.loss, color: p2c, width: 1, opacity: .22 },
+    ...(p2 ? [{ points: p2.loss, color: p2c, width: 1, opacity: .22 }] : []),
     { points: DATA.phase1.loss_avg, color: p1c, width: 2.4, label: `Phase 1 (평균 ${DATA.window}ep)` },
-    { points: DATA.phase2.loss_avg, color: p2c, width: 2.4, label: `Phase 2 (평균 ${DATA.window}ep)` },
+    ...(p2 ? [{ points: p2.loss_avg, color: p2c, width: 2.4, label: `Phase 2 (평균 ${DATA.window}ep)` }] : []),
   ], { zeroBase: true, yDigits: 1, tipDigits: 3 });
 
-  legend("speed-legend", [{ color: p1c, label: "Phase 1" }, { color: p2c, label: "Phase 2" }]);
+  legend("speed-legend", legendItems);
   lineChart("chart-speed", [
     { points: DATA.phase1.speed_intervals, color: p1c, width: 2.4, dots: true, label: "Phase 1" },
-    { points: DATA.phase2.speed_intervals, color: p2c, width: 2.4, dots: true, label: "Phase 2" },
+    ...(p2 ? [{ points: p2.speed_intervals, color: p2c, width: 2.4, dots: true, label: "Phase 2" }] : []),
   ], { zeroBase: true, yDigits: 0, height: 220, tipDigits: 1, tipSuffix: " s/ep" });
 
-  legend("val-legend", [{ color: p1c, label: "Phase 1" }, { color: p2c, label: "Phase 2" }]);
+  legend("val-legend", legendItems);
   // 비율이므로 0~100 고정, 20단위 눈금.
   lineChart("chart-val", [
     { points: DATA.phase1.validation_rate, color: p1c, width: 2.4, dots: true, label: "Phase 1" },
-    { points: DATA.phase2.validation_rate, color: p2c, width: 2.4, dots: true, label: "Phase 2" },
+    ...(p2 ? [{ points: p2.validation_rate, color: p2c, width: 2.4, dots: true, label: "Phase 2" }] : []),
   ], { yMin: 0, yMax: 100, tickStep: 20, yDigits: 0, height: 220, tipDigits: 1, tipSuffix: "%" });
 
-  // 정상값이 0이므로 0~2 고정, 1단위 눈금. 위반이 2를 넘으면 상한이 따라 올라간다.
-  lineChart("chart-hv", [
-    { points: DATA.phase2.hard, color: p2c, width: 1.6, label: "Phase 2 위반" },
-  ], { yMin: 0, yMax: 2, tickStep: 1, yDigits: 0, height: 200, tipDigits: 0, tipSuffix: "건" });
+  // hard violation 은 Phase 2 전용 지표다. Phase 1 전용 대시보드에서는 카드를 감춘다.
+  const hvCard = document.getElementById("hv-card");
+  if (p2) {
+    hvCard.hidden = false;
+    // 정상값이 0이므로 0~2 고정, 1단위 눈금. 위반이 2를 넘으면 상한이 따라 올라간다.
+    lineChart("chart-hv", [
+      { points: p2.hard, color: p2c, width: 1.6, label: "Phase 2 위반" },
+    ], { yMin: 0, yMax: 2, tickStep: 1, yDigits: 0, height: 200, tipDigits: 0, tipSuffix: "건" });
+  } else {
+    hvCard.hidden = true;
+  }
 
   renderBars();
   renderTable();
   document.getElementById("src-p1").textContent = DATA.phase1.dir;
-  document.getElementById("src-p2").textContent = DATA.phase2.dir;
+  document.getElementById("src-p2").textContent = p2 ? p2.dir : "";
+  document.getElementById("src-p2-sep").hidden = !p2;
   document.getElementById("snap-note").textContent = `스냅샷 ${DATA.generated_at} · 이동평균 창 ${DATA.window}`;
 }
 

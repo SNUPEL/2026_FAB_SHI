@@ -501,6 +501,8 @@ def train_phase1_pair_self_labeling(
     device: str = "cpu",
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
     write_candidate_summary: bool = False,
+    temperature_min: float | None = None,
+    temperature_anneal_episodes: int | None = None,
 ) -> Dict:
     """Train one shared pair policy with independent resource-pool teachers.
 
@@ -614,9 +616,19 @@ def train_phase1_pair_self_labeling(
     print(f"- episode_mode: {'on_the_fly' if episode_factory is not None else 'prebuilt'}")
     print(f"- resume_checkpoint: {resume_path or ''}")
     print(f"- device: {torch_device}")
+    resolved_temperature_min = temperature if temperature_min is None else temperature_min
+    resolved_temperature_anneal_episodes = episodes if temperature_anneal_episodes is None else temperature_anneal_episodes
+    print(f"- temperature: {temperature}")
+    print(f"- temperature_min: {resolved_temperature_min}")
+    print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
 
     # LINE-BY-LINE: start_episode부터 사용자가 요청한 episodes까지 학습 loop를 수행합니다.
     for episode in range(start_episode, episodes + 1):
+        # 샘플링 rollout에만 쓰는 annealed temperature. greedy와 validation은 1.0 고정이라
+        # 학습이 진행돼도 비교 기준이 흔들리지 않는다.
+        current_temperature = annealed_temperature(
+            episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+        )
         # LINE-BY-LINE: 이 에피소드에서 새로 생긴 행만 모읍니다. 파일에는 이 행들만 덧붙입니다.
         episode_subproblem_rows: List[Dict] = []
         episode_candidate_rows: List[Dict] = []
@@ -659,7 +671,7 @@ def train_phase1_pair_self_labeling(
                         jobs=pool_jobs,
                         bay_ids=episode_bay_ids,
                         model=model,
-                        temperature=temperature,
+                        temperature=1.0 if is_greedy else current_temperature,
                         seed=seed + episode * 10_000 + pool_index * 1_000 + sample_index,
                         source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
                         selection="greedy" if is_greedy else "sample",
@@ -799,7 +811,8 @@ def train_phase1_pair_self_labeling(
         # LINE-BY-LINE: 콘솔에 episode 진행 상황과 best source/score를 출력합니다.
         print(
             "[CHECK][phase1_pair_self_labeling.train] "
-            f"episode={episode} problem_id={problem_id} block_count={block_count} "
+            f"episode={episode} temperature={current_temperature:.4f} "
+            f"problem_id={problem_id} block_count={block_count} "
             f"best_source={combined_best.source} subproblem_count={len(selected_subproblems)} "
             f"loss={loss:.6f} "
             f"learning_score={learning_score} phase1_score={score}"
@@ -911,6 +924,9 @@ def train_phase1_pair_self_labeling(
         "episodes": episodes,
         "rollout_samples": rollout_samples,
         "validation_rollout_samples": resolved_validation_rollout_samples,
+        "temperature": temperature,
+        "temperature_min": resolved_temperature_min,
+        "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
         "bay_ids": list(normalized_bay_ids),
         "bay_capacity_weights": dict(normalized_capacity_weights),
         "heuristic_algorithms": list(heuristic_algorithms),
@@ -1221,6 +1237,19 @@ def _validate_pair_policy_model_contract(model: Phase1PairPointerPolicy | None) 
             f"env={model.env_feature_dim}/{len(feature_schema['env'])}"
         )
         raise RuntimeError("Phase 1 pair model dimensions do not match the MIXED schema")
+
+
+def annealed_temperature(episode: int, t0: float, t_min: float, anneal_episodes: int) -> float:
+    """episode에 따른 지수 감쇠 temperature. t_min>=t0이면 상수(t0)로 동작(하위호환)."""
+
+    if t0 <= 0 or t_min <= 0:
+        print(f"[ERROR][Phase1.pair_self_labeling.annealed_temperature] cause=non_positive value t0={t0} t_min={t_min}")
+        raise ValueError("temperature and temperature_min must be positive")
+    if t_min >= t0 or anneal_episodes <= 1:
+        return t0
+    # T(ep) = t0 * (t_min/t0)^(min(ep, anneal)/anneal), clamp at t_min
+    frac = min(max(episode, 0), anneal_episodes) / float(anneal_episodes)
+    return max(t_min, t0 * (t_min / t0) ** frac)
 
 
 def _validate_pair_policy(

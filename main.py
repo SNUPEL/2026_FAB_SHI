@@ -253,6 +253,9 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
     print(f"- episodes: {args.episodes}")
     print(f"- rollout_samples: {args.rollout_samples}")
     print(f"- rollout_samples_validation: {validation_rollout_samples}")
+    print(f"- temperature: {args.temperature}")
+    print(f"- temperature_min: {args.temperature_min}")
+    print(f"- temperature_anneal_episodes: {args.temperature_anneal_episodes}")
     print(f"- heuristic_algorithms: {','.join(heuristic_algorithms)}")
     print(f"- resume_checkpoint: {args.resume_checkpoint}")
     print(f"- phase2_feedback_enabled: {phase2_feedback_scorer is not None}")
@@ -293,6 +296,8 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         lr=args.lr,
         hidden_dim=args.hidden_dim,
         temperature=args.temperature,
+        temperature_min=args.temperature_min,
+        temperature_anneal_episodes=args.temperature_anneal_episodes,
         seed=args.seed,
         episode_factory=lambda episode: episode_payload(episode, validation=False),
         checkpoint_every=args.checkpoint_every,
@@ -1338,7 +1343,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     phase1_train_pair_self_labeling_parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     phase1_train_pair_self_labeling_parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension")
-    phase1_train_pair_self_labeling_parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=1.0,
+        help="Initial sampling temperature T0 for agent_sample candidates (softmax(logits/T)).",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--temperature-min",
+        type=float,
+        default=None,
+        help="Final temperature for exponential annealing. Omit or >=--temperature to keep T constant.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--temperature-anneal-episodes",
+        type=int,
+        default=None,
+        help="Episodes over which temperature decays from --temperature to --temperature-min. Default: --episodes.",
+    )
     phase1_train_pair_self_labeling_parser.add_argument("--seed", type=int, default=0, help="Torch random seed")
     phase1_train_pair_self_labeling_parser.add_argument("--device", default="cpu", help="Torch device for Phase 1 pair training: cpu, cuda, or cuda:0")
     phase1_train_pair_self_labeling_parser.add_argument("--checkpoint-every", type=int, default=100, help="Save periodic checkpoint every N episodes")
