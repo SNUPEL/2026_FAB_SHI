@@ -218,6 +218,19 @@ python main.py phase2-train-batch-machine-self-labeling \
   --output-dir output/phase2_mixed
 ```
 
+Phase 2는 매 checkpoint마다 **두 개의 고정 validation**을 수행합니다.
+
+- **MAIN validation (정식 지표, in-distribution)** — 학습분포(블록 `--min-blocks..--max-blocks`,
+  target-matching 없는 자연표본)의 고정 문제. `<output>/validation/`에 기록하며 **best checkpoint 선택
+  기준**입니다. `--main-validation-{min-blocks,max-blocks,block-gap,episodes}`로 조정(기본값은 학습 블록범위와
+  `--validation-episodes`).
+- **generalization test (리포팅 전용)** — 기존 `--validation-*` 플래그가 만드는 넓은 grid(예: blocks 10-100,
+  distribution-type target-matched). `<output>/validation_generalization/`에 기록하며 best 선택에는 관여하지
+  않습니다.
+
+MAIN validation 문제는 held-out seed로 생성되어 **학습 데이터·generalization 문제와 겹치지 않음이 보장**되며
+(학습 시작 시 `validation_overlap_check`로 assert), 겹치면 즉시 오류를 냅니다.
+
 Phase 1 checkpoint를 upstream으로 고정할 때는 `--phase1-heuristic` 대신 다음을
 사용합니다.
 

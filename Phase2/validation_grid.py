@@ -22,6 +22,17 @@ _DISTRIBUTION_FIELDS = (
 )
 
 
+# MAIN(in-distribution) validation seed 배치 상수.
+# main.py의 학습 episode 문제 생성 seed는 `seed + k*EPISODE_SEED_STRIDE`(k>=1)이고
+# 일반화 grid seed는 `seed + VALIDATION_SEED_OFFSET(=10_000_000)` 이상이다. MAIN seed는
+# `(seed, seed+EPISODE_SEED_STRIDE)` 구간 안에만 놓여야 학습/일반화 seed와 완전히 분리된다.
+MAIN_VALIDATION_SEED_OFFSET = 500_000
+MAIN_VALIDATION_SEED_STRIDE = 7919
+# main.py.EPISODE_SEED_STRIDE와 동일한 값. import 순환을 피하려고 로컬 상수로 두되
+# 의미가 다르면 안 되므로 값을 하드코딩하지 않았음을 주석으로 명시한다.
+EPISODE_SEED_STRIDE = 1_000_003
+
+
 @dataclass(frozen=True)
 class Phase2ValidationProblem:
     """한 번 생성한 뒤 모든 validation checkpoint에서 재사용하는 상위 문제."""
@@ -113,6 +124,92 @@ def build_phase2_validation_grid(
         "[VALIDATION][Phase2.validation_grid.build_phase2_validation_grid] "
         f"passed=true block_sizes={list(block_sizes)} types={type_count} "
         f"problems={len(problems)} candidates_per_size={candidate_count}"
+    )
+    return tuple(problems)
+
+
+def build_phase2_main_validation_grid(
+    problem_factory: Callable[[int, int], Mapping[str, object]],
+    min_blocks: int,
+    max_blocks: int,
+    block_gap: int,
+    type_count: int,
+    seed: int,
+) -> tuple[Phase2ValidationProblem, ...]:
+    """학습 분포와 동일한 in-distribution MAIN validation 문제를 고정 생성한다.
+
+    일반화 grid(`build_phase2_validation_grid`)와 달리 분포 목표 매칭이 없다.
+    (block_size, distribution_type)마다 자연 표본 1개를 held-out seed로 뽑아
+    고유한 문제를 만든다. best-checkpoint 선택은 이 MAIN 문제집합이 담당한다.
+    """
+
+    block_sizes = _inclusive_block_sizes(min_blocks, max_blocks, block_gap)
+    if type_count <= 0:
+        print(
+            "[ERROR][Phase2.validation_grid.build_phase2_main_validation_grid] "
+            f"cause=invalid_type_count value={type_count}"
+        )
+        raise RuntimeError("main validation type_count must be positive")
+
+    num_sizes = len(block_sizes)
+    max_offset = (
+        MAIN_VALIDATION_SEED_OFFSET
+        + (num_sizes * type_count - 1) * MAIN_VALIDATION_SEED_STRIDE
+    )
+    # fail-fast: 가장 큰 MAIN seed offset이 EPISODE_SEED_STRIDE 미만이어야
+    # 모든 MAIN seed가 (seed, seed+EPISODE_SEED_STRIDE) 구간 안에 놓여 학습 episode
+    # seed 및 일반화 grid seed와 반드시 disjoint 하다.
+    if max_offset >= EPISODE_SEED_STRIDE:
+        print(
+            "[ERROR][Phase2.validation_grid.build_phase2_main_validation_grid] "
+            f"cause=main_validation_grid_too_large num_sizes={num_sizes} type_count={type_count} "
+            f"max_offset={max_offset} episode_seed_stride={EPISODE_SEED_STRIDE}"
+        )
+        raise RuntimeError(
+            "main validation grid too large: reduce --main-validation block range or "
+            "--main-validation-episodes so its seed span stays below EPISODE_SEED_STRIDE"
+        )
+
+    problems: list[Phase2ValidationProblem] = []
+    for size_index, block_count in enumerate(block_sizes):
+        for distribution_type in range(1, type_count + 1):
+            type_index = distribution_type
+            held_out_seed = (
+                seed
+                + MAIN_VALIDATION_SEED_OFFSET
+                + size_index * type_count * MAIN_VALIDATION_SEED_STRIDE
+                + (type_index - 1) * MAIN_VALIDATION_SEED_STRIDE
+            )
+            candidate = _build_candidate(problem_factory, block_count, held_out_seed)
+            problem_id = f"M{block_count:03d}_T{distribution_type:02d}"
+            metadata = dict(candidate["metadata"])
+            metadata.update(
+                {
+                    "problem_id": problem_id,
+                    "physical_block_count": block_count,
+                    "distribution_type": distribution_type,
+                    "generation_seed": candidate["generation_seed"],
+                    "input_contract": "in_distribution_main",
+                }
+            )
+            problems.append(
+                Phase2ValidationProblem(
+                    problem_id=problem_id,
+                    block_count=block_count,
+                    distribution_type=distribution_type,
+                    generation_seed=int(candidate["generation_seed"]),
+                    target_distribution={},
+                    normalized_distribution={},
+                    actual_distribution={},
+                    jobs=candidate["jobs"],
+                    metadata=metadata,
+                )
+            )
+
+    print(
+        "[VALIDATION][Phase2.validation_grid.build_phase2_main_validation_grid] "
+        f"passed=true block_sizes={list(block_sizes)} types={type_count} "
+        f"problems={len(problems)}"
     )
     return tuple(problems)
 

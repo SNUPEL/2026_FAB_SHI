@@ -58,7 +58,10 @@ from Phase2.merged import (
     phase2_score_field_names,
     train_phase2_batch_machine_self_labeling,
 )
-from Phase2.validation_grid import build_phase2_validation_grid
+from Phase2.validation_grid import (
+    build_phase2_validation_grid,
+    build_phase2_main_validation_grid,
+)
 from Phase2.run_spec import build_phase2_run_spec, require_matching_phase2_run_spec
 from Phase1.pair_self_labeling import (
     run_phase1_pair_policy_resource_pool_best_of_k,
@@ -429,7 +432,41 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
             verbose=False,
         )[0]
 
-    validation_problems = (
+    # MAIN(PRIMARY) validation: 학습 분포와 동일한 in-distribution 문제집합.
+    # best-checkpoint 선택과 <output>/validation/를 담당한다.
+    # 기본값은 학습 분포와 동일하게 맞춘다(min/max = 학습 블록 범위, types = validation_episodes).
+    main_validation_min = (
+        args.min_blocks if args.main_validation_min_blocks is None else args.main_validation_min_blocks
+    )
+    main_validation_max = (
+        args.max_blocks if args.main_validation_max_blocks is None else args.main_validation_max_blocks
+    )
+    main_validation_gap = args.main_validation_block_gap
+    main_validation_episodes = (
+        args.validation_episodes
+        if args.main_validation_episodes is None
+        else args.main_validation_episodes
+    )
+    print(
+        "- main_validation_block_grid: "
+        f"{main_validation_min}..{main_validation_max} gap={main_validation_gap} "
+        f"types={main_validation_episodes}"
+    )
+    main_validation_problems = (
+        build_phase2_main_validation_grid(
+            problem_factory=validation_problem_factory,
+            min_blocks=main_validation_min,
+            max_blocks=main_validation_max,
+            block_gap=main_validation_gap,
+            type_count=main_validation_episodes,
+            seed=args.seed,
+        )
+        if main_validation_episodes > 0
+        else ()
+    )
+    # GENERALIZATION(SECONDARY) validation: 넓은 블록 크기 grid. 리포팅 전용으로
+    # <output>/validation_generalization/에만 기록되며 best-checkpoint 선택에는 관여하지 않는다.
+    generalization_validation_problems = (
         build_phase2_validation_grid(
             problem_factory=validation_problem_factory,
             min_blocks=args.validation_min_blocks,
@@ -441,7 +478,38 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
         if args.validation_episodes > 0
         else ()
     )
-    print(f"- validation_problem_count: {len(validation_problems)}")
+    print(f"- main_validation_problem_count: {len(main_validation_problems)}")
+    print(f"- generalization_validation_problem_count: {len(generalization_validation_problems)}")
+
+    # Overlap 검증: MAIN seed는 학습 episode seed와 일반화 grid seed 모두와 disjoint 여야 한다.
+    # 학습 문제 생성 seed = {args.seed + k*EPISODE_SEED_STRIDE : k=0..episodes}.
+    main_validation_seeds = {problem.generation_seed for problem in main_validation_problems}
+    generalization_validation_seeds = {
+        problem.generation_seed for problem in generalization_validation_problems
+    }
+    training_episode_seeds = {
+        args.seed + episode_index * EPISODE_SEED_STRIDE
+        for episode_index in range(0, args.episodes + 1)
+    }
+    train_overlap = main_validation_seeds & training_episode_seeds
+    generalization_overlap = main_validation_seeds & generalization_validation_seeds
+    if train_overlap or generalization_overlap:
+        print(
+            "[ERROR][main.command_phase2_train_batch_machine_self_labeling] "
+            f"cause=main_validation_seed_overlap train_overlap={sorted(train_overlap)} "
+            f"generalization_overlap={sorted(generalization_overlap)}"
+        )
+        raise RuntimeError("main validation seeds must be disjoint from training and generalization seeds")
+    if main_validation_seeds:
+        print(
+            f"- main_validation_seed_range: {min(main_validation_seeds)}..{max(main_validation_seeds)}"
+        )
+    else:
+        print("- main_validation_seed_range: (empty)")
+    print(
+        "- validation_overlap_check: passed "
+        "(main ∩ train = 0, main ∩ generalization = 0)"
+    )
 
     print(f"- candidate_workers: {args.candidate_workers}")
     candidate_executor = create_phase2_candidate_executor(args.candidate_workers)
@@ -468,7 +536,8 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
             episode_job_factory=episode_job_factory,
             validation_episode_jobs=None,
             validation_episode_job_factory=None,
-            validation_problems=validation_problems or None,
+            validation_problems=main_validation_problems or None,
+            secondary_validation_problems=generalization_validation_problems or None,
             phase1_heuristic=phase1_heuristic,
             phase1_bay_ids=phase1_bay_ids,
             phase1_assignment_builder=phase1_assignment_builder,
@@ -477,6 +546,7 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
             write_candidate_summary=args.write_candidate_summary,
             score_mode=args.phase2_score_mode,
             resume_checkpoint=args.resume_checkpoint,
+            eval_only=args.eval_only,
             constraint_profile=phase2_constraint_profile,
             candidate_workers=args.candidate_workers,
             candidate_executor=candidate_executor,
@@ -487,6 +557,15 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
     finally:
         if candidate_executor is not None:
             candidate_executor.shutdown(wait=True, cancel_futures=True)
+    if summary.get("eval_only"):
+        print(f"- eval_only: True")
+        print(f"- eval_episode: {summary['eval_episode']}")
+        print(f"- resume_checkpoint: {summary['resume_checkpoint']}")
+        print(f"- validation_root: {summary['validation_root']}")
+        print(f"- validation_problem_count: {summary['validation_problem_count']}")
+        print(f"- generalization_validation_root: {summary['generalization_validation_root']}")
+        print(f"- summary_json: {summary['summary_json']}")
+        return
     print(f"- job_count: {summary['job_count']}")
     print(f"- machine_count: {summary['machine_count']}")
     print(f"- feature_schema_version: {summary['feature_schema_version']}")
@@ -1398,11 +1477,42 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Inclusive physical block-count interval in the fixed Phase 2 validation grid.",
     )
+    phase2_train_graph_parser.add_argument(
+        "--main-validation-min-blocks",
+        type=int,
+        default=None,
+        help="Minimum physical block count in the MAIN (in-distribution) validation grid. Default follows --min-blocks.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--main-validation-max-blocks",
+        type=int,
+        default=None,
+        help="Maximum physical block count in the MAIN (in-distribution) validation grid. Default follows --max-blocks.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--main-validation-block-gap",
+        type=int,
+        default=5,
+        help="Inclusive physical block-count interval in the MAIN (in-distribution) validation grid.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--main-validation-episodes",
+        type=int,
+        default=None,
+        help="Natural samples (distribution Types) per block size in the MAIN validation grid. Default follows --validation-episodes.",
+    )
     phase2_train_graph_parser.add_argument("--checkpoint-every", type=int, default=0, help="Save periodic Phase 2 checkpoint every N episodes. 0 disables periodic checkpoints.")
     phase2_train_graph_parser.add_argument(
         "--resume-checkpoint",
         default=None,
         help="Resume merged Phase 2 training from explicit checkpoint path or 'latest' in output-dir/checkpoints.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate an already-trained checkpoint (--resume-checkpoint) on the fixed validation grids once, "
+        "with no training loop and no optimizer step (weights unchanged). Writes validation/ (and "
+        "validation_generalization/) histories only; does not select or save a best checkpoint.",
     )
     phase2_train_graph_parser.add_argument(
         "--write-candidate-summary",
