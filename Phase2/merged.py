@@ -51,6 +51,7 @@ from Phase2.state import (
 )
 from Utils.data.multi_series_cutting_data import MIXED_PLANNING_MACHINE_IDS_BY_BAY
 from Utils.learning.phase_graph_mdp import _processing_time, _required_non_negative, build_phase2_wo_machine_graph
+from Utils.learning.run_manifest import summarize_validation_contract, write_run_manifest
 
 
 PHASE2_BATCH_MACHINE_SCORE_FIELD_NAMES = list(PHASE2_RAW_SCORE_FIELD_NAMES)
@@ -237,6 +238,8 @@ def train_phase2_batch_machine_self_labeling(
     temperature: float = 1.0,
     temperature_min: float | None = None,
     temperature_anneal_episodes: int | None = None,
+    validation_temperature: float | None = None,
+    run_manifest_fields: Mapping[str, object] | None = None,
 ) -> Dict:
     """Self-labeling으로 통합 Phase 2 batch-machine policy를 학습한다."""
 
@@ -463,6 +466,69 @@ def train_phase2_batch_machine_self_labeling(
     print(f"- temperature: {temperature}")
     print(f"- temperature_min: {resolved_temperature_min}")
     print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
+    # validation/eval에서 agent_sample 후보를 뽑는 온도. None이면 기존처럼 학습 스케줄의
+    # 현재 온도를 그대로 쓴다. 값을 주면 학습 arm이 달라도 채점 온도는 같아지므로,
+    # 서로 다른 temperature 설정을 비교할 때 평가 자체가 교란되지 않는다.
+    resolved_validation_temperature = _resolve_validation_temperature(validation_temperature)
+    print(
+        "- validation_temperature: "
+        + (
+            "follows_training_schedule"
+            if resolved_validation_temperature is None
+            else str(resolved_validation_temperature)
+        )
+    )
+
+    def _validation_sampling_temperature(current_temperature: float) -> float:
+        """평가용 sampling 온도를 고정값(지정 시) 또는 학습 스케줄 값으로 정한다."""
+
+        if resolved_validation_temperature is None:
+            return current_temperature
+        return resolved_validation_temperature
+
+    if run_manifest_fields is not None:
+        write_run_manifest(
+            output_path,
+            cli_fields=run_manifest_fields,
+            run_spec=run_spec,
+            run_spec_source="phase2_run_spec",
+            validation={
+                "main": summarize_validation_contract(
+                    validation_contract if resolved_validation_problems else None,
+                    fixed_grid=bool(resolved_validation_problems),
+                    seed=seed,
+                    note="phase2 in-distribution grid; drives best-checkpoint selection",
+                ),
+                "generalization": summarize_validation_contract(
+                    phase2_validation_grid_contract(resolved_secondary_validation_problems)
+                    if resolved_secondary_validation_problems
+                    else None,
+                    fixed_grid=bool(resolved_secondary_validation_problems),
+                    seed=seed,
+                    note="phase2 reporting-only grid",
+                ),
+                "validation_temperature": resolved_validation_temperature,
+                "validation_rollout_samples": resolved_validation_rollout_samples,
+                "validation_every": validation_every,
+            },
+            extra={
+                "device": str(torch_device),
+                "seed": seed,
+                "episodes": episodes,
+                "start_episode": start_episode,
+                "eval_only": bool(eval_only),
+                "resume_checkpoint": str(resume_path) if resume_path is not None else "",
+                "resumed_from_episode": resumed_from_episode,
+                "temperature": temperature,
+                "temperature_min": resolved_temperature_min,
+                "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+                "lr": lr,
+                "hidden_dim": hidden_dim,
+                "score_mode": score_mode,
+                "phase1_heuristic": phase1_heuristic or "",
+                "candidate_workers": candidate_workers,
+            },
+        )
 
     def _run_phase2_validation_cycle(
         *,
@@ -739,8 +805,15 @@ def train_phase2_batch_machine_self_labeling(
             )
             raise RuntimeError("eval_only requires at least one validation problem set")
         eval_episode = resumed_from_episode if resumed_from_episode > 0 else start_episode
-        eval_temperature = annealed_temperature(
-            eval_episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+        eval_temperature = _validation_sampling_temperature(
+            annealed_temperature(
+                eval_episode, temperature, resolved_temperature_min, resolved_temperature_anneal_episodes
+            )
+        )
+        print(
+            "[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] "
+            f"eval_only=true eval_episode={eval_episode} eval_temperature={eval_temperature:.4f} "
+            f"validation_temperature_fixed={str(resolved_validation_temperature is not None).lower()}"
         )
         if resolved_validation_problems:
             _run_phase2_validation_cycle(
@@ -776,6 +849,20 @@ def train_phase2_batch_machine_self_labeling(
             ),
             "secondary_validation_problem_count": len(resolved_secondary_validation_problems),
             "summary_json": str(summary_json),
+            # 아래는 재평가 디렉터리가 자기 채점 조건을 스스로 증명하기 위한 값이다.
+            # 이것이 없으면 eval 결과만 보고는 어떤 계약/온도로 채점했는지 알 수 없다.
+            "run_spec": run_spec,
+            "validation_contract": validation_contract,
+            "score_mode": score_mode,
+            "heuristic_algorithms": list(heuristic_algorithms),
+            "rollout_samples": rollout_samples,
+            "validation_rollout_samples": resolved_validation_rollout_samples,
+            "temperature": temperature,
+            "temperature_min": resolved_temperature_min,
+            "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+            "validation_temperature": resolved_validation_temperature,
+            "eval_temperature": eval_temperature,
+            "device": str(torch_device),
         }
         summary_json.write_text(
             json.dumps(eval_summary, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -852,7 +939,7 @@ def train_phase2_batch_machine_self_labeling(
             # PRIMARY(MAIN, in-distribution): best-checkpoint 선택을 담당한다.
             primary_result = _run_phase2_validation_cycle(
                 episode=episode,
-                current_temperature=current_temperature,
+                current_temperature=_validation_sampling_temperature(current_temperature),
                 problems=resolved_validation_problems,
                 root=validation_root,
                 select_best=True,
@@ -866,7 +953,7 @@ def train_phase2_batch_machine_self_labeling(
             # SECONDARY(GENERALIZATION): 리포팅 전용. best-checkpoint 선택에 관여하지 않는다.
             _run_phase2_validation_cycle(
                 episode=episode,
-                current_temperature=current_temperature,
+                current_temperature=_validation_sampling_temperature(current_temperature),
                 problems=resolved_secondary_validation_problems,
                 root=generalization_root,
                 select_best=False,
@@ -979,6 +1066,7 @@ def train_phase2_batch_machine_self_labeling(
         "temperature": temperature,
         "temperature_min": resolved_temperature_min,
         "temperature_anneal_episodes": resolved_temperature_anneal_episodes,
+        "validation_temperature": resolved_validation_temperature,
         "device": str(torch_device),
         "run_spec": run_spec,
     }
@@ -1016,6 +1104,28 @@ def create_phase2_candidate_executor(candidate_workers: int) -> ProcessPoolExecu
         mp_context=multiprocessing.get_context("spawn"),
         initializer=_initialize_phase2_candidate_worker,
     )
+
+
+def _resolve_validation_temperature(validation_temperature: float | None) -> float | None:
+    """평가용 고정 sampling 온도를 검증한다. None이면 학습 스케줄을 그대로 따른다."""
+
+    if validation_temperature is None:
+        return None
+    try:
+        value = float(validation_temperature)
+    except (TypeError, ValueError) as exc:
+        print(
+            "[ERROR][Phase2.merged._resolve_validation_temperature] "
+            f"cause=invalid_validation_temperature value={validation_temperature!r}"
+        )
+        raise ValueError("validation_temperature must be a positive number") from exc
+    if not math.isfinite(value) or value <= 0:
+        print(
+            "[ERROR][Phase2.merged._resolve_validation_temperature] "
+            f"cause=non_positive_validation_temperature value={validation_temperature!r}"
+        )
+        raise ValueError("validation_temperature must be a positive number")
+    return value
 
 
 def annealed_temperature(episode: int, t0: float, t_min: float, anneal_episodes: int) -> float:

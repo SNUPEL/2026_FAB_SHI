@@ -88,6 +88,7 @@ from Utils.learning.phase_agent_checkpoints import (
     load_phase2_checkpoint_run_spec,
     load_phase2_set_pointer_checkpoint,
 )
+from Utils.learning.run_manifest import cli_manifest_fields
 from Utils.phase1.phase1_episode_dataset import build_phase1_episode_jobs
 from Utils.phase1.phase1_bay_balancer import write_phase1_bay_plan
 from Utils.phase1.multi_series_planner import (
@@ -316,6 +317,11 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         device=args.device,
         objective_scope=args.objective_scope,
         write_candidate_summary=args.write_candidate_summary,
+        run_manifest_fields=cli_manifest_fields(
+            args,
+            command="phase1-train-pair-self-labeling",
+            phase="phase1",
+        ),
     )
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
@@ -558,6 +564,12 @@ def command_phase2_train_batch_machine_self_labeling(args: argparse.Namespace) -
             temperature=args.temperature,
             temperature_min=args.temperature_min,
             temperature_anneal_episodes=args.temperature_anneal_episodes,
+            validation_temperature=args.validation_temperature,
+            run_manifest_fields=cli_manifest_fields(
+                args,
+                command="phase2-train-batch-machine-self-labeling",
+                phase="phase2",
+            ),
         )
     finally:
         if candidate_executor is not None:
@@ -1279,6 +1291,34 @@ def build_parser() -> argparse.ArgumentParser:
     # LINE-BY-LINE: `common_parser`에 `argparse.ArgumentParser(add_help=False)` 결과를 저장합니다. 의미/사용: `common_parser` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--config", default="config_mixed.yaml", help="YAML config path")
+    # 여러 사람이 arm을 나눠 실행한 뒤 결과를 합쳐 비교하기 위한 실험 identity 인자다.
+    # 값은 학습에 영향을 주지 않으며 run_manifest.json에만 기록된다.
+    experiment_parser = argparse.ArgumentParser(add_help=False)
+    experiment_parser.add_argument(
+        "--experiment-id",
+        default="",
+        help="Campaign identifier shared by every arm of one comparison (recorded in run_manifest.json).",
+    )
+    experiment_parser.add_argument(
+        "--arm-group",
+        default="",
+        help="Name of the comparison group this run belongs to (e.g. phase2_temperature).",
+    )
+    experiment_parser.add_argument(
+        "--arm-label",
+        default="",
+        help="Label of this arm inside the group (e.g. anneal, constant). Used as the run label when comparing.",
+    )
+    experiment_parser.add_argument(
+        "--owner",
+        default="",
+        help="Person responsible for this run. Defaults to $USER when omitted.",
+    )
+    experiment_parser.add_argument(
+        "--run-note",
+        default="",
+        help="Free-form note stored in run_manifest.json.",
+    )
     # LINE-BY-LINE: `subparsers`에 `parser.add_subparsers(dest="command", required=True)` 결과를 저장합니다. 의미/사용: `subparsers` 값입니다. 사용: 이후 같은 함수/블록에서 계산, 검증, 출력에 참조됩니다.
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1306,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     phase1_train_pair_self_labeling_parser = subparsers.add_parser(
         "phase1-train-pair-self-labeling",
-        parents=[common_parser],
+        parents=[common_parser, experiment_parser],
         help="Train the MIXED physical-block SELECT_PAIR(block-series,bay) policy",
     )
     phase1_train_pair_self_labeling_parser.add_argument("--min-blocks", type=int, default=12, help="Minimum physical blocks per episode")
@@ -1390,7 +1430,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     phase2_train_graph_parser = subparsers.add_parser(
         "phase2-train-batch-machine-self-labeling",
-        parents=[common_parser],
+        parents=[common_parser, experiment_parser],
         help="Train MIXED merged Phase 2 batch-machine policy",
     )
     phase2_train_graph_parser.add_argument(
@@ -1465,6 +1505,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Episodes over which temperature decays from --temperature to --temperature-min. Default: --episodes.",
+    )
+    phase2_train_graph_parser.add_argument(
+        "--validation-temperature",
+        type=float,
+        default=None,
+        help="Fixed sampling temperature for validation/eval agent_sample candidates. Omit to follow the "
+        "training temperature schedule (legacy behaviour). Set the same value on every arm when comparing "
+        "runs, otherwise different temperature schedules are scored under different sampling conditions.",
     )
     phase2_train_graph_parser.add_argument(
         "--rollout-samples_validation",

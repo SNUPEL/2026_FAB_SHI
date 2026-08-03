@@ -1,0 +1,80 @@
+
+const cv=n=>getComputedStyle(document.getElementById('app')).getPropertyValue(n).trim();
+const fmt=(v,d=0)=>v==null?'–':Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+function roll(pts,w){let out=[],q=[],s=0;for(const[x,y]of pts){q.push(y);s+=y;if(q.length>w)s-=q.shift();out.push([x,s/q.length]);}return out;}
+function niceTicks(lo,hi,n=6){const span=(hi-lo)||1,raw=span/n,mag=Math.pow(10,Math.floor(Math.log10(raw))),norm=raw/mag,step=(norm<1.5?1:norm<3?2:norm<7?5:10)*mag;const out=[];for(let v=Math.ceil(lo/step)*step;v<=hi+step*1e-6;v+=step)out.push(Math.round(v));return out.length?out:[Math.round(lo),Math.round(hi)];}
+
+function chart(id,cfg){
+  const svg=document.getElementById(id),W=760,H=cfg.h||280,m={t:14,r:cfg.mr||58,b:38,l:cfg.ml||52};
+  svg.setAttribute('viewBox',`0 0 ${W} ${H}`);const iw=W-m.l-m.r,ih=H-m.t-m.b;
+  const S=cfg.series.filter(s=>s.points.length);const xs=S.flatMap(s=>s.points.map(p=>p[0])),ys=S.flatMap(s=>s.points.map(p=>p[1]));
+  let xmn=Math.min(...xs),xmx=Math.max(...xs),ymn=cfg.ymin!=null?cfg.ymin:Math.min(...ys),ymx=cfg.ymax!=null?cfg.ymax:Math.max(...ys);
+  if(ymn===ymx)ymx=ymn+1;if(cfg.ymin==null)ymn-=(ymx-ymn)*.08;if(cfg.ymax==null)ymx+=(ymx-ymn)*.08;if(cfg.ymin===0)ymn=0;if(xmn===xmx)xmx=xmn+1;
+  const X=v=>m.l+(v-xmn)/(xmx-xmn)*iw,Y=v=>m.t+ih-(v-ymn)/(ymx-ymn)*ih,NS='http://www.w3.org/2000/svg';
+  const el=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;};svg.textContent='';
+  for(let i=0;i<=4;i++){const val=ymn+(ymx-ymn)*i/4,y=Y(val);svg.appendChild(el('line',{class:'gl',x1:m.l,x2:m.l+iw,y1:y,y2:y}));const tx=el('text',{class:'axl',x:m.l-7,y:y+3.5,'text-anchor':'end'});tx.textContent=cfg.yf?cfg.yf(val):fmt(val,(ymx-ymn)<6?1:0);svg.appendChild(tx);}
+  const xt=niceTicks(xmn,xmx);xt.forEach(v=>{const x=X(v);svg.appendChild(el('line',{class:'al',x1:x,x2:x,y1:m.t+ih,y2:m.t+ih+4}));const tx=el('text',{class:'axl',x:x,y:m.t+ih+17,'text-anchor':'middle'});tx.textContent=fmt(v);svg.appendChild(tx);});
+  svg.appendChild(el('line',{class:'al',x1:m.l,x2:m.l+iw,y1:m.t+ih,y2:m.t+ih}));
+  const xtl=el('text',{class:'axt',x:m.l+iw/2,y:H-3,'text-anchor':'middle'});xtl.textContent=cfg.xt||'episode';svg.appendChild(xtl);
+  const path=(pts,a)=>{let d='';pts.forEach((p,i)=>d+=(i?'L':'M')+X(p[0]).toFixed(1)+' '+Y(p[1]).toFixed(1)+' ');svg.appendChild(el('path',Object.assign({d,fill:'none','stroke-linejoin':'round','stroke-linecap':'round'},a)));};
+  S.forEach(s=>{if(s.faint)path(s.points,{stroke:s.color,'stroke-width':1,opacity:.18});});
+  S.forEach(s=>{if(s.faint)return;path(s.points,{stroke:s.color,'stroke-width':s.w||2.4,'stroke-dasharray':s.dash?'5 4':''});if(s.markers)s.points.forEach(p=>svg.appendChild(el('circle',{cx:X(p[0]),cy:Y(p[1]),r:3.5,fill:s.color,stroke:cv('--s1'),'stroke-width':2})));});
+  const ch=el('line',{class:'ch',y1:m.t,y2:m.t+ih});svg.appendChild(ch);const HS=S.filter(s=>!s.faint&&s.hover!==false);
+  const dots=HS.map(s=>{const c=el('circle',{class:'hd',r:4,fill:s.color,opacity:0});svg.appendChild(c);return c;});
+  const tip=document.getElementById('tip'),ov=el('rect',{x:m.l,y:m.t,width:iw,height:ih,fill:'transparent',style:'cursor:crosshair'});svg.appendChild(ov);
+  ov.addEventListener('mousemove',ev=>{const r=svg.getBoundingClientRect(),sx=(ev.clientX-r.left)/r.width*W,xv=xmn+(sx-m.l)/iw*(xmx-xmn);let rows='';
+    HS.forEach((s,i)=>{let b=s.points[0],bd=1e18;s.points.forEach(p=>{const dd=Math.abs(p[0]-xv);if(dd<bd){bd=dd;b=p;}});dots[i].setAttribute('cx',X(b[0]));dots[i].setAttribute('cy',Y(b[1]));dots[i].setAttribute('opacity',1);if(i===0){ch.setAttribute('x1',X(b[0]));ch.setAttribute('x2',X(b[0]));ch.setAttribute('opacity',1);}rows+=`<div class="tt-r"><span class="k"><span class="sw" style="background:${s.color}"></span>${s.name}</span><span class="v">${cfg.tf?cfg.tf(b[1]):fmt(b[1],1)}</span></div>`;});
+    const b0=HS[0].points.reduce((a,p)=>Math.abs(p[0]-xv)<Math.abs(a[0]-xv)?p:a);tip.innerHTML=`<div class="tt-x">${cfg.xt||'ep'} ${fmt(b0[0])}</div>`+rows;tip.style.opacity=1;tip.style.left=Math.min(ev.clientX+14,innerWidth-160)+'px';tip.style.top=(ev.clientY-10)+'px';});
+  ov.addEventListener('mouseleave',()=>{tip.style.opacity=0;ch.setAttribute('opacity',0);dots.forEach(d=>d.setAttribute('opacity',0));});
+}
+function legend(id,items){document.getElementById(id).innerHTML=items.map(i=>`<span class="lg"><span class="sw" style="background:${i.c}"></span>${i.n}</span>`).join('');}
+
+function render(){
+  const C=D.cur,B=D.base,cc=cv('--c'),cb=cv('--b'),good=cv('--good');
+  if(!C){document.getElementById('ep').textContent='대기';return;}
+  const M=C.meta,days=h=>h==null?'–':h>=48?`~${Math.round(h/24)}일`:`~${Math.round(h)}h`;
+  document.getElementById('ep').textContent=fmt(C.current_ep);
+  document.getElementById('bar').style.width=Math.max(1,M.progress_pct)+'%';
+  const dot=document.getElementById('dot');
+  if(M.running===false){dot.style.background=cv('--ink3');dot.style.animation='none';document.getElementById('ctx').innerHTML=`${M.progress_pct}% · <strong>중단/완료</strong>`;}
+  else document.getElementById('ctx').innerHTML=`${M.progress_pct}% · ${fmt(M.elapsed_h,1)}h · ETA ${days(M.eta_h)} <span style="opacity:.7">(${M.sec_per_ep}s/ep)</span>`;
+  const vl=C.val.length?C.val[C.val.length-1]:null;
+  document.getElementById('br').textContent=vl?vl.best_rate+'%':'–';
+  document.getElementById('brc').textContent=vl?`일반화 grid · ep${vl.ep} · rank ${vl.mean_rank}`:'–';
+  const IND=C.indist;
+  document.getElementById('ind').textContent=IND?IND.rate+'%':'–';
+  document.getElementById('indc').textContent=IND?`ep${IND.ep} · rank ${IND.mean_rank} · n=${IND.n}`:'학습분포 전용 (main validation)';
+  const gl=C.greedy.length?C.greedy[C.greedy.length-1][1]:0;
+  document.getElementById('gr').textContent=gl+'%';
+  document.getElementById('curT').textContent=M.temperature!=null?M.temperature.toFixed(2):'–';
+  const hvm=Math.max(0,...C.hv.map(p=>p[1]));document.getElementById('hv').textContent=hvm===0?'0':hvm;
+  document.getElementById('hvc').textContent=hvm===0?C.hv.length+' 표본 위반 0':'최대 위반';
+
+  const cg=cv('--ink3');
+  legend('lg-g',[{n:'agent 64종 (greedy 포함)',c:cb},{n:'agent_greedy (1)',c:cc},{n:'휴리스틱',c:cg}]);
+  chart('c-greedy',{ymin:0,ymax:100,yf:v=>fmt(v,0)+'%',tf:v=>fmt(v,1)+'%',series:[
+    {name:'agent 64종',color:cb,points:C.sample||[],w:2.2},
+    {name:'agent_greedy',color:cc,points:C.greedy,w:2.6},
+    {name:'휴리스틱',color:cg,points:C.heur||[],w:2.0}]});
+
+  const BAYC={'22':'#3987e5','23':'#eb6834','24':'#1baf7a','25':'#eda100','trans':'#e87ba4'},BAYS=['22','23','24','25','trans'],ci=cv('--ink'),blab=b=>b==='trans'?'trans':'Bay '+b;
+  const valChart=(svgId,legId,data)=>{
+    legend(legId,[...BAYS.map(b=>({n:blab(b),c:BAYC[b]})),{n:'overall(합계)',c:ci}]);
+    chart(svgId,{ymin:0,ymax:100,xt:'train episode',yf:v=>fmt(v,0)+'%',tf:v=>fmt(v,1)+'%',series:[
+      ...BAYS.map(b=>({name:blab(b),color:BAYC[b],points:data.filter(v=>v[b]!=null).map(v=>[v.ep,v[b]]),w:1.8,markers:true})),
+      {name:'overall(합계)',color:ci,points:data.map(v=>[v.ep,v.overall]),w:3,markers:true}]});
+  };
+  valChart('c-valind','lg-vind',C.valind||[]);   // in-dist MAIN validation (정식 지표)
+  valChart('c-val','lg-v',C.val);                // generalization grid
+
+  legend('lg-l',[{n:'본학습',c:cc}]);
+  chart('c-loss',{ymin:0,tf:v=>fmt(v,3),series:[
+    {name:'raw',color:cc,points:C.loss,faint:true},
+    {name:'이동평균',color:cc,points:roll(C.loss,20),w:2.6}]});
+
+  chart('c-hv',{ymin:0,ymax:Math.max(2,hvm+1),h:200,mr:22,yf:v=>fmt(v,0),tf:v=>fmt(v,0),series:[{name:'hard violation',color:hvm===0?good:cc,points:C.hv,w:2.4}]});
+  document.getElementById('snap').textContent=`스냅샷: 본학습 ep ${C.current_ep}`;
+}
+document.getElementById('tt').addEventListener('click',()=>{const r=document.documentElement,c=r.getAttribute('data-theme'),dk=c?c==='dark':matchMedia('(prefers-color-scheme:dark)').matches;r.setAttribute('data-theme',dk?'light':'dark');setTimeout(render,20);});
+render();addEventListener('resize',()=>{clearTimeout(window.__t);window.__t=setTimeout(render,150);});
+</script>

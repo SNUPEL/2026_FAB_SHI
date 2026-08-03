@@ -1,0 +1,67 @@
+<title>{{TITLE}}</title>
+<div class="viz-root" id="app">
+  <header class="hdr">
+    <div>
+      <p class="eyebrow">{{EYEBROW}}</p>
+      <h1>{{TITLE}}</h1>
+      <p class="sub">{{SUB}}</p>
+    </div>
+    <button id="tt" class="theme-btn" aria-label="테마">◐</button>
+  </header>
+
+  <section class="tiles">
+    <div class="tile accent-c"><p class="t-label">본학습 진행 <span class="dot" id="dot"></span></p><p class="t-val" id="ep">–</p><div class="prog"><span id="bar"></span></div><p class="t-ctx" id="ctx">–</p></div>
+    <div class="tile good"><p class="t-label">in-dist MAIN best-rate</p><p class="t-val" id="ind">–</p><p class="t-ctx" id="indc">학습분포 전용 (main validation)</p></div>
+    <div class="tile accent-c"><p class="t-label">generalization best-rate</p><p class="t-val" id="br">–</p><p class="t-ctx" id="brc">일반화 grid (blocks 10-100)</p></div>
+    <div class="tile accent-c"><p class="t-label">agent_greedy 채택률 (takeover)</p><p class="t-val" id="gr">–</p><p class="t-ctx" id="grc">최근 이동평균 · T=<span id="curT">–</span></p></div>
+    <div class="tile good"><p class="t-label">제약 위반 (hard)</p><p class="t-val" id="hv">–</p><p class="t-ctx" id="hvc">전 구간</p></div>
+  </section>
+
+  <section class="card"><div class="card-head"><div><h2>agent 후보 채택률 <span class="unit">(per-Bay best-source, 이동평균)</span></h2><p class="card-sub">agent 후보 64개 = agent_greedy 1 + agent_sample 63(_2~_64). <strong style="color:var(--b)">파란 선</strong>=agent 64종(greedy 포함) 전체가 teacher-best를 차지한 비율(= agent가 휴리스틱을 이긴 비율), <strong style="color:var(--c)">주황 선</strong>=그중 agent_greedy 단독 비율, <strong style="color:var(--ink3)">회색 선</strong>=휴리스틱이 이긴 비율(=100−파란). 후반 T↓로 회색이 줄고 주황이 오르면 greedy takeover.</p></div><div class="legend" id="lg-g"></div></div><div class="chart-wrap"><svg id="c-greedy" class="chart"></svg></div></section>
+
+  <section class="card"><div class="card-head"><div><h2>in-dist MAIN validation best-rate <span class="unit">(정식 지표 · Bay subproblem별 + overall, %)</span></h2><p class="card-sub"><strong>학습분포 전용 validation</strong>(main). 학습분포(blocks 10-30, target-matching 없는 자연표본, held-out) 고정 grid의 각 Bay subproblem에서 proposed(best-of-K)가 1위인 비율. best checkpoint 선택 기준이 되는 지표. 본 run은 main-validation 도입 이전이라 저장 checkpoint를 사후 평가해 백필한 곡선(ep1000~20000).</p></div><div class="legend" id="lg-vind"></div></div><div class="chart-wrap"><svg id="c-valind" class="chart"></svg></div></section>
+
+  <section class="card"><div class="card-head"><div><h2>generalization validation best-rate <span class="unit">(일반화 테스트 · Bay subproblem별 + overall, %)</span></h2><p class="card-sub"><strong>일반화 성능 테스트</strong>(리포팅 전용, best 선택에 미사용). 넓은 grid(blocks 10-100, distribution-type target-matched)의 각 Bay subproblem에서 proposed(best-of-K)가 1위인 비율. 학습분포(10-30)보다 크게 벗어난 문제를 포함하므로 위 in-dist MAIN보다 낮게 나오는 것이 정상.</p></div><div class="legend" id="lg-v"></div></div><div class="chart-wrap"><svg id="c-val" class="chart"></svg></div></section>
+
+  <section class="card"><div class="card-head"><div><h2>학습 loss <span class="unit">(teacher-imitation CE, 이동평균)</span></h2><p class="card-sub">loss 절대값은 품질 지표가 아님. greedy가 teacher-best를 차지하기 시작하면 점프가 나타날 수 있음(정책이 뾰족해진 신호).</p></div><div class="legend" id="lg-l"></div></div><div class="chart-wrap"><svg id="c-loss" class="chart"></svg></div></section>
+
+  <section class="card"><div class="card-head"><div><h2>실행 가능성 <span class="unit">(episode별 hard violation)</span></h2><p class="card-sub">0 고정이어야 정상.</p></div></div><div class="chart-wrap"><svg id="c-hv" class="chart"></svg></div></section>
+
+  <footer class="ftr"><span>run: <code>{{RUNDIR}}</code></span><span id="snap"></span></footer>
+</div>
+<div id="tip" class="tooltip"></div>
+
+<style>
+  .viz-root{color-scheme:light;--s0:#e9edf2;--s1:#fff;--s2:#f4f6f9;--ink:#12161c;--ink2:#515b68;--ink3:#8b93a0;
+    --bd:rgba(18,22,28,.11);--grid:rgba(18,22,28,.075);--ax:rgba(18,22,28,.28);
+    --c:#2a78d6;--b:#eb6834;--good:#0a8a3f;--sh:0 1px 2px rgba(18,22,28,.06),0 8px 24px rgba(18,22,28,.05);
+    font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif;color:var(--ink);background:var(--s0);min-height:100vh;padding:clamp(16px,3.5vw,40px);-webkit-font-smoothing:antialiased;}
+  @media(prefers-color-scheme:dark){:root:where(:not([data-theme=light])) .viz-root{--s0:#0e1115;--s1:#171b21;--s2:#1e232b;--ink:#eef2f7;--ink2:#a7b0bd;--ink3:#6b7480;--bd:rgba(255,255,255,.10);--grid:rgba(255,255,255,.07);--ax:rgba(255,255,255,.24);--c:#3987e5;--b:#e06a3a;--good:#41b56d;--sh:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);}}
+  :root[data-theme=dark] .viz-root{--s0:#0e1115;--s1:#171b21;--s2:#1e232b;--ink:#eef2f7;--ink2:#a7b0bd;--ink3:#6b7480;--bd:rgba(255,255,255,.10);--grid:rgba(255,255,255,.07);--ax:rgba(255,255,255,.24);--c:#3987e5;--b:#e06a3a;--good:#41b56d;}
+  #app{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:clamp(14px,2vw,20px);}
+  .hdr{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;}
+  .eyebrow{font-size:11.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--c);font-weight:650;margin:0 0 6px;}
+  h1{font-size:clamp(20px,3vw,28px);margin:0;font-weight:700;letter-spacing:-.01em;} h1 .vs{color:var(--ink3);font-weight:500;font-size:.62em;}
+  .sub{margin:9px 0 0;color:var(--ink2);font-size:13.5px;line-height:1.55;max-width:70ch;} .sub strong{color:var(--ink);font-weight:650;}
+  .theme-btn{flex:none;width:38px;height:38px;border-radius:10px;border:1px solid var(--bd);background:var(--s1);color:var(--ink);font-size:17px;cursor:pointer;box-shadow:var(--sh);}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;}
+  .tile{background:var(--s1);border:1px solid var(--bd);border-radius:13px;padding:15px 16px;box-shadow:var(--sh);position:relative;overflow:hidden;}
+  .tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ink3);}
+  .accent-c::before{background:var(--c);} .good::before{background:var(--good);}
+  .t-label{margin:0;font-size:12px;color:var(--ink2);font-weight:550;} .t-val{margin:6px 0 3px;font-size:25px;font-weight:720;letter-spacing:-.02em;font-variant-numeric:tabular-nums;font-family:ui-monospace,Menlo,monospace;}
+  .t-ctx{margin:0;font-size:11.5px;color:var(--ink3);} .prog{height:5px;border-radius:3px;background:var(--s2);margin:8px 0 7px;overflow:hidden;} .prog span{display:block;height:100%;background:var(--c);}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--good);margin-left:4px;vertical-align:middle;animation:p 2s ease-in-out infinite;} @keyframes p{0%,100%{opacity:1}50%{opacity:.35}}
+  .card{background:var(--s1);border:1px solid var(--bd);border-radius:15px;padding:clamp(15px,2vw,22px);box-shadow:var(--sh);}
+  .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;margin-bottom:12px;}
+  h2{font-size:15.5px;margin:0;font-weight:670;} h2 .unit{font-weight:500;color:var(--ink3);font-size:12.5px;}
+  .card-sub{margin:6px 0 0;font-size:12.5px;color:var(--ink2);line-height:1.5;max-width:72ch;}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;} .lg{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink2);font-weight:550;} .lg .sw{width:20px;height:3px;border-radius:2px;}
+  .chart-wrap{width:100%;overflow-x:auto;} .chart{width:100%;height:auto;display:block;}
+  .axl{fill:var(--ink3);font-size:11px;font-variant-numeric:tabular-nums;} .axt{fill:var(--ink2);font-size:11px;font-weight:550;}
+  .gl{stroke:var(--grid);stroke-width:1;} .al{stroke:var(--ax);stroke-width:1;} .ch{stroke:var(--ax);stroke-width:1;stroke-dasharray:3 3;opacity:0;} .hd{stroke:var(--s1);stroke-width:2;}
+  .ftr{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--ink3);} .ftr code{font-family:ui-monospace,Menlo,monospace;color:var(--ink2);}
+  .tooltip{position:fixed;z-index:50;pointer-events:none;opacity:0;transition:opacity .1s;background:var(--s1);border:1px solid var(--bd);border-radius:9px;padding:8px 10px;box-shadow:var(--sh);font-size:12px;min-width:120px;}
+  .tt-x{font-size:11px;color:var(--ink3);margin-bottom:4px;} .tt-r{display:flex;gap:8px;justify-content:space-between;align-items:center;} .tt-r .k{display:inline-flex;align-items:center;gap:6px;color:var(--ink2);} .tt-r .sw{width:9px;height:9px;border-radius:2px;} .tt-r .v{font-weight:650;font-family:ui-monospace,Menlo,monospace;}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important;}}
+</style>
+<script>

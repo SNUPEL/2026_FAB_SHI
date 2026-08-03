@@ -76,6 +76,7 @@ from Phase1.heuristics import (
     PHASE1_HEURISTIC_BANK,
     run_phase1_heuristic_candidate,
 )
+from Utils.learning.run_manifest import summarize_validation_contract, write_run_manifest
 
 
 # MIXED pair 후보는 W/O-first 부하, 계열 그룹, NP hard mask 상태를 포함한다.
@@ -96,6 +97,9 @@ PHASE1_SCORE_FIELD_NAMES = [f"score_{index}" for index in range(6)]
 # LINE-BY-LINE: validation 그래프에서 agent_greedy와 agent_sample_* 중 최고 후보를 하나로 묶어 표시할 때 쓰는 source 이름입니다.
 PHASE1_PROPOSED_BEST_OF_K_SOURCE = "proposed_best_of_k"
 PHASE1_VALIDATION_VIEW_ORDER = ("NP", "NC", "NP_NC", "FN", "FL", "FN_FL")
+# validation 후보 sampling 온도. 학습 온도(--temperature)와 분리된 고정값이며, 이 값이
+# 학습 설정에 따라 흔들리면 서로 다른 arm의 checkpoint가 다른 조건으로 채점된다.
+PHASE1_VALIDATION_SAMPLING_TEMPERATURE = 1.0
 PHASE1_VALIDATION_GAP_FIELDS = tuple(
     f"{scope}_{metric}_gap"
     for scope in ("np", "nc", "np_nc", "fn", "fl", "fn_fl")
@@ -503,6 +507,7 @@ def train_phase1_pair_self_labeling(
     write_candidate_summary: bool = False,
     temperature_min: float | None = None,
     temperature_anneal_episodes: int | None = None,
+    run_manifest_fields: Mapping[str, object] | None = None,
 ) -> Dict:
     """Train one shared pair policy with independent resource-pool teachers.
 
@@ -581,6 +586,45 @@ def train_phase1_pair_self_labeling(
         start_episode = completed_episode + 1
         objective_scope_transition = previous_objective_scope != normalized_objective_scope
         _move_optimizer_state(optimizer, torch_device)
+    if run_manifest_fields is not None:
+        # Phase 1은 아직 run_spec도 고정 validation grid도 없다(Phase 2 parity 미완).
+        # 그 사실 자체를 manifest에 남겨, 비교 단계에서 "감사 불가"로 취급되게 한다.
+        write_run_manifest(
+            output_path,
+            cli_fields=run_manifest_fields,
+            run_spec=None,
+            run_spec_source="phase1_run_spec_absent_parity_pending",
+            validation={
+                "main": summarize_validation_contract(
+                    None,
+                    fixed_grid=False,
+                    seed=seed,
+                    note=(
+                        "phase1 validation problems are regenerated from seed offsets per run; "
+                        "no fixed grid contract yet, so cross-run comparability is not enforced"
+                    ),
+                ),
+                "validation_temperature": PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
+                "validation_rollout_samples": resolved_validation_rollout_samples,
+                "validation_every": validation_every,
+                "validation_episodes": validation_episodes,
+            },
+            extra={
+                "device": str(torch_device),
+                "seed": seed,
+                "episodes": episodes,
+                "start_episode": start_episode,
+                "resume_checkpoint": str(resume_path) if resume_path is not None else "",
+                "objective_scope": normalized_objective_scope,
+                "heuristic_algorithms": list(heuristic_algorithms),
+                "rollout_samples": rollout_samples,
+                "temperature": temperature,
+                "lr": lr,
+                "hidden_dim": hidden_dim,
+                "bay_ids": list(normalized_bay_ids),
+                "phase2_feedback_contract": normalized_feedback_contract,
+            },
+        )
     # LINE-BY-LINE: 진행 기록 파일은 학습 시작 시 한 번만 start_episode 기준으로 잘라내고, 이후에는 append합니다.
     metrics_rows, subproblem_metric_rows = _truncate_history_files(
         output_path,
@@ -1303,7 +1347,7 @@ def _validate_pair_policy(
                         jobs=view_jobs,
                         bay_ids=validation_bay_ids,
                         model=model,
-                        temperature=1.0,
+                        temperature=PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
                         seed=(
                             episode * 1_000_000
                             + validation_index * 10_000
