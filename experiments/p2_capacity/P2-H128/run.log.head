@@ -1,0 +1,200 @@
+[phase2-train-batch-machine-self-labeling-cli]
+- config: config_mixed.yaml
+- phase1_heuristic: wo_first_balanced
+- phase1_checkpoint: None
+- phase1_samples: 32
+- phase1_temperature: 1.0
+- output_dir: output/phase2_h128
+- episodes: 20000
+- hidden_dim: 128
+- lr: 0.001
+- seed: 0
+- device: cuda
+- heuristic_algorithms: lpt_batch,long_cut_batch,best_fit_lth,long_bevel_batch
+- phase2_score_mode: raw
+- rollout_samples: 64
+- rollout_samples_validation: 64
+- validation_every: 1000
+- validation_types_per_size: 5
+- validation_block_grid: 10..100 gap=10
+- checkpoint_every: 1000
+- resume_checkpoint: None
+- action_pool_limit: None
+- synthetic_source: mixed_physical_block_joint_distribution
+- synthetic_physical_block_range: 10..30
+- resolved_phase1_mode: heuristic
+- resolved_phase1_heuristic: wo_first_balanced
+- resolved_phase1_bay_ids: ('22', '23', '24', '25', 'trans')
+- phase1_bay_capacity_weights: {'22': 4.0, '23': 3.0, '24': 4.0, '25': 2.0, 'trans': 2.0}
+- phase2_hard_constraints: machine_enabled,machine_bay_consistency,block_set_same_bay,machine_single_processing,batch_wo_count_limit,batch_length_sum_limit,family_eligibility
+- main_validation_block_grid: 10..30 gap=5 types=5
+[VALIDATION][Phase2.validation_grid.build_phase2_main_validation_grid] passed=true block_sizes=[10, 15, 20, 25, 30] types=5 problems=25
+[VALIDATION][Phase2.validation_grid.build_phase2_validation_grid] passed=true block_sizes=[10, 20, 30, 40, 50, 60, 70, 80, 90, 100] types=5 problems=50 candidates_per_size=15
+- main_validation_problem_count: 25
+- generalization_validation_problem_count: 50
+- main_validation_seed_range: 500000..690056
+- validation_overlap_check: passed (main ∩ train = 0, main ∩ generalization = 0)
+- candidate_workers: 32
+[CHECK][Phase2.merged._resolve_phase1_capacity_weights_for_run_spec] source=explicit weights={'22': 4.0, '23': 3.0, '24': 4.0, '25': 2.0, 'trans': 2.0}
+[phase2-train-batch-machine-self-labeling]
+- episodes: 20000
+- start_episode: 1
+- resume_checkpoint: 
+- resumed_from_episode: 0
+- machine_count: 15
+- score_mode: raw
+- objective: hard_violation_count,makespan,bay_internal_cut_length_gap,bay_internal_wo_count_gap,bay_internal_bevel_quantity_gap,bay_internal_occupancy_gap
+- heuristic_algorithms: lpt_batch,long_cut_batch,best_fit_lth,long_bevel_batch
+- rollout_samples: 64
+- rollout_samples_validation: 64
+- validation_every: 1000
+- validation_types_per_size: 5
+- validation_problem_count: 25
+- secondary_validation_problem_count: 50
+- checkpoint_every: 1000
+- write_candidate_summary: False
+- device: cuda
+- candidate_workers: 32
+- temperature: 1.0
+- temperature_min: 0.3
+- temperature_anneal_episodes: 20000
+- validation_temperature: follows_training_schedule
+[CHECK][Utils.learning.run_manifest.write_run_manifest] manifest=output/phase2_h128/run_manifest.json phase=phase2 experiment_id=phase2_capacity arm_label=h128 code_fingerprint=a64035f48ee0 git_dirty=false validation_contract_sha256=2fd337f793d7 validation_problem_count=25
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=14 machine_count=4 candidate_count=68 best_source=agent_sample_31 loss=1.779314399 score=[0, 37.7117, 47.573141621, 2.0, 4.0, 10.605138]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=11 machine_count=3 candidate_count=68 best_source=agent_sample_57 loss=1.588294387 score=[0, 128.883191, 51.588388274, 2.0, 11.0, 19.284167]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=14 machine_count=4 candidate_count=68 best_source=agent_sample_64 loss=1.813137770 score=[0, 59.392057, 103.476241459, 2.0, 5.0, 8.552252]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=22 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.131415606 score=[0, 79.376742, 79.028981186, 2.0, 2.0, 4.240285]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=19 machine_count=2 candidate_count=68 best_source=lpt_batch loss=1.881388664 score=[0, 124.740257, 57.586446859, 1.0, 3.0, 20.307025]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=1 temperature=0.9999 best_source=22:agent_sample_31|23:agent_sample_57|24:agent_sample_64|25:lpt_batch|trans:lpt_batch loss=1.838710165 score=[0, 128.883191, 339.253199399, 9.0, 25.0, 62.988867]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=18 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.026201725 score=[0, 55.3636, 83.471801527, 3.0, 7.0, 16.690421]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=9 machine_count=3 candidate_count=68 best_source=agent_sample_6 loss=1.412915230 score=[0, 46.106029, 14.678813813, 0.0, 2.0, 5.866674]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_29 loss=1.715103745 score=[0, 35.744052, 29.171373212, 1.0, 6.0, 6.900738]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=62 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.926376820 score=[0, 296.899048, 84.923380657, 2.0, 3.0, 15.718812]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=62 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.133670568 score=[0, 261.49166, 22.540445897, 2.0, 0.0, 12.38136]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=2 temperature=0.9999 best_source=22:lpt_batch|23:agent_sample_6|24:agent_sample_29|25:lpt_batch|trans:lpt_batch loss=2.242853618 score=[0, 296.899048, 234.785815106, 8.0, 18.0, 57.558005]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=14 machine_count=4 candidate_count=68 best_source=agent_sample_47 loss=1.755658388 score=[0, 77.127315, 57.563102133, 2.0, 13.0, 23.647744]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=10 machine_count=3 candidate_count=68 best_source=agent_sample_21 loss=1.456921935 score=[0, 78.285621, 22.74351557, 1.0, 3.0, 26.643414]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=16 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.903609514 score=[0, 47.66415, 74.1823831, 3.0, 7.0, 11.764954]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=16 machine_count=2 candidate_count=68 best_source=lpt_batch loss=1.731572390 score=[0, 94.46546, 20.48357763, 2.0, 0.0, 1.349127]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=15 machine_count=2 candidate_count=68 best_source=agent_sample_5 loss=1.822225213 score=[0, 69.608495, 122.359309315, 3.0, 8.0, 4.09601]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=3 temperature=0.9998 best_source=22:agent_sample_47|23:agent_sample_21|24:lpt_batch|25:lpt_batch|trans:agent_sample_5 loss=1.733997488 score=[0, 94.46546, 297.331887748, 11.0, 31.0, 67.501249]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=10 machine_count=4 candidate_count=68 best_source=agent_sample_47 loss=1.479287386 score=[0, 78.492116, 110.857373283, 1.0, 7.0, 37.353011]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=7 machine_count=3 candidate_count=68 best_source=agent_sample_10 loss=1.162217975 score=[0, 61.040515, 10.997564361, 1.0, 3.0, 16.679724]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=10 machine_count=4 candidate_count=68 best_source=agent_sample_11 loss=1.411082149 score=[0, 68.166482, 35.659441146, 1.0, 5.0, 15.608637]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=25 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.299934149 score=[0, 99.964891, 63.494857057, 1.0, 2.0, 1.87944]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=26 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.377393246 score=[0, 114.533805, 11.499341829, 2.0, 1.0, 0.421889]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=4 temperature=0.9998 best_source=22:agent_sample_47|23:agent_sample_10|24:agent_sample_11|25:lpt_batch|trans:lpt_batch loss=1.745982981 score=[0, 114.533805, 232.508577676, 6.0, 18.0, 71.942701]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=23 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.193392992 score=[0, 90.950043, 109.750965141, 1.0, 20.0, 6.609074]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=18 machine_count=3 candidate_count=68 best_source=lpt_batch loss=1.960651040 score=[0, 73.398926, 122.182864483, 6.0, 6.0, 15.126492]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=23 machine_count=4 candidate_count=68 best_source=agent_greedy loss=2.138863325 score=[0, 120.976976, 51.136287768, 8.0, 14.0, 19.668056]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=41 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.600773096 score=[0, 183.27064, 57.763599934, 1.0, 1.0, 2.715206]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=40 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.779422760 score=[0, 186.142226, 105.742666282, 2.0, 4.0, 5.477178]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=5 temperature=0.9997 best_source=22:lpt_batch|23:lpt_batch|24:agent_greedy|25:lpt_batch|trans:lpt_batch loss=2.334620643 score=[0, 186.142226, 446.576383608, 18.0, 45.0, 49.596006]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_28 loss=1.621740937 score=[0, 56.026851, 35.243123765, 1.0, 6.0, 11.917474]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=10 machine_count=3 candidate_count=68 best_source=agent_sample_24 loss=1.428971410 score=[0, 60.151569, 131.5760732, 1.0, 5.0, 13.549103]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=14 machine_count=4 candidate_count=68 best_source=agent_sample_64 loss=1.647378802 score=[0, 79.348719, 163.22867486, 2.0, 5.0, 13.321128]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=23 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.191945553 score=[0, 104.535283, 78.000940067, 1.0, 5.0, 6.88336]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=24 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.406963348 score=[0, 107.832738, 19.115983285, 0.0, 2.0, 2.141]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=6 temperature=0.9996 best_source=22:agent_sample_28|23:agent_sample_24|24:agent_sample_64|25:lpt_batch|trans:lpt_batch loss=1.85940001 score=[0, 107.832738, 427.164795177, 5.0, 23.0, 47.812065]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=39 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.702796698 score=[0, 113.823947, 112.675445373, 3.0, 7.0, 13.418497]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=29 machine_count=3 candidate_count=68 best_source=lpt_batch loss=2.477836132 score=[0, 128.273409, 63.396667836, 2.0, 5.0, 5.822667]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=38 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.888573170 score=[0, 97.088304, 35.279432919, 6.0, 11.0, 9.721463]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=39 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.744619846 score=[0, 172.927781, 68.788254452, 3.0, 4.0, 15.998599]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=38 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.585565090 score=[0, 151.641202, 178.356787146, 2.0, 4.0, 12.174004]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=7 temperature=0.9996 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.679878187 score=[0, 172.927781, 458.496587726, 16.0, 31.0, 57.13523]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=18 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.940557480 score=[0, 98.892208, 66.022137842, 3.0, 19.0, 59.162928]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=13 machine_count=3 candidate_count=68 best_source=lpt_batch loss=1.637949228 score=[0, 65.918215, 152.099415796, 3.0, 8.0, 9.93161]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=17 machine_count=4 candidate_count=68 best_source=agent_sample_16 loss=1.932141304 score=[0, 115.03562, 95.301971691, 3.0, 10.0, 50.573393]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=61 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.127875805 score=[0, 256.016393, 7.636810755, 1.0, 0.0, 14.089822]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=61 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.084485054 score=[0, 254.510706, 8.078956046, 1.0, 2.0, 1.906193]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=8 temperature=0.9995 best_source=22:lpt_batch|23:lpt_batch|24:agent_sample_16|25:lpt_batch|trans:lpt_batch loss=2.344601774 score=[0, 256.016393, 329.13929213, 11.0, 39.0, 135.663946]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=59 machine_count=4 candidate_count=68 best_source=lpt_batch loss=3.044409990 score=[0, 226.598257, 80.376036303, 1.0, 26.0, 3.028712]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=45 machine_count=3 candidate_count=68 best_source=lpt_batch loss=2.804671049 score=[0, 178.45415, 192.904830674, 0.0, 22.0, 2.970021]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=59 machine_count=4 candidate_count=68 best_source=lpt_batch loss=3.103841066 score=[0, 207.832795, 82.643760118, 1.0, 19.0, 3.638207]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=47 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.811266184 score=[0, 187.353985, 17.267845698, 1.0, 5.0, 0.650403]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=46 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.868392944 score=[0, 205.231052, 48.331783112, 2.0, 3.0, 0.004966]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=9 temperature=0.9995 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.926516247 score=[0, 226.598257, 421.524255905, 5.0, 75.0, 10.292309]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=23 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.188287020 score=[0, 52.249989, 35.919936625, 5.0, 4.0, 9.462873]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=18 machine_count=3 candidate_count=68 best_source=long_cut_batch loss=1.984618783 score=[0, 111.972239, 145.011762298, 6.0, 11.0, 7.516602]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=24 machine_count=4 candidate_count=68 best_source=agent_sample_49 loss=2.213380575 score=[0, 111.512199, 86.918400347, 6.0, 8.0, 15.266316]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=56 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.004678011 score=[0, 234.197323, 131.04962715, 2.0, 8.0, 0.547108]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=57 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.098161936 score=[0, 221.802742, 12.092799268, 1.0, 2.0, 4.708675]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=10 temperature=0.9994 best_source=22:lpt_batch|23:long_cut_batch|24:agent_sample_49|25:lpt_batch|trans:lpt_batch loss=2.497825265 score=[0, 234.197323, 410.992525688, 20.0, 33.0, 37.501574]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_55 loss=1.627729774 score=[0, 60.619473, 49.049864915, 1.0, 5.0, 30.196216]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=11 machine_count=3 candidate_count=68 best_source=agent_sample_16 loss=1.456307054 score=[0, 72.651053, 13.167815469, 2.0, 5.0, 5.478832]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_21 loss=1.655882835 score=[0, 49.43903, 48.022933606, 1.0, 9.0, 17.950549]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=36 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.550872564 score=[0, 156.588174, 85.436486963, 0.0, 0.0, 0.647786]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=36 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.525230885 score=[0, 186.952276, 86.384434192, 2.0, 1.0, 4.467721]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=11 temperature=0.9993 best_source=22:agent_sample_55|23:agent_sample_16|24:agent_sample_21|25:lpt_batch|trans:lpt_batch loss=1.963204622 score=[0, 186.952276, 282.061535145, 6.0, 20.0, 58.741104]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_24 loss=1.543455720 score=[0, 44.214583, 32.960140954, 1.0, 2.0, 14.825315]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=10 machine_count=3 candidate_count=68 best_source=agent_sample_42 loss=1.558115840 score=[0, 67.845581, 35.280688897, 1.0, 4.0, 22.013039]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_26 loss=1.551413178 score=[0, 72.998504, 35.475646206, 1.0, 8.0, 16.770097]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=36 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.545560837 score=[0, 164.552241, 78.810575868, 0.0, 4.0, 1.275854]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=35 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.408198595 score=[0, 153.351418, 4.413602437, 1.0, 10.0, 3.174215]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=12 temperature=0.9993 best_source=22:agent_sample_24|23:agent_sample_42|24:agent_sample_26|25:lpt_batch|trans:lpt_batch loss=1.921348834 score=[0, 164.552241, 186.940654362, 4.0, 28.0, 58.05852]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=38 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.593881607 score=[0, 126.703488, 154.625577642, 2.0, 15.0, 12.175783]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=28 machine_count=3 candidate_count=68 best_source=lpt_batch loss=2.273437023 score=[0, 136.312276, 138.905054912, 1.0, 8.0, 4.648386]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=38 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.552927732 score=[0, 128.860928, 141.164868637, 2.0, 15.0, 16.084813]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=55 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.974491596 score=[0, 229.269644, 198.52291692, 1.0, 10.0, 4.621583]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=55 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.075107336 score=[0, 264.53361, 18.183594032, 1.0, 0.0, 13.900073]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=13 temperature=0.9992 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.693969059 score=[0, 264.53361, 651.402012143, 7.0, 48.0, 51.430638]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=14 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.684699535 score=[0, 41.067279, 22.451313814, 2.0, 5.0, 12.343429]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=9 machine_count=3 candidate_count=68 best_source=agent_sample_25 loss=1.265846968 score=[0, 79.210105, 45.450762378, 0.0, 3.0, 23.477289]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=13 machine_count=4 candidate_count=68 best_source=agent_sample_31 loss=1.750447750 score=[0, 54.027259, 16.881782983, 1.0, 10.0, 6.698726]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=48 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.926126957 score=[0, 223.685708, 87.415506556, 0.0, 3.0, 16.159332]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=49 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.872253418 score=[0, 231.082406, 52.999235841, 1.0, 2.0, 15.323842]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=14 temperature=0.9992 best_source=22:lpt_batch|23:agent_sample_25|24:agent_sample_31|25:lpt_batch|trans:lpt_batch loss=2.099874926 score=[0, 231.082406, 225.198601572, 4.0, 23.0, 74.002618]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=21 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.070670843 score=[0, 50.746094, 36.362256336, 3.0, 3.0, 2.781764]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=11 machine_count=3 candidate_count=68 best_source=agent_sample_60 loss=1.473862290 score=[0, 38.32631, 48.333958823, 2.0, 8.0, 2.107008]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=11 machine_count=4 candidate_count=68 best_source=agent_sample_43 loss=1.673157334 score=[0, 85.866466, 98.718784339, 1.0, 6.0, 43.071165]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=38 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.639954567 score=[0, 151.904842, 17.867099626, 2.0, 6.0, 14.018221]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=37 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.567167044 score=[0, 142.212488, 1.708144861, 1.0, 1.0, 15.452663]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=15 temperature=0.9991 best_source=22:lpt_batch|23:agent_sample_60|24:agent_sample_43|25:lpt_batch|trans:lpt_batch loss=2.084962416 score=[0, 151.904842, 202.990243985, 9.0, 24.0, 77.430821]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=39 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.649562120 score=[0, 138.395001, 158.575853534, 6.0, 8.0, 9.936942]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=27 machine_count=3 candidate_count=68 best_source=lpt_batch loss=2.248461485 score=[0, 134.357804, 197.795726803, 6.0, 21.0, 9.756062]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=35 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.483846188 score=[0, 88.727565, 43.841389288, 1.0, 14.0, 4.563847]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=63 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.077772379 score=[0, 277.91216, 195.982390758, 3.0, 5.0, 13.052557]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=63 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.029666662 score=[0, 273.204003, 66.689542897, 3.0, 9.0, 13.712177]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=16 temperature=0.9990 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.697861767 score=[0, 277.91216, 662.88490328, 19.0, 57.0, 51.021585]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=18 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.936730266 score=[0, 65.634237, 90.227139403, 3.0, 11.0, 21.340515]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=14 machine_count=3 candidate_count=68 best_source=agent_sample_6 loss=1.518154502 score=[0, 159.573226, 49.110407954, 5.0, 7.0, 68.307855]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=18 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.799934864 score=[0, 63.732936, 193.246766573, 3.0, 7.0, 13.873239]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=33 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.492640018 score=[0, 125.521936, 36.949894933, 3.0, 2.0, 12.970585]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=33 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.105786324 score=[0, 171.281715, 62.483561255, 3.0, 2.0, 15.708962]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=17 temperature=0.9990 best_source=22:lpt_batch|23:agent_sample_6|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=1.970649195 score=[0, 171.281715, 432.017770118, 17.0, 29.0, 132.201156]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=26 machine_count=4 candidate_count=68 best_source=long_cut_batch loss=2.113156557 score=[0, 142.945715, 104.510427151, 6.0, 7.0, 8.037181]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=20 machine_count=3 candidate_count=68 best_source=lpt_batch loss=1.927392244 score=[0, 90.190776, 197.260143881, 6.0, 17.0, 3.633136]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=27 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.165434599 score=[0, 80.010637, 76.010992405, 6.0, 20.0, 10.971124]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=78 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.289034367 score=[0, 334.852835, 19.781905162, 0.0, 2.0, 0.224848]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=78 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.286148071 score=[0, 345.539601, 45.456920068, 0.0, 4.0, 13.152622]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=18 temperature=0.9989 best_source=22:long_cut_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.556233168 score=[0, 345.539601, 443.020388667, 18.0, 50.0, 36.018911]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=29 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.175713301 score=[0, 99.112513, 112.841714719, 6.0, 13.0, 14.408571]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=21 machine_count=3 candidate_count=68 best_source=lpt_batch loss=1.895775437 score=[0, 90.80243, 172.538295492, 3.0, 5.0, 5.06055]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=29 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.213287592 score=[0, 93.929475, 77.103346751, 6.0, 9.0, 5.194922]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=59 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.020354033 score=[0, 248.862686, 1.275060966, 1.0, 5.0, 1.692887]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=59 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.839750767 score=[0, 248.94841, 97.214408676, 1.0, 9.0, 0.096982]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=19 temperature=0.9989 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.428976226 score=[0, 248.94841, 460.972826604, 17.0, 41.0, 26.453912]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=35 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.413909435 score=[0, 103.870338, 70.843641159, 1.0, 6.0, 7.360145]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=26 machine_count=3 candidate_count=68 best_source=lpt_batch loss=2.181824923 score=[0, 109.28873, 97.272089894, 1.0, 11.0, 8.143956]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=34 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.418761015 score=[0, 106.263445, 141.332309224, 2.0, 8.0, 3.816976]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=66 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.157395601 score=[0, 291.611266, 52.388197297, 0.0, 8.0, 0.913796]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=66 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.946320295 score=[0, 284.432669, 132.118271332, 0.0, 1.0, 0.4192]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=20 temperature=0.9988 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.623642254 score=[0, 291.611266, 493.954508906, 4.0, 34.0, 20.654073]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=10 machine_count=4 candidate_count=68 best_source=agent_sample_40 loss=1.444509029 score=[0, 78.447308, 65.185063491, 1.0, 4.0, 36.242338]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=8 machine_count=3 candidate_count=68 best_source=agent_sample_3 loss=1.310905695 score=[0, 57.763103, 20.62489442, 1.0, 3.0, 15.508259]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=10 machine_count=4 candidate_count=68 best_source=agent_sample_64 loss=1.340931773 score=[0, 45.357097, 41.785252385, 1.0, 9.0, 16.660956]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=30 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.486252069 score=[0, 106.778909, 3.633514351, 0.0, 1.0, 0.506847]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=30 machine_count=2 candidate_count=68 best_source=long_cut_batch loss=2.344544172 score=[0, 174.542487, 115.520433226, 0.0, 0.0, 1.375897]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=21 temperature=0.9987 best_source=22:agent_sample_40|23:agent_sample_3|24:agent_sample_64|25:lpt_batch|trans:long_cut_batch loss=1.785428548 score=[0, 174.542487, 246.749157873, 3.0, 17.0, 70.294297]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=25 machine_count=4 candidate_count=68 best_source=lpt_batch loss=2.086134195 score=[0, 91.582509, 108.440876972, 1.0, 7.0, 16.222802]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=18 machine_count=3 candidate_count=68 best_source=lpt_batch loss=1.792424083 score=[0, 58.35491, 9.754859873, 0.0, 11.0, 9.104582]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=25 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.994487882 score=[0, 77.936084, 162.801307619, 6.0, 19.0, 9.400313]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=80 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.253571749 score=[0, 332.039615, 33.242064469, 2.0, 2.0, 1.833317]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=79 machine_count=2 candidate_count=68 best_source=lpt_batch loss=3.153119802 score=[0, 350.273338, 21.712310346, 1.0, 1.0, 7.9258]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=22 temperature=0.9987 best_source=22:lpt_batch|23:lpt_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.455947542 score=[0, 350.273338, 335.951419279, 10.0, 40.0, 44.486814]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=22 job_count=24 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.882938266 score=[0, 77.699789, 84.970621741, 0.0, 6.0, 9.955543]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=23 job_count=17 machine_count=3 candidate_count=68 best_source=long_cut_batch loss=1.619561911 score=[0, 91.362733, 74.755642657, 1.0, 5.0, 10.87496]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=24 job_count=25 machine_count=4 candidate_count=68 best_source=lpt_batch loss=1.990725994 score=[0, 94.754431, 92.918375535, 6.0, 5.0, 7.8762]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=25 job_count=32 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.468457222 score=[0, 140.16571, 97.506756716, 2.0, 2.0, 12.116685]
+[CHECK][Phase2.merged._train_one_episode.subproblem] bay_id=trans job_count=32 machine_count=2 candidate_count=68 best_source=lpt_batch loss=2.369888544 score=[0, 141.211721, 133.529437747, 2.0, 4.0, 15.212513]
+[CHECK][Phase2.merged.train_phase2_batch_machine_self_labeling] episode=23 temperature=0.9986 best_source=22:lpt_batch|23:long_cut_batch|24:lpt_batch|25:lpt_batch|trans:lpt_batch loss=2.066314387 score=[0, 141.211721, 483.680834396, 11.0, 22.0, 56.035901]

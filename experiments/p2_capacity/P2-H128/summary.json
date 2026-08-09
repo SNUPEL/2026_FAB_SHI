@@ -1,0 +1,406 @@
+{
+  "episodes": 20000,
+  "start_episode": 1,
+  "resumed_from_episode": 0,
+  "resume_checkpoint": "",
+  "job_count": 138,
+  "machine_count": 15,
+  "policy_type": "phase2_wo_pointer",
+  "feature_schema_version": "phase2_wo_pointer_v3_family",
+  "feature_group_dims": {
+    "bay_context": 11,
+    "machine_node": 11,
+    "wo_node": 9,
+    "open_batch": 7,
+    "projected_action": 7
+  },
+  "score_mode": "raw",
+  "score_fields": [
+    "hard_violation_count",
+    "makespan",
+    "bay_internal_cut_length_gap",
+    "bay_internal_wo_count_gap",
+    "bay_internal_bevel_quantity_gap",
+    "bay_internal_occupancy_gap"
+  ],
+  "raw_score_fields": [
+    "hard_violation_count",
+    "makespan",
+    "bay_internal_cut_length_gap",
+    "bay_internal_wo_count_gap",
+    "bay_internal_bevel_quantity_gap",
+    "bay_internal_occupancy_gap"
+  ],
+  "normalized_score_fields": [
+    "hard_violation_count",
+    "makespan",
+    "bay_internal_normalized_cut_length_gap",
+    "bay_internal_normalized_wo_count_gap",
+    "bay_internal_normalized_bevel_quantity_gap",
+    "bay_internal_normalized_occupancy_gap"
+  ],
+  "metrics_csv": "output/phase2_h128/metrics.csv",
+  "subproblem_metrics_csv": "output/phase2_h128/subproblem_metrics.csv",
+  "candidate_summary_csv": "output/phase2_h128/candidate_summary.csv",
+  "validation_root": "output/phase2_h128/validation",
+  "validation_summary_csv": "output/phase2_h128/validation/validation_bay_history.csv",
+  "validation_candidate_summary_csv": "output/phase2_h128/validation/validation_candidate_latest.csv",
+  "validation_parent_summary_csv": "output/phase2_h128/validation/validation_parent_history.csv",
+  "generalization_validation_root": "output/phase2_h128/validation_generalization",
+  "generalization_validation_parent_summary_csv": "output/phase2_h128/validation_generalization/validation_parent_history.csv",
+  "secondary_validation_problem_count": 50,
+  "validation_method_summary_csv": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/method_summary_by_block_size.csv",
+  "validation_rank_summary_csv": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/validation_rank_summary.csv",
+  "validation_makespan_png": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/makespan_by_block_size_boxplot.png",
+  "validation_cut_gap_png": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/cut_length_gap_by_block_size_boxplot.png",
+  "validation_wo_gap_png": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/wo_count_gap_by_block_size_boxplot.png",
+  "validation_bevel_gap_png": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/bevel_quantity_gap_by_block_size_boxplot.png",
+  "validation_occupancy_gap_png": "output/phase2_h128/validation/evaluations/ep_020000/aggregate/occupancy_gap_by_block_size_boxplot.png",
+  "validation_rank_history_csv": "output/phase2_h128/validation/validation_rank_history.csv",
+  "validation_winner_count_history_png": "output/phase2_h128/validation/validation_overall_winner_count_history.png",
+  "validation_proposed_mean_rank_history_png": "output/phase2_h128/validation/validation_proposed_mean_rank_history.png",
+  "best_batches_csv": "output/phase2_h128/best_batches.csv",
+  "best_timeline_csv": "output/phase2_h128/best_timeline.csv",
+  "best_assignment_csv": "output/phase2_h128/best_machine_assignment.csv",
+  "checkpoint_path": "output/phase2_h128/phase2_batch_machine_policy.pt",
+  "best_checkpoint_path": "output/phase2_h128/phase2_best.pt",
+  "checkpoint_dir": "output/phase2_h128/checkpoints",
+  "checkpoint_every": 1000,
+  "summary_json": "output/phase2_h128/summary.json",
+  "heuristic_algorithms": [
+    "lpt_batch",
+    "long_cut_batch",
+    "best_fit_lth",
+    "long_bevel_batch"
+  ],
+  "rollout_samples": 64,
+  "validation_rollout_samples": 64,
+  "validation_every": 1000,
+  "validation_episodes": 5,
+  "validation_problem_count": 25,
+  "validation_contract": {
+    "schema": "phase2_validation_grid_v1",
+    "problems": [
+      {
+        "problem_id": "M010_T01",
+        "block_count": 10,
+        "distribution_type": 1,
+        "generation_seed": 500000,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "0051c881227937167e2d243330c484e87ae5ade6c86904394631cbfe20bc4b52"
+      },
+      {
+        "problem_id": "M010_T02",
+        "block_count": 10,
+        "distribution_type": 2,
+        "generation_seed": 507919,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "1d8b81b9745a32dab3b02433bc825e12e5dfd89370a75d510ed24998e546ab3e"
+      },
+      {
+        "problem_id": "M010_T03",
+        "block_count": 10,
+        "distribution_type": 3,
+        "generation_seed": 515838,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "88844f5d7dcf0d1a9c290ebd16dd97417bd0044159baa96556555e8a9456a614"
+      },
+      {
+        "problem_id": "M010_T04",
+        "block_count": 10,
+        "distribution_type": 4,
+        "generation_seed": 523757,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "e6b99e4dcf231d5c5975181453415424d8d42603ef7a53d5d9520eaf858a3c6b"
+      },
+      {
+        "problem_id": "M010_T05",
+        "block_count": 10,
+        "distribution_type": 5,
+        "generation_seed": 531676,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "0c50871c3b7e4f74aac0e4b668aa8463767ed6ea3f21a55f3ee4f9529a82e859"
+      },
+      {
+        "problem_id": "M015_T01",
+        "block_count": 15,
+        "distribution_type": 1,
+        "generation_seed": 539595,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "9e85016c116730ad52fa8b1679f1729bd7942916591454561fa0d26a43010ee6"
+      },
+      {
+        "problem_id": "M015_T02",
+        "block_count": 15,
+        "distribution_type": 2,
+        "generation_seed": 547514,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "b4cc2187451f3799fc942ca062c866ff65b4494e9c9dc0e4f2549c7d9764dc3d"
+      },
+      {
+        "problem_id": "M015_T03",
+        "block_count": 15,
+        "distribution_type": 3,
+        "generation_seed": 555433,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "828e26b2bd9bcabec195e838801378b280e3e82abcec6641e13ecc306b0d0e1d"
+      },
+      {
+        "problem_id": "M015_T04",
+        "block_count": 15,
+        "distribution_type": 4,
+        "generation_seed": 563352,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "6202f42de04544a5034d598ffaf896cef3c503807cefed594e5bd4f2926bb8c2"
+      },
+      {
+        "problem_id": "M015_T05",
+        "block_count": 15,
+        "distribution_type": 5,
+        "generation_seed": 571271,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "b58f8645cddb5ebf4901b1be02bc820ddee0f3c1fb78ddb41fc1805ea94a209c"
+      },
+      {
+        "problem_id": "M020_T01",
+        "block_count": 20,
+        "distribution_type": 1,
+        "generation_seed": 579190,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "ca6eb6005ed71e658f13186e15a9dad2e44ef58058c09d0007458a23994c8298"
+      },
+      {
+        "problem_id": "M020_T02",
+        "block_count": 20,
+        "distribution_type": 2,
+        "generation_seed": 587109,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "491f94fdd929b445a269b5c9e0487f518c0e356b9664aa71ce05bda3049cc103"
+      },
+      {
+        "problem_id": "M020_T03",
+        "block_count": 20,
+        "distribution_type": 3,
+        "generation_seed": 595028,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "f0ec22209c6785d57577dfe235830fd0bbc6ae70edd26523fbe099c56bb943a5"
+      },
+      {
+        "problem_id": "M020_T04",
+        "block_count": 20,
+        "distribution_type": 4,
+        "generation_seed": 602947,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "64f0b7ddacc890d517f4fff081bf01492dcbf5271cec22386b69c7b42ad1900f"
+      },
+      {
+        "problem_id": "M020_T05",
+        "block_count": 20,
+        "distribution_type": 5,
+        "generation_seed": 610866,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "e5f2ff50d5237b39ef581ede271b9586e52ddab9fee3ecfa85239003bf070f6d"
+      },
+      {
+        "problem_id": "M025_T01",
+        "block_count": 25,
+        "distribution_type": 1,
+        "generation_seed": 618785,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "6ba2655687bef249f89b985cb292f8d0cdc211f437b78c9fd1d86a5fc610fa1f"
+      },
+      {
+        "problem_id": "M025_T02",
+        "block_count": 25,
+        "distribution_type": 2,
+        "generation_seed": 626704,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "bcdc79adb842158e8fd48746ba0280915a662230b6ec11b2191b10d98f8fd664"
+      },
+      {
+        "problem_id": "M025_T03",
+        "block_count": 25,
+        "distribution_type": 3,
+        "generation_seed": 634623,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "96d4390444b587a41561443fa2f8267ed9ec24faf4d0476bd18c8468e1516ef4"
+      },
+      {
+        "problem_id": "M025_T04",
+        "block_count": 25,
+        "distribution_type": 4,
+        "generation_seed": 642542,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "1e1920c74b4ddfae627f034d9ae9716159b8653fab4328012e9fe88a28f3488c"
+      },
+      {
+        "problem_id": "M025_T05",
+        "block_count": 25,
+        "distribution_type": 5,
+        "generation_seed": 650461,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "5bbfdc9cfb4469b911552ed4657024b84e00ab2c2f031a8a3ada905b4bf54c64"
+      },
+      {
+        "problem_id": "M030_T01",
+        "block_count": 30,
+        "distribution_type": 1,
+        "generation_seed": 658380,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "d8fc75684ef5ea898b47116cf8f3daa29918b48e22409e7a1ecad8dc082a7cd2"
+      },
+      {
+        "problem_id": "M030_T02",
+        "block_count": 30,
+        "distribution_type": 2,
+        "generation_seed": 666299,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "1bd0f4c78b084618e26c3cc794e8ed110c6e6a4bd74ee67488fccd33a03d607d"
+      },
+      {
+        "problem_id": "M030_T03",
+        "block_count": 30,
+        "distribution_type": 3,
+        "generation_seed": 674218,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "1022aae77c4c437ad8928f43006c3d7b01364bdf27e334e037f8b9bd10102135"
+      },
+      {
+        "problem_id": "M030_T04",
+        "block_count": 30,
+        "distribution_type": 4,
+        "generation_seed": 682137,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "7e4be628d43aba17bfba7155df5829ffd0f69266234ecf2e0270c44c5b04ed25"
+      },
+      {
+        "problem_id": "M030_T05",
+        "block_count": 30,
+        "distribution_type": 5,
+        "generation_seed": 690056,
+        "target_distribution": {},
+        "normalized_distribution": {},
+        "actual_distribution": {},
+        "jobs_sha256": "24c76b52972284f5f2f8e906d285836a36aa81c8aedb44b35cb749cebb01f06e"
+      }
+    ]
+  },
+  "action_pool_limit": null,
+  "write_candidate_summary": false,
+  "candidate_workers": 32,
+  "temperature": 1.0,
+  "temperature_min": 0.3,
+  "temperature_anneal_episodes": 20000,
+  "validation_temperature": null,
+  "device": "cuda",
+  "run_spec": {
+    "run_spec_schema_version": "phase2_run_spec_v4_event_clock",
+    "metric_schema_version": "phase2_metric_v1",
+    "feature_schema_version": "phase2_wo_pointer_v3_family",
+    "policy_action": "select_wo_only",
+    "machine_dispatch_rule": "idle_at_current_time_else_next_completion_then_machine_id",
+    "score_mode": "raw",
+    "score_fields": [
+      "hard_violation_count",
+      "makespan",
+      "bay_internal_cut_length_gap",
+      "bay_internal_wo_count_gap",
+      "bay_internal_bevel_quantity_gap",
+      "bay_internal_occupancy_gap"
+    ],
+    "action_pool_limit": null,
+    "max_wo_count": 3,
+    "max_length_sum": 55000.0,
+    "phase1_bay_capacity_weights": {
+      "22": 4.0,
+      "23": 3.0,
+      "24": 4.0,
+      "25": 2.0,
+      "trans": 2.0
+    },
+    "phase1_rule_profile": "multi_series_260711",
+    "phase1_scope_version": "resource_pool_subproblems_v1",
+    "phase1_score_mode": "wo_first",
+    "constraint_profile": {
+      "name": "phase2",
+      "hard_enabled": {
+        "batch_length_sum_limit": true,
+        "batch_wo_count_limit": true,
+        "block_set_same_bay": true,
+        "family_eligibility": true,
+        "machine_bay_consistency": true,
+        "machine_enabled": true,
+        "machine_single_processing": true,
+        "table_length_limit": false,
+        "thickness_range": false
+      },
+      "soft_enabled": {},
+      "soft_weights": {},
+      "category_flags": {
+        "calendar": false,
+        "capacity": true,
+        "downstream": false,
+        "layout": true,
+        "machine": true,
+        "preference": false,
+        "priority": false
+      }
+    },
+    "heuristic_algorithms": [
+      "lpt_batch",
+      "long_cut_batch",
+      "best_fit_lth",
+      "long_bevel_batch"
+    ],
+    "train_rollout_samples": 64,
+    "validation_rollout_samples": 64
+  }
+}

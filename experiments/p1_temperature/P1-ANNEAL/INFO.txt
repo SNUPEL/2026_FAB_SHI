@@ -1,0 +1,14 @@
+별칭        : P1-ANNEAL
+학습 경로   : output\phase1_anneal_v1                   (담당자 YJ, Windows)
+최종 episode: 20000                                     완주 여부: 예
+git commit  : 미상        dirty: 미상          ← 담당자 YJ 확인 필요
+실행 CLI    : ❗ 미확보 — run.log.head 를 YJ 에게 받아야 함
+              seed / --min-blocks / --max-blocks / --validation-episodes 가 로그에만 있다.
+              (summary.json 에는 없음) 이 값이 없으면 절대규칙 §6.3 수동 대조표를
+              채울 수 없어 비교가 성립하지 않는다.
+확인된 설정 : hidden 128, objective_scope series_only, T 1.0→0.3(anneal 20000),
+              rollout 64 / validation 64, validation-episodes 20, 휴리스틱 3종
+              (wo/cut/bevel_first_balanced), device cpu
+              — 위 값은 summary.json 과 checkpoint 내부 메타에서 직접 읽은 것이다.
+checkpoint  : ep00200(자체 best.pt 선정본, best-rate 46.5%),
+              ep19800(best-rate 최고 75.8%) 2개만 확보. 필요 시 YJ 에게 추가 요청.

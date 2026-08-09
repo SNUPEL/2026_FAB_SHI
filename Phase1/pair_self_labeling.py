@@ -18,6 +18,9 @@ import json
 import sys
 # LINE-BY-LINE: `dataclass`는 transition/candidate record class를 간결하게 정의하는 데 사용합니다.
 from dataclasses import dataclass
+# agent rollout을 process 단위로 병렬 실행할 때 사용한다 (--candidate-workers).
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing
 # LINE-BY-LINE: output path/checkpoint path를 OS 독립적으로 다루기 위해 사용합니다.
 from pathlib import Path
 # LINE-BY-LINE: 함수 인자/반환 타입을 명확히 하기 위한 typing import입니다.
@@ -499,6 +502,7 @@ def train_phase1_pair_self_labeling(
     validation_episode_factory: Callable[[int], Mapping[str, object]] | None = None,
     validation_rollout_samples: int | None = None,
     resume_checkpoint: str | Path | None = None,
+    eval_only: bool = False,
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
     phase2_feedback_contract: Mapping[str, object] | None = None,
     bay_capacity_weights: Mapping[str, int | float] | None = None,
@@ -508,6 +512,7 @@ def train_phase1_pair_self_labeling(
     temperature_min: float | None = None,
     temperature_anneal_episodes: int | None = None,
     run_manifest_fields: Mapping[str, object] | None = None,
+    candidate_workers: int = 1,
 ) -> Dict:
     """Train one shared pair policy with independent resource-pool teachers.
 
@@ -665,6 +670,69 @@ def train_phase1_pair_self_labeling(
     print(f"- temperature: {temperature}")
     print(f"- temperature_min: {resolved_temperature_min}")
     print(f"- temperature_anneal_episodes: {resolved_temperature_anneal_episodes}")
+    _validate_phase1_candidate_workers(candidate_workers)
+    print(f"- candidate_workers: {candidate_workers}")
+    # candidate_workers>1이면 agent rollout을 process pool에서 병렬 실행한다.
+    # rollout마다 seed가 명시돼 있어 worker 수와 무관하게 결과가 동일하다.
+    candidate_executor = create_phase1_candidate_executor(candidate_workers)
+
+    if eval_only:
+        # 순수 평가: 이미 학습된 checkpoint를 validation 문제로 1회 평가만 한다.
+        # 학습 loop도 optimizer step도 없다(가중치 불변). best/final checkpoint 저장도 하지 않는다.
+        if resume_path is None:
+            print("[ERROR][phase1_pair_self_labeling] cause=eval_only_requires_resume_checkpoint")
+            raise RuntimeError("eval_only requires --resume-checkpoint (an already-trained model)")
+        if validation_episode_factory is None:
+            print("[ERROR][phase1_pair_self_labeling] cause=eval_only_requires_validation")
+            raise RuntimeError("eval_only requires validation episodes (--validation-episodes > 0)")
+        eval_episode = start_episode - 1  # = resume한 checkpoint의 완료 episode
+        validation = _validate_pair_policy(
+            model=model,
+            validation_episode_factory=validation_episode_factory,
+            validation_episodes=validation_episodes,
+            bay_ids=normalized_bay_ids,
+            heuristic_algorithms=heuristic_algorithms,
+            episode=eval_episode,
+            rollout_samples=resolved_validation_rollout_samples,
+            bay_capacity_weights=normalized_capacity_weights,
+            phase2_feedback_scorer=phase2_feedback_scorer,
+            objective_scope=normalized_objective_scope,
+            candidate_workers=candidate_workers,
+            candidate_executor=candidate_executor,
+        )
+        validation_rows.extend(validation["rows"])
+        validation_candidate_rows.extend(validation["candidate_rows"])
+        _write_validation_summary(output_path / "validation_summary.csv", validation_rows)
+        _write_validation_candidate_summary(
+            output_path / "validation_candidate_summary.csv", validation_candidate_rows
+        )
+        _write_validation_plots(
+            output_path=output_path,
+            candidate_rows=validation_candidate_rows,
+            summary_rows=validation_rows,
+            objective_scope=normalized_objective_scope,
+        )
+        agent_mean_score = validation["agent_mean_score"]
+        summary_json = output_path / "summary.json"
+        eval_summary = {
+            "eval_only": True,
+            "eval_episode": eval_episode,
+            "resume_checkpoint": str(resume_path),
+            "objective_scope": normalized_objective_scope,
+            "agent_best_rate": validation["agent_best_rate"],
+            "agent_mean_score": list(agent_mean_score) if isinstance(agent_mean_score, tuple) else agent_mean_score,
+            "validation_episodes": validation_episodes,
+            "validation_summary_csv": str(output_path / "validation_summary.csv"),
+            "summary_json": str(summary_json),
+        }
+        summary_json.write_text(json.dumps(eval_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(
+            "[CHECK][phase1_pair_self_labeling] "
+            f"eval_only=true eval_episode={eval_episode} "
+            f"validation_episodes={validation_episodes} agent_best_rate={validation['agent_best_rate']:.6f}"
+        )
+        _shutdown_phase1_candidate_executor(candidate_executor)
+        return eval_summary
 
     # LINE-BY-LINE: start_episode부터 사용자가 요청한 episodes까지 학습 loop를 수행합니다.
     for episode in range(start_episode, episodes + 1):
@@ -707,21 +775,25 @@ def train_phase1_pair_self_labeling(
             if not pool_jobs:
                 continue
             pool_block_count = len(_collect_blocks(pool_jobs, episode_bay_ids))
-            candidates: List[Phase1PairCandidate] = []
-            for sample_index in range(1, rollout_samples + 1):
-                is_greedy = sample_index == 1
-                candidates.append(
-                    run_phase1_pair_policy_rollout(
-                        jobs=pool_jobs,
-                        bay_ids=episode_bay_ids,
-                        model=model,
-                        temperature=1.0 if is_greedy else current_temperature,
-                        seed=seed + episode * 10_000 + pool_index * 1_000 + sample_index,
-                        source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
-                        selection="greedy" if is_greedy else "sample",
-                        bay_capacity_weights=episode_capacity_weights,
-                    )
+            candidates: List[Phase1PairCandidate] = list(
+                build_phase1_pair_agent_candidates(
+                    jobs=pool_jobs,
+                    bay_ids=episode_bay_ids,
+                    model=model,
+                    rollout_specs=[
+                        (
+                            "agent_greedy" if sample_index == 1 else f"agent_sample_{sample_index}",
+                            "greedy" if sample_index == 1 else "sample",
+                            1.0 if sample_index == 1 else current_temperature,
+                            seed + episode * 10_000 + pool_index * 1_000 + sample_index,
+                        )
+                        for sample_index in range(1, rollout_samples + 1)
+                    ],
+                    bay_capacity_weights=episode_capacity_weights,
+                    candidate_workers=candidate_workers,
+                    candidate_executor=candidate_executor,
                 )
+            )
             for algorithm in heuristic_algorithms:
                 candidates.append(
                     _run_phase1_pair_heuristic_candidate(
@@ -887,6 +959,8 @@ def train_phase1_pair_self_labeling(
                 bay_capacity_weights=normalized_capacity_weights,
                 phase2_feedback_scorer=phase2_feedback_scorer,
                 objective_scope=normalized_objective_scope,
+                candidate_workers=candidate_workers,
+                candidate_executor=candidate_executor,
             )
             # LINE-BY-LINE: validation episode별 agent 요약 row를 누적합니다.
             validation_rows.extend(validation["rows"])
@@ -1005,7 +1079,224 @@ def train_phase1_pair_self_labeling(
     # LINE-BY-LINE: summary.json을 UTF-8 JSON으로 저장합니다.
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     # LINE-BY-LINE: 호출자(main.py)가 출력할 수 있도록 summary dict를 반환합니다.
+    _shutdown_phase1_candidate_executor(candidate_executor)
     return summary
+
+
+def _shutdown_phase1_candidate_executor(
+    candidate_executor: ProcessPoolExecutor | None,
+) -> None:
+    """worker pool을 정리한다. executor가 없으면 아무 일도 하지 않는다."""
+
+    if candidate_executor is None:
+        return
+    candidate_executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _validate_phase1_candidate_workers(candidate_workers: int) -> None:
+    """--candidate-workers 값을 검증한다. 잘못된 값은 조용히 보정하지 않는다."""
+
+    if (
+        isinstance(candidate_workers, bool)
+        or not isinstance(candidate_workers, int)
+        or candidate_workers <= 0
+    ):
+        print(
+            "[ERROR][phase1_pair_self_labeling._validate_phase1_candidate_workers] "
+            f"cause=invalid_candidate_workers value={candidate_workers}"
+        )
+        raise ValueError("candidate_workers must be a positive integer")
+
+
+def _initialize_phase1_candidate_worker() -> None:
+    """각 candidate process가 CPU thread를 중첩 생성하지 않게 한다."""
+
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+
+
+def create_phase1_candidate_executor(candidate_workers: int) -> ProcessPoolExecutor | None:
+    """spawn 기반 worker pool을 만든다. 1이면 기존 순차 경로를 그대로 쓴다."""
+
+    _validate_phase1_candidate_workers(candidate_workers)
+    if candidate_workers == 1:
+        return None
+    return ProcessPoolExecutor(
+        max_workers=candidate_workers,
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_initialize_phase1_candidate_worker,
+    )
+
+
+@dataclass(frozen=True)
+class _Phase1CandidateWorkerPayload:
+    """한 worker가 동일 model snapshot으로 처리할 agent rollout 묶음이다."""
+
+    indexed_rollouts: tuple[tuple[int, str, str, float, int], ...]
+    jobs: Mapping[str, object]
+    bay_ids: tuple[str, ...]
+    model_state_dict: Dict[str, torch.Tensor] | None
+    pair_feature_dim: int
+    env_feature_dim: int
+    hidden_dim: int
+    objective_scope: str
+    device: str
+    bay_capacity_weights: Mapping[str, int | float] | None
+
+
+def _run_phase1_candidate_worker(
+    payload: _Phase1CandidateWorkerPayload,
+) -> List[tuple[int, Phase1PairCandidate]]:
+    """동일 episode/model snapshot의 agent rollout 묶음을 한 process에서 실행한다."""
+
+    model: Phase1PairPointerPolicy | None = None
+    if payload.model_state_dict is not None:
+        model = Phase1PairPointerPolicy(
+            pair_feature_dim=payload.pair_feature_dim,
+            env_feature_dim=payload.env_feature_dim,
+            hidden_dim=payload.hidden_dim,
+            objective_scope=payload.objective_scope,
+        )
+        model.load_state_dict(payload.model_state_dict)
+        model.to(_resolve_torch_device(payload.device))
+        model.eval()
+    results: List[tuple[int, Phase1PairCandidate]] = []
+    for candidate_index, source, selection, temperature, rollout_seed in payload.indexed_rollouts:
+        results.append(
+            (
+                candidate_index,
+                run_phase1_pair_policy_rollout(
+                    jobs=payload.jobs,
+                    bay_ids=payload.bay_ids,
+                    model=model,
+                    temperature=temperature,
+                    seed=rollout_seed,
+                    source=source,
+                    selection=selection,
+                    bay_capacity_weights=payload.bay_capacity_weights,
+                ),
+            )
+        )
+    return results
+
+
+def build_phase1_pair_agent_candidates(
+    jobs: Mapping[str, object],
+    bay_ids: Sequence[str],
+    model: Phase1PairPointerPolicy | None,
+    rollout_specs: Sequence[tuple[str, str, float, int]],
+    bay_capacity_weights: Mapping[str, int | float] | None = None,
+    candidate_workers: int = 1,
+    candidate_executor: ProcessPoolExecutor | None = None,
+) -> List[Phase1PairCandidate]:
+    """agent rollout 집합을 순차 또는 process 병렬로 생성한다.
+
+    `rollout_specs`는 `(source, selection, temperature, seed)` 순서 tuple의 나열이며,
+    반환 순서는 입력 순서와 항상 같다. 각 rollout의 seed가 명시되어 있으므로
+    worker 수와 무관하게 결과가 동일하다.
+    """
+
+    _validate_phase1_candidate_workers(candidate_workers)
+    if candidate_workers == 1 and candidate_executor is not None:
+        print(
+            "[ERROR][phase1_pair_self_labeling.build_phase1_pair_agent_candidates] "
+            "cause=executor_without_workers candidate_workers=1"
+        )
+        raise RuntimeError("candidate_executor requires candidate_workers greater than 1")
+    resolved_bay_ids = tuple(str(bay_id) for bay_id in bay_ids)
+    indexed_rollouts = tuple(
+        (index, str(source), str(selection), float(temperature), int(rollout_seed))
+        for index, (source, selection, temperature, rollout_seed) in enumerate(rollout_specs)
+    )
+    if not indexed_rollouts:
+        return []
+    if candidate_workers == 1:
+        return [
+            run_phase1_pair_policy_rollout(
+                jobs=jobs,
+                bay_ids=resolved_bay_ids,
+                model=model,
+                temperature=temperature,
+                seed=rollout_seed,
+                source=source,
+                selection=selection,
+                bay_capacity_weights=bay_capacity_weights,
+            )
+            for _, source, selection, temperature, rollout_seed in indexed_rollouts
+        ]
+
+    worker_count = min(candidate_workers, len(indexed_rollouts))
+    rollout_chunks = tuple(
+        tuple(indexed_rollouts[worker_index::worker_count])
+        for worker_index in range(worker_count)
+    )
+    model_state_dict = None
+    pair_feature_dim = 1
+    env_feature_dim = 1
+    hidden_dim = 1
+    objective_scope = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES
+    worker_device = "cpu"
+    if model is not None:
+        model_state_dict = {
+            name: tensor.detach().cpu().clone()
+            for name, tensor in model.state_dict().items()
+        }
+        pair_feature_dim = int(model.pair_feature_dim)
+        env_feature_dim = int(model.env_feature_dim)
+        hidden_dim = int(model.hidden_dim)
+        objective_scope = str(model.objective_scope)
+        worker_device = str(next(model.parameters()).device)
+    payloads = [
+        _Phase1CandidateWorkerPayload(
+            indexed_rollouts=rollout_chunk,
+            jobs=jobs,
+            bay_ids=resolved_bay_ids,
+            model_state_dict=model_state_dict,
+            pair_feature_dim=pair_feature_dim,
+            env_feature_dim=env_feature_dim,
+            hidden_dim=hidden_dim,
+            objective_scope=objective_scope,
+            device=worker_device,
+            bay_capacity_weights=bay_capacity_weights,
+        )
+        for rollout_chunk in rollout_chunks
+    ]
+    owned_executor = candidate_executor is None
+    executor = candidate_executor or create_phase1_candidate_executor(candidate_workers)
+    if executor is None:
+        print(
+            "[ERROR][phase1_pair_self_labeling.build_phase1_pair_agent_candidates] "
+            "cause=missing_parallel_executor"
+        )
+        raise RuntimeError("parallel Phase 1 candidate bank requires an executor")
+    futures = {
+        executor.submit(_run_phase1_candidate_worker, payload): payload
+        for payload in payloads
+    }
+    indexed_candidates: List[tuple[int, Phase1PairCandidate]] = []
+    try:
+        for future, payload in futures.items():
+            try:
+                indexed_candidates.extend(future.result())
+            except Exception as exc:
+                sources = [source for _, source, _, _, _ in payload.indexed_rollouts]
+                print(
+                    "[ERROR][phase1_pair_self_labeling.build_phase1_pair_agent_candidates] "
+                    f"cause=candidate_worker_failed sources={sources} error={exc}"
+                )
+                raise RuntimeError("Phase 1 candidate worker failed") from exc
+    finally:
+        if owned_executor:
+            executor.shutdown(wait=True, cancel_futures=True)
+    indexed_candidates.sort(key=lambda item: item[0])
+    if len(indexed_candidates) != len(indexed_rollouts):
+        print(
+            "[ERROR][phase1_pair_self_labeling.build_phase1_pair_agent_candidates] "
+            f"cause=candidate_count_mismatch expected={len(indexed_rollouts)} "
+            f"actual={len(indexed_candidates)}"
+        )
+        raise RuntimeError("parallel Phase 1 candidate count mismatch")
+    return [candidate for _, candidate in indexed_candidates]
 
 
 def run_phase1_pair_policy_rollout(
@@ -1307,6 +1598,8 @@ def _validate_pair_policy(
     bay_capacity_weights: Mapping[str, int | float] | None = None,
     phase2_feedback_scorer: Phase2FeedbackScorer | None = None,
     objective_scope: str = PHASE1_OBJECTIVE_SCOPE_SHARED_AND_SERIES,
+    candidate_workers: int = 1,
+    candidate_executor: ProcessPoolExecutor | None = None,
 ) -> Dict:
     """Evaluate six series/resource-pool views without mixing independent teachers."""
 
@@ -1339,26 +1632,28 @@ def _validate_pair_policy(
                 _job_attr(first_view_job, "family")
             )
             block_count = len(_collect_blocks(view_jobs, validation_bay_ids))
-            candidates: List[Phase1PairCandidate] = []
-            for sample_index in range(1, rollout_samples + 1):
-                is_greedy = sample_index == 1
-                candidates.append(
-                    run_phase1_pair_policy_rollout(
-                        jobs=view_jobs,
-                        bay_ids=validation_bay_ids,
-                        model=model,
-                        temperature=PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
-                        seed=(
+            candidates: List[Phase1PairCandidate] = list(
+                build_phase1_pair_agent_candidates(
+                    jobs=view_jobs,
+                    bay_ids=validation_bay_ids,
+                    model=model,
+                    rollout_specs=[
+                        (
+                            "agent_greedy" if sample_index == 1 else f"agent_sample_{sample_index}",
+                            "greedy" if sample_index == 1 else "sample",
+                            PHASE1_VALIDATION_SAMPLING_TEMPERATURE,
                             episode * 1_000_000
                             + validation_index * 10_000
                             + view_index * 100
-                            + sample_index
-                        ),
-                        source="agent_greedy" if is_greedy else f"agent_sample_{sample_index}",
-                        selection="greedy" if is_greedy else "sample",
-                        bay_capacity_weights=validation_capacity_weights,
-                    )
+                            + sample_index,
+                        )
+                        for sample_index in range(1, rollout_samples + 1)
+                    ],
+                    bay_capacity_weights=validation_capacity_weights,
+                    candidate_workers=candidate_workers,
+                    candidate_executor=candidate_executor,
                 )
+            )
             for algorithm in heuristic_algorithms:
                 candidates.append(
                     _run_phase1_pair_heuristic_candidate(

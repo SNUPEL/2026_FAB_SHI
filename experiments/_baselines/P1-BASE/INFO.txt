@@ -1,0 +1,7 @@
+﻿별칭        : P1-BASE
+학습 경로   : output\phase1_mixed_resource_pool_v2
+최종 episode: 20000                  완주 여부: 예
+git commit  : 0c4960d42dfb211a1a7d00cf52675ab7fd756d7a
+dirty       : 예
+실행 CLI    : "C:\Users\hani0\anaconda3\envs\simenv\python.exe" main.py phase1-train-pair-self-labeling --config config_mixed.yaml --episodes 20000 --min-blocks 12 --max-blocks 80 --rollout-samples 64 --rollout-samples_validation 64 --heuristic-algorithms all --hidden-dim 128 --checkpoint-every 100 --validation-every 100 --validation-episodes 20 --seed 0 --device cuda --objective-scope series_only --output-dir output/phase1_mixed_resource_pool_v2
+비고        : hidden_dim=128, temperature=1.0 고정(Phase1 annealing 미지원). run_manifest.json 없음(run 시작 08-02, manifest 기능 08-03 이후). GPU=simenv(cuda). validation=고정 holdout 20문제(seed 0, blocks 12-80, VALIDATION_SEED_OFFSET). reselected_ep10600_best.pt = checkpoints/phase1_pair_pointer_ep10600.pt 와 SHA256 동일(ep10600 주기 체크포인트 사본, validation_score 빈값); 선정 기준·문제집합 기록 없음 → 불명(확인 필요).

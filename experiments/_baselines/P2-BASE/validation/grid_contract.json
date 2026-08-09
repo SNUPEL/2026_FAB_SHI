@@ -1,0 +1,1855 @@
+{
+  "schema": "phase2_validation_grid_v1",
+  "problems": [
+    {
+      "problem_id": "B010_T01",
+      "block_count": 10,
+      "distribution_type": 1,
+      "generation_seed": 12152022,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.42857142857142855,
+        "nc_wo_ratio": 0.7857142857142857,
+        "fn_wo_ratio": 0.2857142857142857,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5714285714285714,
+        "bevel_per_wo": 0.42857142857142855,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.2948717948717949,
+        "nc_wo_ratio": 0.10256410256410256,
+        "fn_wo_ratio": 0.01282051282051282,
+        "fl_wo_ratio": 0.5897435897435898,
+        "wo_per_block": 7.8,
+        "cut_per_wo": 48.284932473459975,
+        "bevel_per_wo": 0.5256410256410257,
+        "tact_per_wo": 29.149163454701785
+      },
+      "jobs_sha256": "3d9085fca44e7e440d25216113696383df929d1fac7b978fdd68762e581f2985"
+    },
+    {
+      "problem_id": "B010_T02",
+      "block_count": 10,
+      "distribution_type": 2,
+      "generation_seed": 11942564,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7857142857142857,
+        "nc_wo_ratio": 0.7142857142857143,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.14285714285714285,
+        "wo_per_block": 0.9285714285714286,
+        "cut_per_wo": 0.6428571428571429,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.35714285714285715
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.4588235294117647,
+        "nc_wo_ratio": 0.08235294117647059,
+        "fn_wo_ratio": 0.023529411764705882,
+        "fl_wo_ratio": 0.43529411764705883,
+        "wo_per_block": 8.5,
+        "cut_per_wo": 49.018986002381226,
+        "bevel_per_wo": 0.5176470588235295,
+        "tact_per_wo": 28.015132651446844
+      },
+      "jobs_sha256": "b6ec6c5b2e65787d29a8e0fa2ca47026864612acf6e3acc19da876ad02cd93be"
+    },
+    {
+      "problem_id": "B010_T03",
+      "block_count": 10,
+      "distribution_type": 3,
+      "generation_seed": 12256751,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.35714285714285715,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.9285714285714286,
+        "tact_per_wo": 0.5714285714285714
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3076923076923077,
+        "nc_wo_ratio": 0.05128205128205128,
+        "fn_wo_ratio": 0.05128205128205128,
+        "fl_wo_ratio": 0.5897435897435898,
+        "wo_per_block": 7.8,
+        "cut_per_wo": 49.380318561416885,
+        "bevel_per_wo": 0.8974358974358975,
+        "tact_per_wo": 29.490680356293197
+      },
+      "jobs_sha256": "056bb62e4194d7573e3e02f4a62f2964165c373f0ea5d846697cfd8eccf2d75e"
+    },
+    {
+      "problem_id": "B010_T04",
+      "block_count": 10,
+      "distribution_type": 4,
+      "generation_seed": 11837835,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7142857142857143,
+        "nc_wo_ratio": 0.0,
+        "fn_wo_ratio": 0.35714285714285715,
+        "fl_wo_ratio": 0.42857142857142855,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.42857142857142855,
+        "bevel_per_wo": 0.6428571428571429,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.42857142857142855,
+        "nc_wo_ratio": 0.0,
+        "fn_wo_ratio": 0.014285714285714285,
+        "fl_wo_ratio": 0.5571428571428572,
+        "wo_per_block": 7.0,
+        "cut_per_wo": 48.19796306509856,
+        "bevel_per_wo": 0.6,
+        "tact_per_wo": 28.493959372706957
+      },
+      "jobs_sha256": "2711b62b5dc334199939dd7cb70cd6493452524d2332fbe4e19c635c92a120b1"
+    },
+    {
+      "problem_id": "B010_T05",
+      "block_count": 10,
+      "distribution_type": 5,
+      "generation_seed": 12570938,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.21428571428571427,
+        "fn_wo_ratio": 0.7857142857142857,
+        "fl_wo_ratio": 0.9285714285714286,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.21428571428571427,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.21428571428571427
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.189873417721519,
+        "nc_wo_ratio": 0.0379746835443038,
+        "fn_wo_ratio": 0.05063291139240506,
+        "fl_wo_ratio": 0.7215189873417721,
+        "wo_per_block": 7.9,
+        "cut_per_wo": 45.16776400745231,
+        "bevel_per_wo": 0.569620253164557,
+        "tact_per_wo": 27.447943239565944
+      },
+      "jobs_sha256": "bef701dca50d57649ef67de03d23f5cfb7e5bcf29d568ee472b0d02857688cc1"
+    },
+    {
+      "problem_id": "B020_T01",
+      "block_count": 20,
+      "distribution_type": 1,
+      "generation_seed": 12837838,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.8571428571428571,
+        "nc_wo_ratio": 0.9285714285714286,
+        "fn_wo_ratio": 0.21428571428571427,
+        "fl_wo_ratio": 0.14285714285714285,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.9285714285714286,
+        "tact_per_wo": 0.8571428571428571
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.39568345323741005,
+        "nc_wo_ratio": 0.07913669064748201,
+        "fn_wo_ratio": 0.02158273381294964,
+        "fl_wo_ratio": 0.5035971223021583,
+        "wo_per_block": 6.95,
+        "cut_per_wo": 52.40447728264875,
+        "bevel_per_wo": 0.8345323741007195,
+        "tact_per_wo": 30.189767802326035
+      },
+      "jobs_sha256": "36f9ca3fab4485075664c32cf45fc0cb26a1fc2c20a0bcbe8ee882382487bbad"
+    },
+    {
+      "problem_id": "B020_T02",
+      "block_count": 20,
+      "distribution_type": 2,
+      "generation_seed": 13570941,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.21428571428571427,
+        "nc_wo_ratio": 0.35714285714285715,
+        "fn_wo_ratio": 0.42857142857142855,
+        "fl_wo_ratio": 0.7857142857142857,
+        "wo_per_block": 0.8571428571428571,
+        "cut_per_wo": 0.2857142857142857,
+        "bevel_per_wo": 0.2857142857142857,
+        "tact_per_wo": 0.21428571428571427
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.2345679012345679,
+        "nc_wo_ratio": 0.018518518518518517,
+        "fn_wo_ratio": 0.030864197530864196,
+        "fl_wo_ratio": 0.7160493827160493,
+        "wo_per_block": 8.1,
+        "cut_per_wo": 43.941918353256874,
+        "bevel_per_wo": 0.5308641975308642,
+        "tact_per_wo": 25.11930550750198
+      },
+      "jobs_sha256": "ea1152ab7f55d87f2f98d94aabd45e85993dbd73a56101829d0122bef4d65b47"
+    },
+    {
+      "problem_id": "B020_T03",
+      "block_count": 20,
+      "distribution_type": 3,
+      "generation_seed": 13466212,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.35714285714285715,
+        "nc_wo_ratio": 1.0,
+        "fn_wo_ratio": 0.7857142857142857,
+        "fl_wo_ratio": 0.35714285714285715,
+        "wo_per_block": 0.21428571428571427,
+        "cut_per_wo": 0.42857142857142855,
+        "bevel_per_wo": 0.42857142857142855,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.25,
+        "nc_wo_ratio": 0.0859375,
+        "fn_wo_ratio": 0.078125,
+        "fl_wo_ratio": 0.5859375,
+        "wo_per_block": 6.4,
+        "cut_per_wo": 45.86644128180989,
+        "bevel_per_wo": 0.546875,
+        "tact_per_wo": 27.14229882150709
+      },
+      "jobs_sha256": "7989201cbee1ec36d5a833dc84e047b19013e4d07656339a3b801e8125699211"
+    },
+    {
+      "problem_id": "B020_T04",
+      "block_count": 20,
+      "distribution_type": 4,
+      "generation_seed": 12104735,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.7142857142857143,
+        "fn_wo_ratio": 0.2857142857142857,
+        "fl_wo_ratio": 0.6428571428571429,
+        "wo_per_block": 0.7142857142857143,
+        "cut_per_wo": 0.07142857142857142,
+        "bevel_per_wo": 0.5714285714285714,
+        "tact_per_wo": 0.07142857142857142
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.2611464968152866,
+        "nc_wo_ratio": 0.044585987261146494,
+        "fn_wo_ratio": 0.025477707006369428,
+        "fl_wo_ratio": 0.6687898089171974,
+        "wo_per_block": 7.85,
+        "cut_per_wo": 42.03729112878984,
+        "bevel_per_wo": 0.5987261146496815,
+        "tact_per_wo": 24.98073111779906
+      },
+      "jobs_sha256": "cbcd19fbb085d5197d2bff1f52dd5f7b620ac95c255354534fd1e34a8a2844f7"
+    },
+    {
+      "problem_id": "B020_T05",
+      "block_count": 20,
+      "distribution_type": 5,
+      "generation_seed": 12523651,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7857142857142857,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.6428571428571429,
+        "bevel_per_wo": 0.7142857142857143,
+        "tact_per_wo": 0.6428571428571429
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3525641025641026,
+        "nc_wo_ratio": 0.01282051282051282,
+        "fn_wo_ratio": 0.057692307692307696,
+        "fl_wo_ratio": 0.5769230769230769,
+        "wo_per_block": 7.8,
+        "cut_per_wo": 51.61887549604143,
+        "bevel_per_wo": 0.6474358974358975,
+        "tact_per_wo": 28.62553584109828
+      },
+      "jobs_sha256": "85397992bc7929445ec78b28f74089bc77c82d2542306131a907d79fc16e58c6"
+    },
+    {
+      "problem_id": "B030_T01",
+      "block_count": 30,
+      "distribution_type": 1,
+      "generation_seed": 14047299,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.9285714285714286,
+        "fn_wo_ratio": 0.35714285714285715,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.14285714285714285,
+        "cut_per_wo": 0.6428571428571429,
+        "bevel_per_wo": 0.07142857142857142,
+        "tact_per_wo": 0.5714285714285714
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3496932515337423,
+        "nc_wo_ratio": 0.08588957055214724,
+        "fn_wo_ratio": 0.06748466257668712,
+        "fl_wo_ratio": 0.49693251533742333,
+        "wo_per_block": 5.433333333333334,
+        "cut_per_wo": 49.49750285899786,
+        "bevel_per_wo": 0.4662576687116564,
+        "tact_per_wo": 28.680241704010534
+      },
+      "jobs_sha256": "873b8568f32a2c61e14adfcc6db15dc9f0c23745c2782dd2a4657773517b5aae"
+    },
+    {
+      "problem_id": "B030_T02",
+      "block_count": 30,
+      "distribution_type": 2,
+      "generation_seed": 13628383,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.35714285714285715,
+        "nc_wo_ratio": 0.5714285714285714,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.7142857142857143,
+        "cut_per_wo": 0.2857142857142857,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.2857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.2890995260663507,
+        "nc_wo_ratio": 0.037914691943127965,
+        "fn_wo_ratio": 0.08530805687203792,
+        "fl_wo_ratio": 0.5876777251184834,
+        "wo_per_block": 7.033333333333333,
+        "cut_per_wo": 45.528843094192986,
+        "bevel_per_wo": 0.5781990521327014,
+        "tact_per_wo": 27.0041572329055
+      },
+      "jobs_sha256": "39caf8da2a2e23dba853b4fa1ea8e5faa04811e630fb7f1d57dd9e6bb9490feb"
+    },
+    {
+      "problem_id": "B030_T03",
+      "block_count": 30,
+      "distribution_type": 3,
+      "generation_seed": 13209467,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.7857142857142857,
+        "fn_wo_ratio": 1.0,
+        "fl_wo_ratio": 0.0,
+        "wo_per_block": 0.42857142857142855,
+        "cut_per_wo": 0.35714285714285715,
+        "bevel_per_wo": 0.6428571428571429,
+        "tact_per_wo": 0.7857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3403141361256545,
+        "nc_wo_ratio": 0.06282722513089005,
+        "fn_wo_ratio": 0.1518324607329843,
+        "fl_wo_ratio": 0.44502617801047123,
+        "wo_per_block": 6.366666666666666,
+        "cut_per_wo": 47.86834607400703,
+        "bevel_per_wo": 0.7277486910994765,
+        "tact_per_wo": 29.768262935364955
+      },
+      "jobs_sha256": "1388e41ee1293493a78a81746a0c4042b23895e849902318155eba271d281b87"
+    },
+    {
+      "problem_id": "B030_T04",
+      "block_count": 30,
+      "distribution_type": 4,
+      "generation_seed": 13942570,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.2857142857142857,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.21428571428571427,
+        "cut_per_wo": 0.5714285714285714,
+        "bevel_per_wo": 0.5714285714285714,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.32044198895027626,
+        "nc_wo_ratio": 0.03867403314917127,
+        "fn_wo_ratio": 0.06629834254143646,
+        "fl_wo_ratio": 0.574585635359116,
+        "wo_per_block": 6.033333333333333,
+        "cut_per_wo": 48.92351926097408,
+        "bevel_per_wo": 0.7237569060773481,
+        "tact_per_wo": 28.24507026438979
+      },
+      "jobs_sha256": "a10e784c2a2400cf4e70e1c31d944739fb94c51dbd9fe1a5805ccef04ed6ebf9"
+    },
+    {
+      "problem_id": "B030_T05",
+      "block_count": 30,
+      "distribution_type": 5,
+      "generation_seed": 13523654,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.14285714285714285,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 0.7857142857142857,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.42857142857142855,
+        "bevel_per_wo": 0.42857142857142855,
+        "tact_per_wo": 0.7142857142857143
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.22340425531914893,
+        "nc_wo_ratio": 0.02127659574468085,
+        "fn_wo_ratio": 0.10638297872340426,
+        "fl_wo_ratio": 0.648936170212766,
+        "wo_per_block": 6.266666666666667,
+        "cut_per_wo": 48.76144498395929,
+        "bevel_per_wo": 0.601063829787234,
+        "tact_per_wo": 29.295507287681428
+      },
+      "jobs_sha256": "52eae76768057e00e8f1867a559b2784bfb68a14522c96c2b48bfb4994883f32"
+    },
+    {
+      "problem_id": "B040_T01",
+      "block_count": 40,
+      "distribution_type": 1,
+      "generation_seed": 15361489,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.42857142857142855,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.7857142857142857,
+        "bevel_per_wo": 0.14285714285714285,
+        "tact_per_wo": 0.6428571428571429
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.391304347826087,
+        "nc_wo_ratio": 0.030100334448160536,
+        "fn_wo_ratio": 0.043478260869565216,
+        "fl_wo_ratio": 0.5351170568561873,
+        "wo_per_block": 7.475,
+        "cut_per_wo": 52.81906393106355,
+        "bevel_per_wo": 0.5652173913043478,
+        "tact_per_wo": 29.23871532615929
+      },
+      "jobs_sha256": "75b5df124604471a76dc453db7de9a82e4fd659e46776116fbff2e6d457e223f"
+    },
+    {
+      "problem_id": "B040_T02",
+      "block_count": 40,
+      "distribution_type": 2,
+      "generation_seed": 14418928,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.07142857142857142,
+        "fn_wo_ratio": 0.5714285714285714,
+        "fl_wo_ratio": 0.7142857142857143,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.6428571428571429,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.7857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.37037037037037035,
+        "nc_wo_ratio": 0.010101010101010102,
+        "fn_wo_ratio": 0.050505050505050504,
+        "fl_wo_ratio": 0.569023569023569,
+        "wo_per_block": 7.425,
+        "cut_per_wo": 51.200853807196935,
+        "bevel_per_wo": 0.6296296296296297,
+        "tact_per_wo": 29.565460554744448
+      },
+      "jobs_sha256": "d6529dcc9eddd2fd73e6f24a75dd357e0f0124a4a2156074902a8cde89ba0123"
+    },
+    {
+      "problem_id": "B040_T03",
+      "block_count": 40,
+      "distribution_type": 3,
+      "generation_seed": 14314199,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.5714285714285714,
+        "fn_wo_ratio": 1.0,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.8571428571428571,
+        "cut_per_wo": 0.0,
+        "bevel_per_wo": 0.2857142857142857,
+        "tact_per_wo": 0.0
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.33121019108280253,
+        "nc_wo_ratio": 0.03184713375796178,
+        "fn_wo_ratio": 0.11464968152866242,
+        "fl_wo_ratio": 0.5222929936305732,
+        "wo_per_block": 7.85,
+        "cut_per_wo": 43.9393213252225,
+        "bevel_per_wo": 0.6114649681528662,
+        "tact_per_wo": 26.337765219127558
+      },
+      "jobs_sha256": "6a1743e84ccd21dfb35319aa8b130f4a00cab2ffcd7c420de3b70cc64c42ef6e"
+    },
+    {
+      "problem_id": "B040_T04",
+      "block_count": 40,
+      "distribution_type": 4,
+      "generation_seed": 15152031,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.14285714285714285,
+        "nc_wo_ratio": 0.42857142857142855,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.9285714285714286,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.21428571428571427,
+        "bevel_per_wo": 0.6428571428571429,
+        "tact_per_wo": 0.21428571428571427
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3238434163701068,
+        "nc_wo_ratio": 0.028469750889679714,
+        "fn_wo_ratio": 0.060498220640569395,
+        "fl_wo_ratio": 0.5871886120996441,
+        "wo_per_block": 7.025,
+        "cut_per_wo": 46.46484394033949,
+        "bevel_per_wo": 0.6868327402135231,
+        "tact_per_wo": 27.957650885438913
+      },
+      "jobs_sha256": "d7299a950d24c807d5c1208db250a26366dbb3203c1f40f610a8b896eae85e47"
+    },
+    {
+      "problem_id": "B040_T05",
+      "block_count": 40,
+      "distribution_type": 5,
+      "generation_seed": 14628386,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.35714285714285715,
+        "nc_wo_ratio": 0.35714285714285715,
+        "fn_wo_ratio": 0.9285714285714286,
+        "fl_wo_ratio": 0.6428571428571429,
+        "wo_per_block": 0.0,
+        "cut_per_wo": 0.2857142857142857,
+        "bevel_per_wo": 0.7142857142857143,
+        "tact_per_wo": 0.14285714285714285
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3346613545816733,
+        "nc_wo_ratio": 0.027888446215139442,
+        "fn_wo_ratio": 0.08366533864541832,
+        "fl_wo_ratio": 0.5537848605577689,
+        "wo_per_block": 6.275,
+        "cut_per_wo": 46.97737023503091,
+        "bevel_per_wo": 0.6892430278884463,
+        "tact_per_wo": 27.84679340799822
+      },
+      "jobs_sha256": "11a0ba1a9d1a18e05c4a39899ed61a25851592307722acbab65ae8891348227e"
+    },
+    {
+      "problem_id": "B050_T01",
+      "block_count": 50,
+      "distribution_type": 1,
+      "generation_seed": 15523660,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7142857142857143,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.21428571428571427,
+        "fl_wo_ratio": 0.21428571428571427,
+        "wo_per_block": 0.14285714285714285,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.6428571428571429,
+        "tact_per_wo": 0.8571428571428571
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.4006514657980456,
+        "nc_wo_ratio": 0.05537459283387622,
+        "fn_wo_ratio": 0.035830618892508145,
+        "fl_wo_ratio": 0.50814332247557,
+        "wo_per_block": 6.14,
+        "cut_per_wo": 53.35496720827659,
+        "bevel_per_wo": 0.6579804560260586,
+        "tact_per_wo": 30.029377357585016
+      },
+      "jobs_sha256": "ef72b0d2d1816802086ace38c7c0b08ad46cf3d52e05449ccb01f00fdc3e01a2"
+    },
+    {
+      "problem_id": "B050_T02",
+      "block_count": 50,
+      "distribution_type": 2,
+      "generation_seed": 15942576,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.21428571428571427,
+        "fn_wo_ratio": 0.35714285714285715,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.9285714285714286,
+        "cut_per_wo": 0.35714285714285715,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.21428571428571427
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3567961165048544,
+        "nc_wo_ratio": 0.021844660194174758,
+        "fn_wo_ratio": 0.0412621359223301,
+        "fl_wo_ratio": 0.5800970873786407,
+        "wo_per_block": 8.24,
+        "cut_per_wo": 49.5759102255194,
+        "bevel_per_wo": 0.6480582524271845,
+        "tact_per_wo": 28.217841991677016
+      },
+      "jobs_sha256": "e793569055159bb48fe078cdb1907e3308e6da16454b1c442ad52fc3484e5eb7"
+    },
+    {
+      "problem_id": "B050_T03",
+      "block_count": 50,
+      "distribution_type": 3,
+      "generation_seed": 15104744,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.8571428571428571,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.14285714285714285,
+        "bevel_per_wo": 0.5714285714285714,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3407821229050279,
+        "nc_wo_ratio": 0.06983240223463687,
+        "fn_wo_ratio": 0.055865921787709494,
+        "fl_wo_ratio": 0.5335195530726257,
+        "wo_per_block": 7.16,
+        "cut_per_wo": 48.419789979957585,
+        "bevel_per_wo": 0.6536312849162011,
+        "tact_per_wo": 28.873403915679287
+      },
+      "jobs_sha256": "4cc144ef6562a27d209f9dad4e87658def3a18f16aeb43f96d1ba934c295293d"
+    },
+    {
+      "problem_id": "B050_T04",
+      "block_count": 50,
+      "distribution_type": 4,
+      "generation_seed": 16570950,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.21428571428571427,
+        "nc_wo_ratio": 0.35714285714285715,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.7857142857142857,
+        "wo_per_block": 0.2857142857142857,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.42857142857142855,
+        "tact_per_wo": 0.2857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.284375,
+        "nc_wo_ratio": 0.025,
+        "fn_wo_ratio": 0.05,
+        "fl_wo_ratio": 0.640625,
+        "wo_per_block": 6.4,
+        "cut_per_wo": 51.18509984295205,
+        "bevel_per_wo": 0.646875,
+        "tact_per_wo": 28.45244212946027
+      },
+      "jobs_sha256": "5ace63dfd3ff292d5907c1dddd03f92ebdd52080c70d503140308f25e3349f72"
+    },
+    {
+      "problem_id": "B050_T05",
+      "block_count": 50,
+      "distribution_type": 5,
+      "generation_seed": 16466221,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.7857142857142857,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.6428571428571429,
+        "bevel_per_wo": 0.2857142857142857,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3463687150837989,
+        "nc_wo_ratio": 0.019553072625698324,
+        "fn_wo_ratio": 0.05027932960893855,
+        "fl_wo_ratio": 0.5837988826815642,
+        "wo_per_block": 7.16,
+        "cut_per_wo": 52.39708374703653,
+        "bevel_per_wo": 0.6340782122905028,
+        "tact_per_wo": 29.094594034325418
+      },
+      "jobs_sha256": "efb049ff83814ab8b7d29c758313041c8b062e88f0adaad7d306fc123a19f7cd"
+    },
+    {
+      "problem_id": "B060_T01",
+      "block_count": 60,
+      "distribution_type": 1,
+      "generation_seed": 16733121,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.8571428571428571,
+        "fn_wo_ratio": 0.35714285714285715,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.42857142857142855,
+        "bevel_per_wo": 0.2857142857142857,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3493975903614458,
+        "nc_wo_ratio": 0.06265060240963856,
+        "fn_wo_ratio": 0.043373493975903614,
+        "fl_wo_ratio": 0.5445783132530121,
+        "wo_per_block": 6.916666666666667,
+        "cut_per_wo": 48.23598270777254,
+        "bevel_per_wo": 0.5927710843373494,
+        "tact_per_wo": 28.21971437603187
+      },
+      "jobs_sha256": "3bc0b62bc3102763bb6405864150882ea1908862f73846cc178849e0968a7151"
+    },
+    {
+      "problem_id": "B060_T02",
+      "block_count": 60,
+      "distribution_type": 2,
+      "generation_seed": 16523663,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.42857142857142855,
+        "fn_wo_ratio": 0.7857142857142857,
+        "fl_wo_ratio": 0.42857142857142855,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.7857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.35135135135135137,
+        "nc_wo_ratio": 0.036855036855036855,
+        "fn_wo_ratio": 0.056511056511056514,
+        "fl_wo_ratio": 0.5552825552825553,
+        "wo_per_block": 6.783333333333333,
+        "cut_per_wo": 50.6593036366004,
+        "bevel_per_wo": 0.6216216216216216,
+        "tact_per_wo": 29.29122893907791
+      },
+      "jobs_sha256": "c1d2ed027635a4b4a1481e7cfbf78dc2daf48ea100d99c55b40468f5e4a400a6"
+    },
+    {
+      "problem_id": "B060_T03",
+      "block_count": 60,
+      "distribution_type": 3,
+      "generation_seed": 16837850,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.7142857142857143,
+        "fn_wo_ratio": 0.9285714285714286,
+        "fl_wo_ratio": 0.21428571428571427,
+        "wo_per_block": 0.42857142857142855,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.8571428571428571,
+        "tact_per_wo": 0.6428571428571429
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.34491315136476425,
+        "nc_wo_ratio": 0.05707196029776675,
+        "fn_wo_ratio": 0.062034739454094295,
+        "fl_wo_ratio": 0.5359801488833746,
+        "wo_per_block": 6.716666666666667,
+        "cut_per_wo": 49.406505956264674,
+        "bevel_per_wo": 0.7419354838709677,
+        "tact_per_wo": 28.723102708672194
+      },
+      "jobs_sha256": "03cd3214dba1cfa969f2153c33a773ce4764f223ce5908f9a626393b08ec9229"
+    },
+    {
+      "problem_id": "B060_T04",
+      "block_count": 60,
+      "distribution_type": 4,
+      "generation_seed": 16314205,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7142857142857143,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.35714285714285715,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.14285714285714285,
+        "bevel_per_wo": 0.0,
+        "tact_per_wo": 0.07142857142857142
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3523809523809524,
+        "nc_wo_ratio": 0.0380952380952381,
+        "fn_wo_ratio": 0.05476190476190476,
+        "fl_wo_ratio": 0.5547619047619048,
+        "wo_per_block": 7.0,
+        "cut_per_wo": 46.263082071271434,
+        "bevel_per_wo": 0.530952380952381,
+        "tact_per_wo": 26.967552256915223
+      },
+      "jobs_sha256": "6f738ad7ed76653848324cea9ad3f52077cb6b0df9f7c0b2944d9038f50c8631"
+    },
+    {
+      "problem_id": "B060_T05",
+      "block_count": 60,
+      "distribution_type": 5,
+      "generation_seed": 16209476,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.14285714285714285,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 0.8571428571428571,
+        "wo_per_block": 0.21428571428571427,
+        "cut_per_wo": 0.35714285714285715,
+        "bevel_per_wo": 0.7142857142857143,
+        "tact_per_wo": 0.35714285714285715
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.29219143576826195,
+        "nc_wo_ratio": 0.0327455919395466,
+        "fn_wo_ratio": 0.060453400503778336,
+        "fl_wo_ratio": 0.6146095717884131,
+        "wo_per_block": 6.616666666666666,
+        "cut_per_wo": 47.655899191772185,
+        "bevel_per_wo": 0.690176322418136,
+        "tact_per_wo": 27.97141044684376
+      },
+      "jobs_sha256": "b572f075907e7ab18020ca1b468e5fb8eeb26bf9b20d8bdd6312e5c699f03bfe"
+    },
+    {
+      "problem_id": "B070_T01",
+      "block_count": 70,
+      "distribution_type": 1,
+      "generation_seed": 17418937,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.2857142857142857,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.5714285714285714,
+        "bevel_per_wo": 0.21428571428571427,
+        "tact_per_wo": 0.8571428571428571
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3695198329853862,
+        "nc_wo_ratio": 0.054279749478079335,
+        "fn_wo_ratio": 0.037578288100208766,
+        "fl_wo_ratio": 0.5386221294363257,
+        "wo_per_block": 6.8428571428571425,
+        "cut_per_wo": 49.570362527472994,
+        "bevel_per_wo": 0.5949895615866388,
+        "tact_per_wo": 29.099530853661417
+      },
+      "jobs_sha256": "5461a60015fc0f5ec609795d8e57d5a64aec9ce9b1c0681c87aea264735b9242"
+    },
+    {
+      "problem_id": "B070_T02",
+      "block_count": 70,
+      "distribution_type": 2,
+      "generation_seed": 18361498,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.21428571428571427,
+        "fl_wo_ratio": 0.7142857142857143,
+        "wo_per_block": 0.8571428571428571,
+        "cut_per_wo": 0.35714285714285715,
+        "bevel_per_wo": 0.2857142857142857,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.34923664122137404,
+        "nc_wo_ratio": 0.04580152671755725,
+        "fn_wo_ratio": 0.03244274809160305,
+        "fl_wo_ratio": 0.5725190839694656,
+        "wo_per_block": 7.485714285714286,
+        "cut_per_wo": 48.866896494414,
+        "bevel_per_wo": 0.6049618320610687,
+        "tact_per_wo": 28.383652339420358
+      },
+      "jobs_sha256": "814030c771f0a72b60ed609e4d5746e3d818de0dfd7b90c0d6ffebeaf95f7598"
+    },
+    {
+      "problem_id": "B070_T03",
+      "block_count": 70,
+      "distribution_type": 3,
+      "generation_seed": 17104750,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.7857142857142857,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.21428571428571427,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.7857142857142857,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.7142857142857143
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.369140625,
+        "nc_wo_ratio": 0.0625,
+        "fn_wo_ratio": 0.0546875,
+        "fl_wo_ratio": 0.513671875,
+        "wo_per_block": 7.314285714285714,
+        "cut_per_wo": 49.84518893454506,
+        "bevel_per_wo": 0.619140625,
+        "tact_per_wo": 28.731172660138892
+      },
+      "jobs_sha256": "ffcdf9fc7902fd26dce0e6b71f8f7d1a9bd27206e26b2713ef531cac760295a2"
+    },
+    {
+      "problem_id": "B070_T04",
+      "block_count": 70,
+      "distribution_type": 4,
+      "generation_seed": 17628395,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7142857142857143,
+        "nc_wo_ratio": 0.5714285714285714,
+        "fn_wo_ratio": 0.14285714285714285,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.7142857142857143,
+        "tact_per_wo": 0.35714285714285715
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3727087576374745,
+        "nc_wo_ratio": 0.048879837067209775,
+        "fn_wo_ratio": 0.026476578411405296,
+        "fl_wo_ratio": 0.5519348268839104,
+        "wo_per_block": 7.014285714285714,
+        "cut_per_wo": 49.56350123955522,
+        "bevel_per_wo": 0.6639511201629328,
+        "tact_per_wo": 28.155407369108076
+      },
+      "jobs_sha256": "980c4b525fdc87b3c4cf5de2bf72085af804e3d87556fb71b42d089f8f648bd6"
+    },
+    {
+      "problem_id": "B070_T05",
+      "block_count": 70,
+      "distribution_type": 5,
+      "generation_seed": 17837853,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.21428571428571427,
+        "nc_wo_ratio": 0.07142857142857142,
+        "fn_wo_ratio": 0.07142857142857142,
+        "fl_wo_ratio": 0.9285714285714286,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.8571428571428571,
+        "bevel_per_wo": 0.7857142857142857,
+        "tact_per_wo": 0.5714285714285714
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3393939393939394,
+        "nc_wo_ratio": 0.03232323232323232,
+        "fn_wo_ratio": 0.022222222222222223,
+        "fl_wo_ratio": 0.6060606060606061,
+        "wo_per_block": 7.071428571428571,
+        "cut_per_wo": 50.62985299570463,
+        "bevel_per_wo": 0.6707070707070707,
+        "tact_per_wo": 28.562065437283604
+      },
+      "jobs_sha256": "2c85d3d9db6f7ea576a657225edd0c82cd63ec3a2ab227314bedcea5668e53ad"
+    },
+    {
+      "problem_id": "B080_T01",
+      "block_count": 80,
+      "distribution_type": 1,
+      "generation_seed": 19361501,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.7142857142857143,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.42857142857142855,
+        "fl_wo_ratio": 0.21428571428571427,
+        "wo_per_block": 0.2857142857142857,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.8571428571428571,
+        "tact_per_wo": 0.8571428571428571
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.375,
+        "nc_wo_ratio": 0.041666666666666664,
+        "fn_wo_ratio": 0.05113636363636364,
+        "fl_wo_ratio": 0.5321969696969697,
+        "wo_per_block": 6.6,
+        "cut_per_wo": 49.457943267784984,
+        "bevel_per_wo": 0.6685606060606061,
+        "tact_per_wo": 28.95989490972935
+      },
+      "jobs_sha256": "bb77b753df53cd07e160c5efbcfdccaaa905f00505a681edaff42520b2495247"
+    },
+    {
+      "problem_id": "B080_T02",
+      "block_count": 80,
+      "distribution_type": 2,
+      "generation_seed": 18209482,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.7857142857142857,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.8571428571428571,
+        "cut_per_wo": 0.35714285714285715,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.5714285714285714
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3197278911564626,
+        "nc_wo_ratio": 0.04591836734693878,
+        "fn_wo_ratio": 0.05272108843537415,
+        "fl_wo_ratio": 0.5816326530612245,
+        "wo_per_block": 7.35,
+        "cut_per_wo": 48.53222535938438,
+        "bevel_per_wo": 0.6224489795918368,
+        "tact_per_wo": 28.304526176198607
+      },
+      "jobs_sha256": "63463dcb88f694905ff08117d0cc5fe202ac0378747f71529fd6182a1ca95ed7"
+    },
+    {
+      "problem_id": "B080_T03",
+      "block_count": 80,
+      "distribution_type": 3,
+      "generation_seed": 18628398,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.42857142857142855,
+        "fn_wo_ratio": 0.7142857142857143,
+        "fl_wo_ratio": 0.42857142857142855,
+        "wo_per_block": 0.7857142857142857,
+        "cut_per_wo": 0.42857142857142855,
+        "bevel_per_wo": 0.7857142857142857,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3524305555555556,
+        "nc_wo_ratio": 0.034722222222222224,
+        "fn_wo_ratio": 0.059027777777777776,
+        "fl_wo_ratio": 0.5538194444444444,
+        "wo_per_block": 7.2,
+        "cut_per_wo": 48.63403915128005,
+        "bevel_per_wo": 0.6527777777777778,
+        "tact_per_wo": 27.89614693962088
+      },
+      "jobs_sha256": "9cc7a4a265a15656f2c253aad960abd595d238d9febd9630949ad26e75e46f11"
+    },
+    {
+      "problem_id": "B080_T04",
+      "block_count": 80,
+      "distribution_type": 4,
+      "generation_seed": 18104753,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.35714285714285715,
+        "nc_wo_ratio": 0.2857142857142857,
+        "fn_wo_ratio": 0.5714285714285714,
+        "fl_wo_ratio": 0.7142857142857143,
+        "wo_per_block": 0.7142857142857143,
+        "cut_per_wo": 0.14285714285714285,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.14285714285714285
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3205574912891986,
+        "nc_wo_ratio": 0.0313588850174216,
+        "fn_wo_ratio": 0.05574912891986063,
+        "fl_wo_ratio": 0.5923344947735192,
+        "wo_per_block": 7.175,
+        "cut_per_wo": 46.22574701479824,
+        "bevel_per_wo": 0.5993031358885017,
+        "tact_per_wo": 26.922529105310236
+      },
+      "jobs_sha256": "1d914d1ab67fc6cd4d93906d704779624c26bb824680421827055c9541ed6c08"
+    },
+    {
+      "problem_id": "B080_T05",
+      "block_count": 80,
+      "distribution_type": 5,
+      "generation_seed": 19570959,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.0,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 1.0,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.7857142857142857,
+        "bevel_per_wo": 0.5714285714285714,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.2604735883424408,
+        "nc_wo_ratio": 0.02185792349726776,
+        "fn_wo_ratio": 0.0692167577413479,
+        "fl_wo_ratio": 0.6484517304189436,
+        "wo_per_block": 6.8625,
+        "cut_per_wo": 50.16693546438797,
+        "bevel_per_wo": 0.6229508196721312,
+        "tact_per_wo": 28.18114998685355
+      },
+      "jobs_sha256": "46c13ff1d98e77f676f88a4a3de4fde5217313299f978d9cc566a92b52e34390"
+    },
+    {
+      "problem_id": "B090_T01",
+      "block_count": 90,
+      "distribution_type": 1,
+      "generation_seed": 19733130,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.21428571428571427,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.14285714285714285,
+        "fl_wo_ratio": 0.8571428571428571,
+        "wo_per_block": 0.21428571428571427,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.7142857142857143
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.325044404973357,
+        "nc_wo_ratio": 0.03907637655417407,
+        "fn_wo_ratio": 0.04262877442273535,
+        "fl_wo_ratio": 0.5932504440497336,
+        "wo_per_block": 6.2555555555555555,
+        "cut_per_wo": 49.393657403633334,
+        "bevel_per_wo": 0.6305506216696269,
+        "tact_per_wo": 28.458374685064744
+      },
+      "jobs_sha256": "c646aa07c9039102e2e08780d1703ae64f8a429e69f9fd3a8639c60010520f94"
+    },
+    {
+      "problem_id": "B090_T02",
+      "block_count": 90,
+      "distribution_type": 2,
+      "generation_seed": 20466233,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.8571428571428571,
+        "fn_wo_ratio": 0.5714285714285714,
+        "fl_wo_ratio": 0.2857142857142857,
+        "wo_per_block": 0.5714285714285714,
+        "cut_per_wo": 0.5714285714285714,
+        "bevel_per_wo": 0.5714285714285714,
+        "tact_per_wo": 0.7857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3672496025437202,
+        "nc_wo_ratio": 0.058823529411764705,
+        "fn_wo_ratio": 0.057233704292527825,
+        "fl_wo_ratio": 0.5166931637519873,
+        "wo_per_block": 6.988888888888889,
+        "cut_per_wo": 48.90868454931769,
+        "bevel_per_wo": 0.6454689984101749,
+        "tact_per_wo": 28.568289377375113
+      },
+      "jobs_sha256": "fe6f51fd9164c0127da7c4e3cc149cae9a59b0833a36cff0f567ee03bead9cc3"
+    },
+    {
+      "problem_id": "B090_T03",
+      "block_count": 90,
+      "distribution_type": 3,
+      "generation_seed": 20570962,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.5714285714285714,
+        "fn_wo_ratio": 0.2857142857142857,
+        "fl_wo_ratio": 0.42857142857142855,
+        "wo_per_block": 0.6428571428571429,
+        "cut_per_wo": 0.9285714285714286,
+        "bevel_per_wo": 0.7857142857142857,
+        "tact_per_wo": 0.6428571428571429
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3686708860759494,
+        "nc_wo_ratio": 0.0379746835443038,
+        "fn_wo_ratio": 0.04588607594936709,
+        "fl_wo_ratio": 0.5474683544303798,
+        "wo_per_block": 7.022222222222222,
+        "cut_per_wo": 50.24737571459028,
+        "bevel_per_wo": 0.7341772151898734,
+        "tact_per_wo": 28.351541435357355
+      },
+      "jobs_sha256": "ffbde2db435db16fd7c717ecfac1a9a9c4340644b24c538e84ac1334c8df86e0"
+    },
+    {
+      "problem_id": "B090_T04",
+      "block_count": 90,
+      "distribution_type": 4,
+      "generation_seed": 19628401,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.9285714285714286,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.14285714285714285,
+        "cut_per_wo": 0.14285714285714285,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.14285714285714285
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.33273056057866185,
+        "nc_wo_ratio": 0.02531645569620253,
+        "fn_wo_ratio": 0.08860759493670886,
+        "fl_wo_ratio": 0.5533453887884268,
+        "wo_per_block": 6.144444444444445,
+        "cut_per_wo": 46.517940069894685,
+        "bevel_per_wo": 0.6383363471971067,
+        "tact_per_wo": 27.008555851544767
+      },
+      "jobs_sha256": "16b7072ba399e2e66c102dd783fdb915429a521d16e3b06a362982b6b3ca5363"
+    },
+    {
+      "problem_id": "B090_T05",
+      "block_count": 90,
+      "distribution_type": 5,
+      "generation_seed": 19942588,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.6428571428571429,
+        "nc_wo_ratio": 0.0,
+        "fn_wo_ratio": 0.07142857142857142,
+        "fl_wo_ratio": 0.7142857142857143,
+        "wo_per_block": 1.0,
+        "cut_per_wo": 0.7857142857142857,
+        "bevel_per_wo": 0.6428571428571429,
+        "tact_per_wo": 0.5
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.3723849372384937,
+        "nc_wo_ratio": 0.01394700139470014,
+        "fn_wo_ratio": 0.030683403068340307,
+        "fl_wo_ratio": 0.5829846582984658,
+        "wo_per_block": 7.966666666666667,
+        "cut_per_wo": 50.121315297557324,
+        "bevel_per_wo": 0.6499302649930265,
+        "tact_per_wo": 28.237872997207695
+      },
+      "jobs_sha256": "bc2e6e601929211b4e0c8869e58076b0e5bde1f5e15d002e4fc5f4d79f048e7d"
+    },
+    {
+      "problem_id": "B100_T01",
+      "block_count": 100,
+      "distribution_type": 1,
+      "generation_seed": 20837862,
+      "target_distribution": {
+        "np_wo_ratio": 0.9,
+        "nc_wo_ratio": 0.9,
+        "fn_wo_ratio": 0.1,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.1,
+        "cut_per_wo": 0.9,
+        "bevel_per_wo": 0.1,
+        "tact_per_wo": 0.7
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.35714285714285715,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.14285714285714285,
+        "fl_wo_ratio": 0.5714285714285714,
+        "wo_per_block": 0.35714285714285715,
+        "cut_per_wo": 0.7142857142857143,
+        "bevel_per_wo": 0.07142857142857142,
+        "tact_per_wo": 0.42857142857142855
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.32989690721649484,
+        "nc_wo_ratio": 0.039764359351988215,
+        "fn_wo_ratio": 0.044182621502209134,
+        "fl_wo_ratio": 0.5861561119293078,
+        "wo_per_block": 6.79,
+        "cut_per_wo": 50.12946070151922,
+        "bevel_per_wo": 0.5419734904270986,
+        "tact_per_wo": 28.25828160638691
+      },
+      "jobs_sha256": "400a1bf238f59c2036261f36e49c85da08df651a77f8cb80193fd642ab266520"
+    },
+    {
+      "problem_id": "B100_T02",
+      "block_count": 100,
+      "distribution_type": 2,
+      "generation_seed": 20942591,
+      "target_distribution": {
+        "np_wo_ratio": 0.3,
+        "nc_wo_ratio": 0.3,
+        "fn_wo_ratio": 0.3,
+        "fl_wo_ratio": 0.3,
+        "wo_per_block": 0.9,
+        "cut_per_wo": 0.3,
+        "bevel_per_wo": 0.3,
+        "tact_per_wo": 0.9
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 1.0,
+        "nc_wo_ratio": 0.2857142857142857,
+        "fn_wo_ratio": 0.35714285714285715,
+        "fl_wo_ratio": 0.21428571428571427,
+        "wo_per_block": 1.0,
+        "cut_per_wo": 0.5714285714285714,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.6428571428571429
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.41273885350318473,
+        "nc_wo_ratio": 0.034394904458598725,
+        "fn_wo_ratio": 0.05477707006369427,
+        "fl_wo_ratio": 0.4980891719745223,
+        "wo_per_block": 7.85,
+        "cut_per_wo": 49.71663264020481,
+        "bevel_per_wo": 0.6687898089171974,
+        "tact_per_wo": 28.656047980246235
+      },
+      "jobs_sha256": "94c16e3f41945a54fb8c58a1bbe59899a31a5dce68f1358df64f3b24d0d91c85"
+    },
+    {
+      "problem_id": "B100_T03",
+      "block_count": 100,
+      "distribution_type": 3,
+      "generation_seed": 21570965,
+      "target_distribution": {
+        "np_wo_ratio": 0.1,
+        "nc_wo_ratio": 0.7,
+        "fn_wo_ratio": 0.9,
+        "fl_wo_ratio": 0.1,
+        "wo_per_block": 0.7,
+        "cut_per_wo": 0.7,
+        "bevel_per_wo": 0.7,
+        "tact_per_wo": 0.1
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.14285714285714285,
+        "nc_wo_ratio": 0.6428571428571429,
+        "fn_wo_ratio": 0.8571428571428571,
+        "fl_wo_ratio": 0.6428571428571429,
+        "wo_per_block": 0.9285714285714286,
+        "cut_per_wo": 0.2857142857142857,
+        "bevel_per_wo": 0.21428571428571427,
+        "tact_per_wo": 0.21428571428571427
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.29473684210526313,
+        "nc_wo_ratio": 0.04342105263157895,
+        "fn_wo_ratio": 0.07236842105263158,
+        "fl_wo_ratio": 0.5894736842105263,
+        "wo_per_block": 7.6,
+        "cut_per_wo": 48.13911914641333,
+        "bevel_per_wo": 0.6,
+        "tact_per_wo": 27.737132381300675
+      },
+      "jobs_sha256": "18de449c3e607be8aca23c2d621325aae14e441a478f1c1ff1db10670200fe7b"
+    },
+    {
+      "problem_id": "B100_T04",
+      "block_count": 100,
+      "distribution_type": 4,
+      "generation_seed": 20104759,
+      "target_distribution": {
+        "np_wo_ratio": 0.7,
+        "nc_wo_ratio": 0.5,
+        "fn_wo_ratio": 0.5,
+        "fl_wo_ratio": 0.7,
+        "wo_per_block": 0.3,
+        "cut_per_wo": 0.1,
+        "bevel_per_wo": 0.5,
+        "tact_per_wo": 0.3
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.2857142857142857,
+        "nc_wo_ratio": 0.14285714285714285,
+        "fn_wo_ratio": 0.42857142857142855,
+        "fl_wo_ratio": 0.7142857142857143,
+        "wo_per_block": 0.2857142857142857,
+        "cut_per_wo": 0.21428571428571427,
+        "bevel_per_wo": 0.35714285714285715,
+        "tact_per_wo": 0.2857142857142857
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.32507739938080493,
+        "nc_wo_ratio": 0.02786377708978328,
+        "fn_wo_ratio": 0.05727554179566564,
+        "fl_wo_ratio": 0.5897832817337462,
+        "wo_per_block": 6.46,
+        "cut_per_wo": 47.53856775306648,
+        "bevel_per_wo": 0.6424148606811145,
+        "tact_per_wo": 27.826687357757315
+      },
+      "jobs_sha256": "e5443510962a02d894f91a9db8cca818934f24f4a98fd2de5109f5835a9ee27b"
+    },
+    {
+      "problem_id": "B100_T05",
+      "block_count": 100,
+      "distribution_type": 5,
+      "generation_seed": 21361507,
+      "target_distribution": {
+        "np_wo_ratio": 0.5,
+        "nc_wo_ratio": 0.1,
+        "fn_wo_ratio": 0.7,
+        "fl_wo_ratio": 0.9,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.5,
+        "bevel_per_wo": 0.9,
+        "tact_per_wo": 0.5
+      },
+      "normalized_distribution": {
+        "np_wo_ratio": 0.5714285714285714,
+        "nc_wo_ratio": 0.07142857142857142,
+        "fn_wo_ratio": 0.21428571428571427,
+        "fl_wo_ratio": 0.5,
+        "wo_per_block": 0.5,
+        "cut_per_wo": 0.14285714285714285,
+        "bevel_per_wo": 0.7857142857142857,
+        "tact_per_wo": 0.14285714285714285
+      },
+      "actual_distribution": {
+        "np_wo_ratio": 0.35581061692969873,
+        "nc_wo_ratio": 0.02295552367288379,
+        "fn_wo_ratio": 0.04447632711621234,
+        "fl_wo_ratio": 0.5767575322812052,
+        "wo_per_block": 6.97,
+        "cut_per_wo": 46.96555129116716,
+        "bevel_per_wo": 0.6872309899569584,
+        "tact_per_wo": 27.26609382722685
+      },
+      "jobs_sha256": "61e345b7b13494b6b5eed2c1c9135faff65a3fb2c4e0db9ed8ad6358ef920c6d"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+별칭        : P2-BASE
+학습 경로   : output/phase2_18merge_tempanneal_w8      (이 머신, 로컬)
+최종 episode: 20000                                     완주 여부: 예
+git commit  : 미상        dirty: 미상
+              — run_manifest 도입(2026-08-03) 이전에 시작해 code_fingerprint 없음.
+              — 절대규칙 §4.7 대체 증빙: summary.json + run.log.head/tail + checkpoint 내부 메타
+실행 CLI    : run.log.head 참조 (헤더에 전체 플래그가 찍혀 있다)
+비고        : hidden 16, blocks 10-30, T 1.0→0.3(20k), rollout 64, 휴리스틱 4종.
+              best 선택은 generalization grid(10-100 ×5 = 50문제) 기준.
+              MAIN(in-dist) 곡선은 사후 백필본 output/phase2_indist_maincurve 에 있다.

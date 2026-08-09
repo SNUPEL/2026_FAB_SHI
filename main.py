@@ -311,18 +311,27 @@ def command_phase1_train_pair_self_labeling(args: argparse.Namespace) -> None:
         ),
         validation_rollout_samples=validation_rollout_samples,
         resume_checkpoint=args.resume_checkpoint,
+        eval_only=args.eval_only,
         phase2_feedback_scorer=phase2_feedback_scorer,
         phase2_feedback_contract=phase2_feedback_contract,
         bay_capacity_weights=capacity_weights,
         device=args.device,
         objective_scope=args.objective_scope,
         write_candidate_summary=args.write_candidate_summary,
+        candidate_workers=args.candidate_workers,
         run_manifest_fields=cli_manifest_fields(
             args,
             command="phase1-train-pair-self-labeling",
             phase="phase1",
         ),
     )
+    if summary.get("eval_only"):
+        print(f"- eval_only: True")
+        print(f"- eval_episode: {summary['eval_episode']}")
+        print(f"- agent_best_rate: {summary['agent_best_rate']}")
+        print(f"- validation_summary_csv: {summary['validation_summary_csv']}")
+        print(f"- summary_json: {summary['summary_json']}")
+        return
     print(f"- checkpoint_path: {summary['checkpoint_path']}")
     print(f"- best_checkpoint_path: {summary['best_checkpoint_path']}")
     print(f"- metrics_csv: {summary['metrics_csv']}")
@@ -1410,6 +1419,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume-checkpoint",
         default="",
         help="Resume pair self-labeling from explicit checkpoint path or 'latest' in output-dir/checkpoints",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--candidate-workers",
+        type=int,
+        default=1,
+        help="Parallel processes used to generate agent rollouts per subproblem. "
+        "1 keeps the sequential path. Results are identical for any worker count "
+        "because every rollout carries an explicit seed.",
+    )
+    phase1_train_pair_self_labeling_parser.add_argument(
+        "--eval-only",
+        action="store_true",
+        help="Evaluate an already-trained checkpoint (--resume-checkpoint) on the validation set once, "
+        "with no training loop and no optimizer step (weights unchanged). Writes validation_summary.csv only; "
+        "does not save a best/final checkpoint. Use with a fixed --seed/--min-blocks/--max-blocks to compare "
+        "models on the identical validation set.",
     )
     phase1_train_pair_self_labeling_parser.add_argument(
         "--write-candidate-summary",
